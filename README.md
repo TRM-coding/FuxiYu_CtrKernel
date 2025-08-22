@@ -100,5 +100,4 @@ gunicorn 'compute_cluster_manage_web.wsgi:app' -b 0.0.0.0:8000 --workers 4
 - 使用真实密码哈希: `from werkzeug.security import generate_password_hash`
 - 增加 JWT 或 Session 认证流程
 
----
-欢迎在此基础上继续扩展你的集群管理业务逻辑。
+

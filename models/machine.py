@@ -1,0 +1,31 @@
+from ..extensions import db
+from enum import Enum
+
+
+class MachineStatus(Enum):
+    ONLINE = "online"
+    OFFLINE = "offline"
+    MAINTENANCE = "maintenance"
+
+
+class MachineTypes(Enum):
+    GPU = "GPU"
+    CPU = "CPU"
+
+
+class Machine(db.Model):
+    __tablename__ = "machines"
+
+    id: int = db.Column(db.Integer, primary_key=True)
+    machine_name: str = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    machine_ip: str = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    machine_type: MachineTypes = db.Column(db.Enum(MachineTypes), nullable=False)
+    machine_status: MachineStatus = db.Column(db.Enum(MachineStatus), nullable=False, default=MachineStatus.OFFLINE)
+
+    # 与 Container 的一对多关系（containers 表里有 machine_id 外键）
+    containers = db.relationship(
+        "Container", back_populates="machine", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"<Machine {self.machine_name} ({self.machine_type.value})>"

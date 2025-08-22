@@ -11,6 +11,7 @@ class User(db.Model, UserMixin):
 	email = db.Column(db.String(120), unique=True, nullable=False, index=True)
 	password_hash = db.Column(db.String(255), nullable=False)
 	created_at = db.Column(db.DateTime, default=datetime.utcnow)
+	graduation_year=db.Column(db.String(120),unique=False,nullable=False)
 
 	def __repr__(self) -> str:  # pragma: no cover 简单repr无需测试
 		return f"<User {self.username}>"
@@ -19,4 +20,6 @@ class User(db.Model, UserMixin):
 @login_manager.user_loader
 def load_user(user_id: str):
 	return User.query.get(int(user_id))
+
+
 

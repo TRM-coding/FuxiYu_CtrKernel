@@ -1,5 +1,5 @@
 from flask import Blueprint, jsonify, request
-from ..services import service1
+from ..services import user_service
 from ..repositories import user_repo
 from ..schemas.user_schema import user_schema, users_schema
 
@@ -21,7 +21,7 @@ def create_user():
 	password = data.get("password", "123456")
 	if not username or not email:
 		return {"message": "username and email required"}, 400
-	user = service1.register_user(username, email, password)
+	user = user_service.register_user(username, email, password)
 	return user_schema.dump(user), 201
 
 
