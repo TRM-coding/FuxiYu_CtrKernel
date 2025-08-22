@@ -1,0 +1,6 @@
+Flask>=2.3.0
+Flask-SQLAlchemy>=3.0.0
+Flask-Migrate>=4.0.0
+Flask-Caching>=2.0.0
+Flask-Login>=0.6.3
+marshmallow>=3.19.0
