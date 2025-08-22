@@ -1,16 +1,5 @@
 from ..extensions import db
-from enum import Enum
-
-
-class MachineStatus(Enum):
-    ONLINE = "online"
-    OFFLINE = "offline"
-    MAINTENANCE = "maintenance"
-
-
-class MachineTypes(Enum):
-    GPU = "GPU"
-    CPU = "CPU"
+from ..constant import *
 
 
 class Machine(db.Model):
@@ -20,7 +9,7 @@ class Machine(db.Model):
     machine_name: str = db.Column(db.String(120), unique=True, nullable=False, index=True)
     machine_ip: str = db.Column(db.String(120), unique=True, nullable=False, index=True)
     machine_type: MachineTypes = db.Column(db.Enum(MachineTypes), nullable=False)
-    machine_status: MachineStatus = db.Column(db.Enum(MachineStatus), nullable=False, default=MachineStatus.OFFLINE)
+    machine_status: MachineStatus = db.Column(db.Enum(MachineStatus), nullable=False, default=MachineStatus.MAINTENANCE)
 
     # 与 Container 的一对多关系（containers 表里有 machine_id 外键）
     containers = db.relationship(

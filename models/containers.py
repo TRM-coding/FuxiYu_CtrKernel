@@ -1,6 +1,7 @@
 from ..extensions import db
+from ..constant import *
 
-#TODO: 完成container和User的拥有关系构建
+
 
 class Container(db.Model):
     __tablename__ = "containers"
@@ -12,9 +13,16 @@ class Container(db.Model):
     machine_id: int = db.Column(
         db.Integer, db.ForeignKey("machines.id", ondelete="CASCADE"), nullable=False, index=True
     )
-
     # 关系：指向 Machine
     machine = db.relationship("Machine", back_populates="containers")
+
+    container_status: ContainerStatus = db.Column(db.Enum(ContainerStatus), nullable=False, default=ContainerStatus.MAINTENANCE)
+
+    users = db.relationship(
+        "User",
+        secondary="user_containers",
+        back_populates="containers",
+    )
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<Container {self.name} on machine={self.machine_id}>"
