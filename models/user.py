@@ -2,15 +2,6 @@ from datetime import datetime
 from ..extensions import db, login_manager
 from flask_login import UserMixin
 
-# 用户-容器多对多关联表
-user_containers = db.Table(
-	"user_containers",
-	db.Column("user_id", db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
-	db.Column(
-		"container_id", db.Integer, db.ForeignKey("containers.id", ondelete="CASCADE"), primary_key=True
-	),
-	db.UniqueConstraint("user_id", "container_id", name="uq_user_container"),
-)
 
 
 class User(db.Model, UserMixin):

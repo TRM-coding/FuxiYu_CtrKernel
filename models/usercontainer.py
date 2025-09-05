@@ -1,10 +1,8 @@
 from ..extensions import db
 import datetime as dt
-from enum import Enum
+from ..constant import *
 
-class ROLE(Enum):
-    ADMIN="admin"
-    COLLABORATOR="collaborator"
+
     
 
 class UserContainer(db.Model):
@@ -13,6 +11,9 @@ class UserContainer(db.Model):
     container_id = db.Column(db.Integer, db.ForeignKey("containers.id", ondelete="CASCADE"), primary_key=True)
     role = db.Column(db.Enum(ROLE), nullable=False)
     granted_at = db.Column(db.DateTime, default=dt.datetime.utcnow, nullable=False)
+    # 额外属性列：用户在该容器中的公钥与登录用户名
+    public_key=db.Column("public_key", db.String(500), nullable=True),
+    username=db.Column("username", db.String(120), nullable=True),
 
     user = db.relationship("User", back_populates="user_container_links")
     container = db.relationship("Container", back_populates="user_container_links")

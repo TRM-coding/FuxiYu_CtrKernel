@@ -16,3 +16,7 @@ class ContainerStatus(Enum):
     OFFLINE = "offline"
     MAINTENANCE = "maintenance"
 
+
+class ROLE(Enum):
+    ADMIN="admin"
+    COLLABORATOR="collaborator"
