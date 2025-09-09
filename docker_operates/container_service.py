@@ -1,6 +1,42 @@
+#TODO:完成实现
+
 from ..repositories import containers_repo
 from ..constant import *
 from typing import TypedDict
+from config import KeyConfig
+from ..utils.load_keys import load_keys
+import requests
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
+
+
+#Load Public And Private Keys
+####################################################
+PRIVATE_KEY_A,PUBLIC_KEY_A=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH)
+
+def encryption(message:str,public_key_B:RSAPublicKey)->bytes:
+    ciphertext = public_key_B.encrypt(
+        message,
+        padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None)
+    )
+    return ciphertext
+
+def signature(message:str)->bytes:
+    signature = PRIVATE_KEY_A.sign(
+        message,
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH),
+        hashes.SHA256()
+    )
+    return signature
+
+####################################################
+
+
+
 
 #Type Definition
 ####################################################
@@ -24,7 +60,8 @@ class container_detail_information(TypedDict):
 ####################################################
 
 # 将user_id作为admin，创建新容器
-def create_container(user_id:int,machine_id:int)->bool:
+def create_container(user_name:str,machine_ip:str)->bool:
+    
     raise NotImplementedError
 
 #删除容器并删除其所有者记录

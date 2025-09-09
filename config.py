@@ -6,38 +6,12 @@
 import os
 
 
-class BaseConfig:
-	SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key")
-	SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL", "sqlite:///app.db")
-	SQLALCHEMY_TRACK_MODIFICATIONS = False
-	JSON_SORT_KEYS = False
-	# 缓存: 默认使用简单内存缓存，可根据需要改成Redis等
-	CACHE_TYPE = os.getenv("CACHE_TYPE", "SimpleCache")
-	CACHE_DEFAULT_TIMEOUT = 300
+class SqlConfig:
+    SQLNAME='CLUSTER'
+
+class KeyConfig:
+    PUBLIC_KEY_PATH='public_A.pem'
+    PRIVATE_KEY_PATH='private_A.pem'
 
 
-class DevelopmentConfig(BaseConfig):
-	DEBUG = True
-
-
-class ProductionConfig(BaseConfig):
-	DEBUG = False
-
-
-class TestingConfig(BaseConfig):
-	TESTING = True
-	SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
-
-
-config_map = {
-	"development": DevelopmentConfig,
-	"production": ProductionConfig,
-	"testing": TestingConfig,
-}
-
-
-def get_config(name: str | None):
-	if not name:
-		return DevelopmentConfig
-	return config_map.get(name, DevelopmentConfig)
 
