@@ -1,14 +1,15 @@
 """User-Container 关联仓储
 封装用户与容器之间的多对多显式操作，便于未来扩展（如角色/授权时间）。
 """
-from typing import Sequence, TypedDict, Any
+from typing import Sequence, Any
+from pydantic import BaseModel
 from ..extensions import db
 from ..models.user import User
 from ..models.containers import Container
 from ..models.usercontainer import UserContainer as user_containers
 
 
-class BindingRow(TypedDict, total=False):
+class BindingRow(BaseModel, total=False):
     user_id: int
     container_id: int
     public_key: str | None

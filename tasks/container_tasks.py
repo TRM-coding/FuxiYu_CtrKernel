@@ -2,17 +2,17 @@
 
 from ..repositories import containers_repo
 from ..constant import *
-from typing import TypedDict
+from pydantic import BaseModel
 
 #Type Definition
 ####################################################
-class container_bref_information(TypedDict):
+class container_bref_information(BaseModel):
     container_name:str
     container_image:str
     machine_ip:str
     container_status:str
 
-class container_detail_information(TypedDict):
+class container_detail_information(BaseModel):
     container_name:str
     container_image:str
     user_id: int

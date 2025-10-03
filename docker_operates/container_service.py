@@ -1,10 +1,12 @@
-#TODO:完成实现
+#TODO:继续完成实现
 
 from ..repositories import containers_repo
 from ..constant import *
-from typing import TypedDict
+from pydantic import BaseModel
 from config import KeyConfig
 from ..utils.load_keys import load_keys
+from ..utils.docker_commands import Container
+from ..repositories import containers_repo
 import requests
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
@@ -14,7 +16,28 @@ from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPubl
 #Load Public And Private Keys
 ####################################################
 PRIVATE_KEY_A,PUBLIC_KEY_A=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH)
+####################################################
 
+####################################################
+#控制指令格式：
+'''
+{
+    "type":['create'|'delete'|'shutdown'|'restart'|'update'],#选一个
+    "config":
+    {
+        "gpu_list":[0,1,2,...],
+        "cpu_number":20,
+        "memory":16,#GB
+        "user_name":'example',
+    }
+}
+'''
+####################################################
+
+
+
+####################################################
+#加密控制指令
 def encryption(message:str,public_key_B:RSAPublicKey)->bytes:
     ciphertext = public_key_B.encrypt(
         message,
@@ -24,6 +47,7 @@ def encryption(message:str,public_key_B:RSAPublicKey)->bytes:
     )
     return ciphertext
 
+#生成控制指令签名
 def signature(message:str)->bytes:
     signature = PRIVATE_KEY_A.sign(
         message,
@@ -33,6 +57,13 @@ def signature(message:str)->bytes:
     )
     return signature
 
+#发送指令到集群实体机
+def send(ciphertext:bytes,signature:bytes,mechine_ip:str):
+    requests.post(mechine_ip, json={
+            "ciphertext": ciphertext.hex(),
+            "signature": signature.hex()
+    })
+
 ####################################################
 
 
@@ -40,13 +71,13 @@ def signature(message:str)->bytes:
 
 #Type Definition
 ####################################################
-class container_bref_information(TypedDict):
+class container_bref_information(BaseModel):
     container_name:str
     container_image:str
     machine_ip:str
     container_status:str
 
-class container_detail_information(TypedDict):
+class container_detail_information(BaseModel):
     container_name:str
     container_image:str
     user_id: int
@@ -60,8 +91,8 @@ class container_detail_information(TypedDict):
 ####################################################
 
 # 将user_id作为admin，创建新容器
-def create_container(user_name:str,machine_ip:str)->bool:
-    
+def create_container(user_name:str,machine_ip:str,container:Container)->bool:
+    container_info=container.tostr()
     raise NotImplementedError
 
 #删除容器并删除其所有者记录
