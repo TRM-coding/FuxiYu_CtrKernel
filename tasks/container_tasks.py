@@ -1,8 +1,73 @@
-#TODO:完成实现
+#TODO:继续完成实现
 
 from ..repositories import containers_repo
 from ..constant import *
 from pydantic import BaseModel
+from config import KeyConfig
+from ..utils.load_keys import load_keys
+from ..utils.docker_commands import Container
+from ..repositories import containers_repo
+import requests
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
+
+
+#Load Public And Private Keys
+####################################################
+PRIVATE_KEY_A,PUBLIC_KEY_A=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH)
+####################################################
+
+####################################################
+#控制指令格式：
+'''
+{
+    "type":['create'|'delete'|'shutdown'|'restart'|'update'],#选一个
+    "config":
+    {
+        "gpu_list":[0,1,2,...],
+        "cpu_number":20,
+        "memory":16,#GB
+        "user_name":'example',
+    }
+}
+'''
+####################################################
+
+
+
+####################################################
+#加密控制指令
+def encryption(message:str,public_key_B:RSAPublicKey)->bytes:
+    ciphertext = public_key_B.encrypt(
+        message,
+        padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None)
+    )
+    return ciphertext
+
+#生成控制指令签名
+def signature(message:str)->bytes:
+    signature = PRIVATE_KEY_A.sign(
+        message,
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH),
+        hashes.SHA256()
+    )
+    return signature
+
+#发送指令到集群实体机
+def send(ciphertext:bytes,signature:bytes,mechine_ip:str):
+    requests.post(mechine_ip, json={
+            "ciphertext": ciphertext.hex(),
+            "signature": signature.hex()
+    })
+
+####################################################
+
+
+
 
 #Type Definition
 ####################################################
@@ -25,8 +90,9 @@ class container_detail_information(BaseModel):
 #Function Implementation
 ####################################################
 
-# 将user_id作为admin，在machine_id中创建新容器,容器登录用户名与user_id对应用户名相同
-def create_container(user_id:int,machine_id:int)->bool:
+# 将user_id作为admin，创建新容器
+def create_container(user_name:str,machine_ip:str,container:Container)->bool:
+    container_info=container.tostr()
     raise NotImplementedError
 
 #删除容器并删除其所有者记录
