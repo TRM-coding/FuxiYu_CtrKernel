@@ -22,6 +22,7 @@ PRIVATE_KEY_A,PUBLIC_KEY_A=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC
 #控制指令格式：
 '''
 {
+
     "type":['create'|'delete'|'shutdown'|'restart'|'update'],#选一个
     "config":
     {
@@ -60,7 +61,7 @@ def signature(message:str)->bytes:
 #发送指令到集群实体机
 def send(ciphertext:bytes,signature:bytes,mechine_ip:str):
     requests.post(mechine_ip, json={
-            "ciphertext": ciphertext.hex(),
+            "message": ciphertext.hex(),
             "signature": signature.hex()
     })
 
