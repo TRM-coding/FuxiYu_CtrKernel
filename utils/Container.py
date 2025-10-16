@@ -7,13 +7,15 @@ class Container:
         memory:int
         user_name:str
         port:int
+        image:str
     #gpu_list:显卡编号，cpu_number:需要用到的cpu核数，memory:申请的内存大小（GB）
-    def __init__(self,gpu_list:list,cpu_number:int,memory:int,user_name:str,port:int=0):
+    def __init__(self,gpu_list:list,cpu_number:int,memory:int,user_name:str,image:str,port:int=0):
         self.GPU_LIST=gpu_list
         self.CPU_NUMBER=cpu_number
         self.MEMORY=memory
         self.USER_NAME=user_name
-        self.PORT=port
+        self.__PORT=port
+        self.image=image
         return
     
     def set_port(self,port:int):
@@ -21,15 +23,22 @@ class Container:
             raise TypeError
         if port>49151 or port<1024:
             raise ValueError
-        self.PORT=port
+        self.__PORT=port
     
-    def tostr(self):
+    def get_config(self)->Config_info:
         res : Container.Config_info ={
             "gpu_list":self.GPU_LIST,
             "cpu_number":self.CPU_NUMBER,
             "memory":self.MEMORY,
             "user_name":self.USER_NAME,
-            "port":self.PORT
+            "port":self.__PORT,
+            "image":self.image
         }
-        return json.dumps(res)
+        return res
+    
+    @classmethod
+    def toContainer(cls,config:str)->Config_info:
+        data=json.loads(config)
+        cfg=Container.Config_info(**data)
+        return cfg
     
