@@ -20,3 +20,4 @@ class ContainerStatus(Enum):
 class ROLE(Enum):
     ADMIN="admin"
     COLLABORATOR="collaborator"
+    ROOT="root"

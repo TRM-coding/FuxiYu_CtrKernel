@@ -7,13 +7,15 @@ from ..extensions import db
 from ..models.user import User
 from ..models.containers import Container
 from ..models.usercontainer import UserContainer as user_containers
+from ..constant import ROLE
 
 
 class BindingRow(BaseModel, total=False):
     user_id: int
+    username: str | None
     container_id: int
     public_key: str | None
-    username: str | None
+    role:ROLE
 
 
 def get_binding(user_id: int, container_id: int) -> BindingRow | None:
@@ -35,12 +37,58 @@ def get_binding(user_id: int, container_id: int) -> BindingRow | None:
         "container_id": row.container_id,
         "public_key": row.public_key,
         "username": row.username,
+        "role":row.role,
     }
+
+def get_user_bindings(user_id:int)->Sequence[BindingRow]:
+    rows = db.session.execute(
+        db.select(
+            user_containers.c.user_id,
+            user_containers.c.container_id,
+            user_containers.c.public_key,
+            user_containers.c.username,
+        ).where(
+            user_containers.c.user_id == user_id,
+        )
+    ).all()
+    bindings=[]
+    for row in rows:
+        bindings.append({
+            "user_id": row.user_id,
+            "container_id": row.container_id,
+            "public_key": row.public_key,
+            "username": row.username,
+            "role":row.role,
+        })
+    return bindings
+
+def get_container_bindings(container_id:int)->Sequence[BindingRow]:
+    rows = db.session.execute(
+        db.select(
+            user_containers.c.user_id,
+            user_containers.c.container_id,
+            user_containers.c.public_key,
+            user_containers.c.username,
+        ).where(
+            user_containers.c.container_id == container_id,
+        )
+    ).all()
+    bindings=[]
+    for row in rows:
+        bindings.append({
+            "user_id": row.user_id,
+            "container_id": row.container_id,
+            "public_key": row.public_key,
+            "username": row.username,
+            "role":row.role,
+        })
+    return bindings
 
 
 def add_binding(
     user_id: int,
     container_id: int,
+    role:ROLE,
     *,
     public_key: str | None = None,
     username: str | None = None,
@@ -63,7 +111,7 @@ def add_binding(
                 commit=commit,
             )
         return True
-    insert_values: dict[str, Any] = {"user_id": user_id, "container_id": container_id}
+    insert_values: dict[str, Any] = {"user_id": user_id, "container_id": container_id, "role":role.value}
     if public_key is not None:
         insert_values["public_key"] = public_key
     if username is not None:
@@ -74,13 +122,19 @@ def add_binding(
     return True
 
 
-def remove_binding(user_id: int, container_id: int, commit: bool = True) -> bool:
+def remove_binding(user_id: int, container_id: int, commit: bool = True,all=False) -> bool:
     result = db.session.execute(
         user_containers.delete().where(
             user_containers.c.user_id == user_id,
             user_containers.c.container_id == container_id,
         )
     )
+    if all:
+        result = db.session.execute(
+            user_containers.delete().where(
+                user_containers.c.container_id == container_id,
+            )
+        )
     if commit:
         db.session.commit()
     return result.rowcount > 0
@@ -113,6 +167,7 @@ def update_binding(
     public_key: str | None = None,
     username: str | None = None,
     commit: bool = True,
+    role:ROLE|None=None,
     **_extra,
 ) -> bool:
     """部分更新绑定字段，遵循统一 update 模式 (白名单 + 仅变更写入)。"""
@@ -120,9 +175,9 @@ def update_binding(
     if not binding:
         return False
 
-    allowed = {"public_key", "username"}
+    allowed = {"public_key", "username","role"}
     # 构造候选字段
-    candidates = {"public_key": public_key, "username": username}
+    candidates = {"public_key": public_key, "username": username,"role":role}
     update_data: dict[str, Any] = {}
     for k, v in candidates.items():
         if k not in allowed or v is None:

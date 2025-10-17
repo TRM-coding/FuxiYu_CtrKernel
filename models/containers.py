@@ -17,6 +17,8 @@ class Container(db.Model):
     machine = db.relationship("Machine", back_populates="containers")
 
     container_status: ContainerStatus = db.Column(db.Enum(ContainerStatus), nullable=False, default=ContainerStatus.MAINTENANCE)
+    
+    port: int = db.Column(db.Integer, nullable=False, index=True)
 
     users = db.relationship(
         "User",

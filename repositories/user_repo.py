@@ -10,6 +10,12 @@ from ..models.user import User
 def get_by_id(user_id: int) -> User | None:
 	return User.query.get(user_id)
 
+def get_name_by_id(user_id:int)->str|None:
+    user=User.query.get(user_id)
+    if user:
+        return user.username
+    return None
+
 
 def get_by_name(username: str) -> User | None:
 	return User.query.filter_by(username=username).first()
@@ -55,6 +61,7 @@ def update_user(user_id: int, *, commit: bool = True, **fields) -> User | None:
        
        db.session.commit()
     return user
+
 
 
 def delete_user(user_id: int) -> bool:

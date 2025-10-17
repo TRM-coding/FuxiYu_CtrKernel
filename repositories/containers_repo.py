@@ -3,6 +3,7 @@ from typing import Sequence
 from ..extensions import db
 from ..models.containers import Container
 from ..models.user import User
+from ..constant import ROLE
 
 
 def get_by_id(container_id: int) -> Container | None:
@@ -16,8 +17,8 @@ def list_containers(limit: int = 50, offset: int = 0, machine_id: int | None = N
 	return q.order_by(Container.id).offset(offset).limit(limit).all()
 
 
-def create_container(name: str, image: str, machine_id: int, status=None) -> Container:
-	container = Container(name=name, image=image, machine_id=machine_id)
+def create_container(name: str, image: str, machine_id: int, port:int,status=None) -> Container:
+	container = Container(name=name, image=image, machine_id=machine_id, port=port)
 	if status is not None:
 		container.container_status = status
 	db.session.add(container)
@@ -83,7 +84,7 @@ def detach_user(container_id: int, user_id: int, commit: bool = True) -> bool:
 	return True
 
 
-def list_users(container_id: int) -> Sequence[User]:
+def list_users_in_container(container_id: int) -> Sequence[User]:
 	container = get_by_id(container_id)
 	if not container:
 		return []

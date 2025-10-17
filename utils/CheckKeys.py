@@ -58,7 +58,7 @@ def encryption(message:str,public_key_B:RSAPublicKey)->bytes:
 
 #签名信息
 def signature(message:str)->bytes:
-    PRIVATE_KEY_A,PUBLIC_KEY_A,_=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH,KeyConfig.PUBLIC_KEY_CONTROL)
+    PRIVATE_KEY_A,_,_=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH,KeyConfig.PUBLIC_KEY_CONTROL)
     signature = PRIVATE_KEY_A.sign(
         message,
         padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
@@ -69,7 +69,7 @@ def signature(message:str)->bytes:
 
 #解密信息
 def decryption(ciphertext:bytes)->bytes:
-    PRIVATE_KEY_A,PUBLIC_KEY_A,_=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH,KeyConfig.PUBLIC_KEY_CONTROL)
+    PRIVATE_KEY_A,_,_=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH,KeyConfig.PUBLIC_KEY_CONTROL)
     plaintext = PRIVATE_KEY_A.decrypt(
         ciphertext,
         padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),
