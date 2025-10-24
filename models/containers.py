@@ -24,12 +24,14 @@ class Container(db.Model):
         "User",
         secondary="user_container",
         back_populates="containers",
+        overlaps="user_container_links"  # 添加此参数
     )
 
     user_container_links = db.relationship(
         "UserContainer",
         back_populates="container",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
+        overlaps="containers,users"  # 添加此参数
     )
 
     def __repr__(self) -> str:  # pragma: no cover
