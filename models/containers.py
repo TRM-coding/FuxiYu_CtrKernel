@@ -22,8 +22,14 @@ class Container(db.Model):
 
     users = db.relationship(
         "User",
-        secondary="user_containers",
+        secondary="user_container",
         back_populates="containers",
+    )
+
+    user_container_links = db.relationship(
+        "UserContainer",
+        back_populates="container",
+        cascade="all, delete-orphan"
     )
 
     def __repr__(self) -> str:  # pragma: no cover

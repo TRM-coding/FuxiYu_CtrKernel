@@ -16,10 +16,16 @@ class User(db.Model, UserMixin):
 
 	containers = db.relationship(
 		"Container",
-		secondary="user_containers",
+		secondary="user_container",
 		back_populates="users",
 		lazy="dynamic",  # 如果想直接 .all()；不需要可改为 selectin
 	)
+
+	user_container_links = db.relationship(
+        "UserContainer",
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
 
 	def __repr__(self) -> str:  # pragma: no cover 简单repr无需测试
 		return f"<User {self.username}>"

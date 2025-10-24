@@ -1,7 +1,7 @@
 #限制：注册用户名必须是英文
-from models.user import User
+from ..models.user import User
 from werkzeug.security import check_password_hash, generate_password_hash
-from extensions import db
+from ..extensions import db
 from ..repositories.user_repo import *
 
 #####################################
@@ -17,7 +17,7 @@ def Login(username: str, password: str) -> bool:
 
 #####################################
 #注册
-def Register(username: str, email: str, password_hash: str, graduation_year) -> User | None:
+def Register(username: str, email: str, password: str, graduation_year) -> User | None:
     # 检查用户名或邮箱是否已存在
     if User.query.filter((User.username == username) | (User.email == email)).first():
         return None  # 用户名或邮箱已存在，注册失败
@@ -26,7 +26,7 @@ def Register(username: str, email: str, password_hash: str, graduation_year) -> 
     new_user = User(
         username=username,
         email=email,
-        password_hash=password_hash,
+        password_hash=generate_password_hash(password),
         graduation_year=graduation_year
     )
     db.session.add(new_user)
