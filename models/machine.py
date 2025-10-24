@@ -1,7 +1,6 @@
 from ..extensions import db
 from ..constant import *
 
-
 class Machine(db.Model):
     __tablename__ = "machines"
 
