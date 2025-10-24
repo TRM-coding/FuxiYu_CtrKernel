@@ -1,5 +1,5 @@
 from flask import Blueprint, jsonify, request
-from ..docker_operates import user_service
+from ..services import user_tasks as user_service
 from ..repositories import user_repo
 from ..schemas.user_schema import user_schema, users_schema
 

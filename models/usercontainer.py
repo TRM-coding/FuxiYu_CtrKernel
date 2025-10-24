@@ -15,5 +15,14 @@ class UserContainer(db.Model):
     public_key=db.Column("public_key", db.String(500), nullable=True)
     username=db.Column("username", db.String(120), primary_key=True)
 
-    user = db.relationship("User", back_populates="user_container_links")
-    container = db.relationship("Container", back_populates="user_container_links")
+    user = db.relationship(
+        "User",
+        back_populates="user_container_links",
+        overlaps="containers,users"  # 添加此参数
+    )
+    
+    container = db.relationship(
+        "Container",
+        back_populates="user_container_links",
+        overlaps="containers,users"  # 添加此参数
+    )
