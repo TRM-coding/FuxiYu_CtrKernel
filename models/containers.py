@@ -2,7 +2,6 @@ from ..extensions import db
 from ..constant import *
 
 
-
 class Container(db.Model):
     __tablename__ = "containers"
 
