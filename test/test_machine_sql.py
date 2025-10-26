@@ -81,3 +81,65 @@ def test_Add_machine():
             db.session.delete(target)
             db.session.commit()
 ##################################
+
+
+##################################
+#机器删除单元测试
+def test_Remove_machine():
+    import uuid
+    import random
+    # 1) 先创建几个测试机器
+    machine_ids = []
+    test_machines = []
+    
+    try:
+        # 创建2个测试机器
+        for i in range(2):
+            machine_name = f"test_machine_{uuid.uuid4().hex[:8]}"
+            machine_ip = f"192.168.{random.randint(1, 255)}.{random.randint(1, 255)}"
+            machine_type = random.choice(list(MachineTypes))
+            
+            machine = Machine(
+                machine_name=machine_name,
+                machine_ip=machine_ip,
+                machine_type=machine_type,
+                machine_status=MachineStatus.MAINTENANCE,
+                cpu_core_number=random.randint(1, 16),
+                gpu_number=random.randint(0, 4),
+                gpu_type=f"GPU_{random.randint(1000, 5000)}",
+                memory_size_gb=random.randint(4, 128),
+                disk_size_gb=random.randint(100, 2000),
+                machine_description=f"Test machine for deletion {i+1}"
+            )
+            
+            db.session.add(machine)
+            db.session.commit()
+            
+            machine_ids.append(machine.id)
+            test_machines.append(machine)
+        
+        # 验证机器已成功创建
+        for machine_id in machine_ids:
+            machine = Machine.query.get(machine_id)
+            assert machine is not None, f"机器 {machine_id} 应该存在于数据库中"
+        
+        # 2) 调用 Remove_machine 执行删除
+        result = Remove_machine(machine_ids)
+        
+        # 检查函数返回结果
+        assert result is True, "Remove_machine 应该返回 True"
+        
+        # 3) 验证机器已被删除
+        for machine_id in machine_ids:
+            machine = Machine.query.get(machine_id)
+            assert machine is None, f"机器 {machine_id} 应该已被删除"
+            
+    finally:
+        # 4) 清理：确保测试数据被删除（以防测试失败时残留）
+        for machine in test_machines:
+            # 重新查询确保机器仍然存在（可能已被删除）
+            existing_machine = Machine.query.get(machine.id)
+            if existing_machine:
+                db.session.delete(existing_machine)
+        db.session.commit()
+##################################
