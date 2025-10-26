@@ -1,7 +1,7 @@
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
 from cryptography.hazmat.primitives.asymmetric import rsa
-from config import KeyConfig
+from ..config import KeyConfig
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
 import json
@@ -58,9 +58,11 @@ def encryption(message:str,public_key_B:RSAPublicKey)->bytes:
 
 #签名信息
 def signature(message:str)->bytes:
-    PRIVATE_KEY_A,_,_=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH,KeyConfig.PUBLIC_KEY_CONTROL)
+    PRIVATE_KEY_A,_,_=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH)
+    # 将字符串编码为 bytes
+    message_bytes = message.encode('utf-8') if isinstance(message, str) else message
     signature = PRIVATE_KEY_A.sign(
-        message,
+        message_bytes,
         padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
                     salt_length=padding.PSS.MAX_LENGTH),
         hashes.SHA256()
@@ -69,7 +71,7 @@ def signature(message:str)->bytes:
 
 #解密信息
 def decryption(ciphertext:bytes)->bytes:
-    PRIVATE_KEY_A,_,_=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH,KeyConfig.PUBLIC_KEY_CONTROL)
+    PRIVATE_KEY_A,_,_=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH)
     plaintext = PRIVATE_KEY_A.decrypt(
         ciphertext,
         padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),
@@ -80,7 +82,7 @@ def decryption(ciphertext:bytes)->bytes:
 
 #验证签名
 def verify_signature(message:bytes, signature:bytes)->bool:
-    _,_,public_key_B=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH,KeyConfig.PUBLIC_KEY_CONTROL)
+    _,_,public_key_B=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH)
     try:
         public_key_B.verify(
             signature,
