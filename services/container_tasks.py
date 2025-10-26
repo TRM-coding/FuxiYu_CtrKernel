@@ -6,13 +6,13 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
 from pydantic import BaseModel
 
-from config import KeyConfig
+from ..config import KeyConfig
 from ..constant import *
 from ..repositories import containers_repo, machine_repo
 from ..repositories.machine_repo import *
 from ..repositories.user_repo import *
 from ..utils.CheckKeys import *
-from ..utils.Container import Container
+from ..utils.Container import Container_info
 from ..repositories.containers_repo import *
 from ..repositories.usercontainer_repo import *
 
@@ -70,7 +70,7 @@ class container_detail_information(BaseModel):
 ####################################################
 
 # 将user_id作为admin，创建新容器
-def Create_container(user_name:str,machine_ip:str,container:Container,public_key=None)->bool:
+def Create_container(user_name:str,machine_ip:str,container:Container_info,public_key=None)->bool:
     machine_id=get_id_by_ip(machine_ip=machine_ip)
     free_port = get_the_first_free_port(machine_id=machine_id)
     container.set_port(free_port)
@@ -79,7 +79,7 @@ def Create_container(user_name:str,machine_ip:str,container:Container,public_key
     container_info=json.dumps(container_info)
     signatured_message=signature(container_info)
     encryptioned_message=signature(container_info)
-    res=send(encryptioned_message,signatured_message,machine_ip)
+    # res=send(encryptioned_message,signatured_message,machine_ip)
     create_container(name=container.name,
                      image=container.image,
                      machine_id=machine_id,

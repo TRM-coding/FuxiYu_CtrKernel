@@ -9,6 +9,7 @@ class MachineStatus(Enum):
 class MachineTypes(Enum):
     GPU = "GPU"
     CPU = "CPU"
+    PHYSICAL = "PHYSICAL"  # 新增：兼容数据库中已有的 'PHYSICAL' 值
 
 
 class ContainerStatus(Enum):

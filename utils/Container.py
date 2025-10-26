@@ -1,6 +1,6 @@
 import json
 from pydantic import BaseModel
-class Container:
+class Container_info:
     class Config_info(BaseModel):
         gpu_list:list
         cpu_number:int
@@ -26,7 +26,7 @@ class Container:
         self.__PORT=port
     
     def get_config(self)->Config_info:
-        res : Container.Config_info ={
+        res : Container_info.Config_info ={
             "gpu_list":self.GPU_LIST,
             "cpu_number":self.CPU_NUMBER,
             "memory":self.MEMORY,
@@ -39,6 +39,6 @@ class Container:
     @classmethod
     def toContainer(cls,config:str)->Config_info:
         data=json.loads(config)
-        cfg=Container.Config_info(**data)
+        cfg=Container_info.Config_info(**data)
         return cfg
     
