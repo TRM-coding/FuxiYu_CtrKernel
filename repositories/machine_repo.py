@@ -81,7 +81,7 @@ def update_machine(machine_id: int, *, commit: bool = True, **fields) -> bool:
     if not machine:
         return None
 
-    allowed = {"machine_name", "machine_ip", "machine_type", "machine_status"," cpu_core_number",
+    allowed = {"machine_name", "machine_ip", "machine_type", "machine_status","cpu_core_number",
                "memory_size_gb","gpu_number","gpu_type","disk_size_gb","machine_description"}
     dirty = False
     for k, v in fields.items():
