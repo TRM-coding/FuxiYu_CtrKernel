@@ -25,18 +25,18 @@ class machine_detail_information(BaseModel):
 
 #######################################
 # 添加一个新的机器到集群
-def Add_machine(machinename:str,
-                   machineip:str,
+def Add_machine(machine_name:str,
+                   machine_ip:str,
                    machine_type:MachineTypes,
                    machine_description:str,
                    cpu_core_number:int,
                    gpu_number:int,
-                   gpu_type:int,
+                   gpu_type:str,
                    memory_size:int,
-                   disk_size:int)->Machine:
+                   disk_size:int)->bool:
     create_machine(
-         machinename=machinename,
-         machineip=machineip,
+         machinename=machine_name,
+         machineip=machine_ip,
          machine_type=machine_type,
          machine_description=machine_description,
          cpu_core_number=cpu_core_number,
