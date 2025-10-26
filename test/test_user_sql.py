@@ -164,6 +164,65 @@ def test_Change_password():
 ##################################
 
 ##################################
+#注销用户验证单元测试
+
+def test_Delete_user():
+    import uuid
+    import random
+    from ..services.user_tasks import Delete_user  # 导入注销用户函数
+    from ..models.user import User
+
+    # 随机化输入数据
+    username = f"du_{uuid.uuid4().hex[:8]}"
+    email = f"{username}@example.com"
+    password = f"P@ss_{uuid.uuid4().hex[:6]}"
+    graduation_year = str(random.randint(2020, 2030))
+
+    # 注册用户
+    user = Register(username, email, password, graduation_year)
+    if user is None:
+        pytest.skip("随机用户名或邮箱冲突，跳过测试")
+
+    try:
+        # 获取用户ID
+        user_id = user.id
+        
+        # 验证用户确实存在于数据库中
+        user_before = db.session.get(User, user_id)
+        assert user_before is not None, "删除前用户应该存在于数据库中"
+        assert user_before.username == username, "用户名应该匹配"
+        
+        # 调用注销用户函数
+        result = Delete_user(user_id)
+        
+        # 验证函数返回True
+        assert result is True, "注销用户函数应该返回True"
+        
+        # 验证用户已从数据库中删除
+        user_after = db.session.get(User, user_id)
+        assert user_after is None, "注销后用户应该从数据库中删除"
+        
+        # 验证用户无法再登录
+        login_result = Login(username, password)
+        assert login_result is False, "注销后用户应该无法登录"
+        
+    except Exception as e:
+        # 如果测试过程中出现异常，确保清理
+        db.session.rollback()
+        # 重新查询用户并删除（如果还存在）
+        existing_user = User.query.filter_by(username=username).first()
+        if existing_user:
+            db.session.delete(existing_user)
+            db.session.commit()
+        raise e
+    finally:
+        # 额外清理：确保测试用户完全删除
+        # 这里不需要再删除，因为测试中已经删除了用户
+        # 但为了安全，再次检查并清理
+        existing_user = User.query.filter_by(username=username).first()
+        if existing_user:
+            db.session.delete(existing_user)
+            db.session.commit()
 ##################################
 
 ##################################
