@@ -48,8 +48,8 @@ def create_machine(machinename:str,
                    memory_size:int,
                    disk_size:int)->bool:
     machine=Machine(
-         machinename=machinename,
-         machineip=machineip,
+         machine_name=machinename,
+         machine_ip=machineip,
          machine_type=machine_type,
          machine_description=machine_description,
          cpu_core_number=cpu_core_number,
