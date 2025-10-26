@@ -91,7 +91,7 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
 
 #######################################
 # 获取一批机器的概要信息
-def List_all_machine_bref_information(page_number:int, page_size:int)->list[machine_bref_information]:
+def List_all_machine_brief_information(page_number:int, page_size:int)->list[machine_bref_information]:
     machines = list_machines(limit=page_size, offset=page_number*page_size)
     res = []
     for machine in machines:

@@ -1,6 +1,6 @@
 #machine_tasks.py 单元测试
 import pytest
-from ..services.machine_tasks import Add_machine, Remove_machine, Update_machine
+from ..services.machine_tasks import Add_machine, Remove_machine, Update_machine, List_all_machine_brief_information
 from ..models.machine import Machine, MachineTypes, MachineStatus
 from ..extensions import db
 from .. import create_app
@@ -146,6 +146,7 @@ def test_Remove_machine():
 
 
 ##################################
+#机器更新单元测试
 def test_Update_machine():
     import uuid
     import random
@@ -266,3 +267,130 @@ def test_Update_machine():
         if machine_to_delete:
             db.session.delete(machine_to_delete)
             db.session.commit()
+##################################
+
+
+##################################
+#机器的详细信息获取单元测试
+##################################
+
+
+##################################
+def test_List_all_machine_brief_information():
+    import uuid
+    import random
+    # 1) 创建测试数据 - 多个机器用于测试分页
+    test_machines = []
+    
+    try:
+        # 创建5个测试机器
+        for i in range(5):
+            machine_name = f"test_machine_{uuid.uuid4().hex[:8]}"
+            machine_ip = f"192.168.{random.randint(1, 255)}.{random.randint(1, 255)}"
+            machine_type = random.choice(list(MachineTypes))
+            machine_status = MachineStatus.MAINTENANCE
+            
+            machine = Machine(
+                machine_name=machine_name,
+                machine_ip=machine_ip,
+                machine_type=machine_type,
+                machine_status=machine_status,
+                cpu_core_number=random.randint(1, 16),
+                gpu_number=random.randint(0, 4),
+                gpu_type=f"GPU_{random.randint(1000, 5000)}",
+                memory_size_gb=random.randint(4, 128),
+                disk_size_gb=random.randint(100, 2000),
+                machine_description=f"Test machine for listing {i+1}"
+            )
+            
+            db.session.add(machine)
+            test_machines.append(machine)
+        
+        db.session.commit()
+        
+        # 2) 测试获取所有机器（第一页，每页10条）
+        page_number = 0
+        page_size = 10
+        
+        result = List_all_machine_brief_information(
+            page_number=page_number, 
+            page_size=page_size
+        )
+        
+        # 检查函数返回结果
+        assert result is not None, "List_all_machine_brief_information 应该返回列表"
+        assert isinstance(result, list), "返回值应该是列表类型"
+        
+        # 验证返回的数据结构
+        for machine_info in result:
+            assert hasattr(machine_info, 'machine_ip'), "机器信息应包含 machine_ip 字段"
+            assert hasattr(machine_info, 'machine_type'), "机器信息应包含 machine_type 字段"
+            assert hasattr(machine_info, 'machine_status'), "机器信息应包含 machine_status 字段"
+            
+            # 验证字段值类型
+            assert isinstance(machine_info.machine_ip, str), "machine_ip 应该是字符串"
+            assert isinstance(machine_info.machine_type, str), "machine_type 应该是字符串"
+            assert isinstance(machine_info.machine_status, str), "machine_status 应该是字符串"
+        
+        # 3) 测试分页功能 - 第一页，每页2条
+        page_number = 0
+        page_size = 2
+        
+        result_page1 = List_all_machine_brief_information(
+            page_number=page_number, 
+            page_size=page_size
+        )
+        
+        assert len(result_page1) == page_size, f"第一页应该返回 {page_size} 条记录"
+        
+        # 第二页，每页2条
+        page_number = 1
+        page_size = 2
+        
+        result_page2 = List_all_machine_brief_information(
+            page_number=page_number, 
+            page_size=page_size
+        )
+        
+        # 验证不同页面的结果不同
+        if len(result_page1) > 0 and len(result_page2) > 0:
+            assert result_page1[0].machine_ip != result_page2[0].machine_ip, "不同页面的机器应该不同"
+        
+        # 4) 测试空页情况
+        page_number = 10  # 超出范围的页码
+        page_size = 10
+        
+        result_empty = List_all_machine_brief_information(
+            page_number=page_number, 
+            page_size=page_size
+        )
+        
+        assert len(result_empty) == 0, "超出范围的页码应该返回空列表"
+        
+        # 5) 验证返回的数据内容是否正确
+        # 获取第一页所有机器
+        page_number = 0
+        page_size = 10
+        
+        result_all = List_all_machine_brief_information(
+            page_number=page_number, 
+            page_size=page_size
+        )
+        
+        # 验证返回的机器信息与数据库中的机器匹配
+        all_machines = Machine.query.order_by(Machine.id).limit(page_size).all()
+        
+        for i, machine in enumerate(all_machines):
+            if i < len(result_all):
+                assert result_all[i].machine_ip == machine.machine_ip, f"机器IP不匹配: {result_all[i].machine_ip} != {machine.machine_ip}"
+                assert result_all[i].machine_type == machine.machine_type.value, f"机器类型不匹配: {result_all[i].machine_type} != {machine.machine_type.value}"
+                assert result_all[i].machine_status == machine.machine_status.value, f"机器状态不匹配: {result_all[i].machine_status} != {machine.machine_status.value}"
+            
+    finally:
+        # 6) 清理测试数据
+        for machine in test_machines:
+            # 重新查询确保机器仍然存在
+            existing_machine = Machine.query.get(machine.id)
+            if existing_machine:
+                db.session.delete(existing_machine)
+        db.session.commit()
