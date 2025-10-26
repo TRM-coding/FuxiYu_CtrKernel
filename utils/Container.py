@@ -9,11 +9,11 @@ class Container_info:
         port:int
         image:str
     #gpu_list:显卡编号，cpu_number:需要用到的cpu核数，memory:申请的内存大小（GB）
-    def __init__(self,gpu_list:list,cpu_number:int,memory:int,user_name:str,image:str,port:int=0):
+    def __init__(self,gpu_list:list,cpu_number:int,memory:int,name:str,image:str,port:int=0):
         self.GPU_LIST=gpu_list
         self.CPU_NUMBER=cpu_number
         self.MEMORY=memory
-        self.USER_NAME=user_name
+        self.NAME=name
         self.__PORT=port
         self.image=image
         return
@@ -30,7 +30,7 @@ class Container_info:
             "gpu_list":self.GPU_LIST,
             "cpu_number":self.CPU_NUMBER,
             "memory":self.MEMORY,
-            "user_name":self.USER_NAME,
+            "name":self.NAME,
             "port":self.__PORT,
             "image":self.image
         }
@@ -41,4 +41,4 @@ class Container_info:
         data=json.loads(config)
         cfg=Container_info.Config_info(**data)
         return cfg
-    
+

@@ -44,8 +44,6 @@ def send(ciphertext:bytes,signature:bytes,mechine_ip:str, timeout:float=5.0)->di
 
 ####################################################
 
-
-
 #API Definition
 ####################################################
 class container_bref_information(BaseModel):
@@ -80,16 +78,22 @@ def Create_container(user_name:str,machine_ip:str,container:Container_info,publi
     signatured_message=signature(container_info)
     encryptioned_message=signature(container_info)
     # res=send(encryptioned_message,signatured_message,machine_ip)
-    create_container(name=container.name,
+
+    # 写入容器记录
+    create_container(name=container.NAME,
                      image=container.image,
                      machine_id=machine_id,
-                     status=ContainerStatus.RUNNING)
-    attach_user(container_id=container.id,
-                user_id=get_by_name(user_name).id)
-    add_binding(user_id=get_by_name(user_name).id,
-                container_id=container.id,
+                     status=ContainerStatus.ONLINE,
+                     port=free_port)
+
+    # 建立用户绑定（包含必须的 role/username/public_key）
+    container_id=get_id_by_name_machine(container_name=container.NAME, machine_id=machine_id)
+    user = get_by_name(user_name)
+    add_binding(user_id=user.id,
+                container_id=container_id,
                 public_key=public_key,
-                username=user_name)
+                username=user_name,
+                role=ROLE.ADMIN)
     return True
 
 #删除容器并删除其所有者记录
@@ -105,9 +109,9 @@ def remove_container(machine_ip:str,container_id:str)->bool:
     signatured_message=signature(container_info)
     encryptioned_message=signature(container_info)
     res=send(encryptioned_message,signatured_message,machine_ip)
-    detach_user(container_id,container_id)
+    # 移除所有绑定并删除容器
+    remove_binding(0, container_id, all=True)
     delete_container(container_id)
-    remove_binding(0,container_id,all=True)
     return True
 #将container_id对应的容器新增user_id作为collaborator,其权限为role
 
@@ -126,11 +130,12 @@ def add_collaborator(machine_ip,container_id:int,user_id:int,role:ROLE)->bool:
     signatured_message=signature(container_info)
     encryptioned_message=signature(container_info)
     res=send(encryptioned_message,signatured_message,machine_ip)
-    attach_user(container_id, user_id)
+    # 直接通过绑定表建立关联
     add_binding(user_id=user_id,
                 container_id=container_id,
                 username=user_name,
-                public_key=None)
+                public_key=None,
+                role=role)
     return True
 #从container_id中移除user_id对应的用户访问权
 
@@ -147,7 +152,7 @@ def remove_collaborator(machine_ip:str,container_id:int,user_id:int)->bool:
     signatured_message=signature(container_info)
     encryptioned_message=signature(container_info)
     res=send(encryptioned_message,signatured_message,machine_ip)
-    detach_user(container_id, user_id)
+    # 仅删除绑定
     remove_binding(user_id,container_id)
     return True
 
@@ -166,18 +171,10 @@ def update_role(machine_ip:str,container_id:int,user_id:int,updated_role:ROLE)->
     container_info=json.dumps(data)
     signatured_message=signature(container_info)
     encryptioned_message=signature(container_info)
-    res=send(encryptioned_message,signatured_message,machine_id)
+    # 使用 machine_ip 发送
+    res=send(encryptioned_message,signatured_message,machine_ip)
     update_binding(user_id,container_id,role=updated_role)
     return True
-
-#返回user_id用户在container_id容器中的权限
-def show_user_container_role(container_id:int,user_id:int)->ROLE:
-    bind= get_binding(user_id,container_id)
-    if bind:
-        return ROLE(bind['role'])
-    else:
-        return ROLE.NONE
-
 
 #返回容器的细节信息
 def get_container_detail_information(container_id:int)->container_detail_information:
@@ -188,12 +185,11 @@ def get_container_detail_information(container_id:int)->container_detail_informa
     res={
         "container_name":container.name,
         "container_image":container.image,
-        "machine_ip":container.machine.ip,
+        "machine_ip":container.machine.machine_ip,
         "container_status":container.container_status.value,
         "port":container.port,
         "owners":[get_name_by_id(binding['user_id']) for binding in owener_bindings],
         "accounts":[(binding['username'],ROLE(binding['role'])) for binding in owener_bindings],
-
     }
     return res
 
@@ -207,7 +203,7 @@ def list_all_container_bref_information(machine_ip:str, page_number:int, page_si
     for container in containers:
         info = container_bref_information(
             container_name=container.name,
-            machine_ip=container.machine.ip,
+            machine_ip=container.machine.machine_ip,
             port=container.port,
             container_status=container.container_status.value
         )

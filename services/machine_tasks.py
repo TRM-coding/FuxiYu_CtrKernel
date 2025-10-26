@@ -15,7 +15,7 @@ class machine_detail_information(BaseModel):
     machine_status:str
     cpu_core_number:int
     gpu_number:int
-    gpu_type:int
+    gpu_type:str
     memory_size_gb:int
     disk_size_gb:int
     machine_description:str
@@ -75,7 +75,7 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
         return None
 
     return machine_detail_information(
-        machine_name=machine.machinename,
+        machine_name=machine.machine_name,
         machine_ip=machine.machine_ip,
         machine_type=machine.machine_type.value,
         machine_status=machine.machine_status.value,

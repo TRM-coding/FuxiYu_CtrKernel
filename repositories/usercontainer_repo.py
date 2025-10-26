@@ -6,8 +6,11 @@ from pydantic import BaseModel
 from ..extensions import db
 from ..models.user import User
 from ..models.containers import Container
-from ..models.usercontainer import UserContainer as user_containers
+from ..models.usercontainer import UserContainer
 from ..constant import ROLE
+
+# 使用底层 Table 以便 Core 风格操作
+uc = UserContainer.__table__
 
 
 class BindingRow(BaseModel):
@@ -18,16 +21,17 @@ class BindingRow(BaseModel):
     role: ROLE
 
 
-def get_binding(user_id: int, container_id: int) -> BindingRow | None:
+def get_binding(user_id: int, container_id: int) -> dict | None:
     row = db.session.execute(
         db.select(
-            user_containers.c.user_id,
-            user_containers.c.container_id,
-            user_containers.c.public_key,
-            user_containers.c.username,
+            uc.c.user_id,
+            uc.c.container_id,
+            uc.c.public_key,
+            uc.c.username,
+            uc.c.role,
         ).where(
-            user_containers.c.user_id == user_id,
-            user_containers.c.container_id == container_id,
+            uc.c.user_id == user_id,
+            uc.c.container_id == container_id,
         )
     ).first()
     if not row:
@@ -37,18 +41,19 @@ def get_binding(user_id: int, container_id: int) -> BindingRow | None:
         "container_id": row.container_id,
         "public_key": row.public_key,
         "username": row.username,
-        "role":row.role,
+        "role": row.role,
     }
 
-def get_user_bindings(user_id:int)->Sequence[BindingRow]:
+def get_user_bindings(user_id:int)->Sequence[dict]:
     rows = db.session.execute(
         db.select(
-            user_containers.c.user_id,
-            user_containers.c.container_id,
-            user_containers.c.public_key,
-            user_containers.c.username,
+            uc.c.user_id,
+            uc.c.container_id,
+            uc.c.public_key,
+            uc.c.username,
+            uc.c.role,
         ).where(
-            user_containers.c.user_id == user_id,
+            uc.c.user_id == user_id,
         )
     ).all()
     bindings=[]
@@ -58,19 +63,20 @@ def get_user_bindings(user_id:int)->Sequence[BindingRow]:
             "container_id": row.container_id,
             "public_key": row.public_key,
             "username": row.username,
-            "role":row.role,
+            "role": row.role,
         })
     return bindings
 
-def get_container_bindings(container_id:int)->Sequence[BindingRow]:
+def get_container_bindings(container_id:int)->Sequence[dict]:
     rows = db.session.execute(
         db.select(
-            user_containers.c.user_id,
-            user_containers.c.container_id,
-            user_containers.c.public_key,
-            user_containers.c.username,
+            uc.c.user_id,
+            uc.c.container_id,
+            uc.c.public_key,
+            uc.c.username,
+            uc.c.role,
         ).where(
-            user_containers.c.container_id == container_id,
+            uc.c.container_id == container_id,
         )
     ).all()
     bindings=[]
@@ -80,7 +86,7 @@ def get_container_bindings(container_id:int)->Sequence[BindingRow]:
             "container_id": row.container_id,
             "public_key": row.public_key,
             "username": row.username,
-            "role":row.role,
+            "role": row.role,
         })
     return bindings
 
@@ -111,28 +117,33 @@ def add_binding(
                 commit=commit,
             )
         return True
-    insert_values: dict[str, Any] = {"user_id": user_id, "container_id": container_id, "role":role.value}
+    insert_values: dict[str, Any] = {
+        "user_id": user_id,
+        "container_id": container_id,
+        "role": role.value,
+    }
     if public_key is not None:
         insert_values["public_key"] = public_key
     if username is not None:
         insert_values["username"] = username
-    db.session.execute(user_containers.insert().values(**insert_values))
+    db.session.execute(uc.insert().values(**insert_values))
     if commit:
         db.session.commit()
     return True
 
 
-def remove_binding(user_id: int, container_id: int, commit: bool = True,all=False) -> bool:
-    result = db.session.execute(
-        user_containers.delete().where(
-            user_containers.c.user_id == user_id,
-            user_containers.c.container_id == container_id,
-        )
-    )
+def remove_binding(user_id: int, container_id: int, commit: bool = True, all=False) -> bool:
     if all:
         result = db.session.execute(
-            user_containers.delete().where(
-                user_containers.c.container_id == container_id,
+            uc.delete().where(
+                uc.c.container_id == container_id,
+            )
+        )
+    else:
+        result = db.session.execute(
+            uc.delete().where(
+                uc.c.user_id == user_id,
+                uc.c.container_id == container_id,
             )
         )
     if commit:
@@ -143,8 +154,8 @@ def remove_binding(user_id: int, container_id: int, commit: bool = True,all=Fals
 def list_containers_by_user(user_id: int) -> Sequence[Container]:
     return (
         db.session.query(Container)
-        .join(user_containers, Container.id == user_containers.c.container_id)
-        .filter(user_containers.c.user_id == user_id)
+        .join(uc, Container.id == uc.c.container_id)
+        .filter(uc.c.user_id == user_id)
         .order_by(Container.id)
         .all()
     )
@@ -153,8 +164,8 @@ def list_containers_by_user(user_id: int) -> Sequence[Container]:
 def list_users_by_container(container_id: int) -> Sequence[User]:
     return (
         db.session.query(User)
-        .join(user_containers, User.id == user_containers.c.user_id)
-        .filter(user_containers.c.container_id == container_id)
+        .join(uc, User.id == uc.c.user_id)
+        .filter(uc.c.container_id == container_id)
         .order_by(User.id)
         .all()
     )
@@ -167,7 +178,7 @@ def update_binding(
     public_key: str | None = None,
     username: str | None = None,
     commit: bool = True,
-    role:ROLE|None=None,
+    role: ROLE | None = None,
     **_extra,
 ) -> bool:
     """部分更新绑定字段，遵循统一 update 模式 (白名单 + 仅变更写入)。"""
@@ -175,9 +186,8 @@ def update_binding(
     if not binding:
         return False
 
-    allowed = {"public_key", "username","role"}
-    # 构造候选字段
-    candidates = {"public_key": public_key, "username": username,"role":role}
+    allowed = {"public_key", "username", "role"}
+    candidates = {"public_key": public_key, "username": username, "role": role.value if role else None}
     update_data: dict[str, Any] = {}
     for k, v in candidates.items():
         if k not in allowed or v is None:
@@ -189,10 +199,10 @@ def update_binding(
         return True  # 无变化
 
     db.session.execute(
-        user_containers.update()
+        uc.update()
         .where(
-            user_containers.c.user_id == user_id,
-            user_containers.c.container_id == container_id,
+            uc.c.user_id == user_id,
+            uc.c.container_id == container_id,
         )
         .values(**update_data)
     )

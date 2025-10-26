@@ -59,8 +59,10 @@ def encryption(message:str,public_key_B:RSAPublicKey)->bytes:
 #签名信息
 def signature(message:str)->bytes:
     PRIVATE_KEY_A,_,_=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH)
+    # 将字符串编码为 bytes
+    message_bytes = message.encode('utf-8') if isinstance(message, str) else message
     signature = PRIVATE_KEY_A.sign(
-        message,
+        message_bytes,
         padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
                     salt_length=padding.PSS.MAX_LENGTH),
         hashes.SHA256()
