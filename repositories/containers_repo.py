@@ -9,6 +9,9 @@ from ..constant import ROLE
 def get_by_id(container_id: int) -> Container | None:
 	return Container.query.get(container_id)
 
+def get_id_by_name_machine(container_name: str, machine_id: int) -> int | None:
+	container = Container.query.filter_by(name=container_name, machine_id=machine_id).first()
+	return container.id if container else None
 
 def list_containers(limit: int = 50, offset: int = 0, machine_id: int | None = None) -> Sequence[Container]:
 	q = Container.query

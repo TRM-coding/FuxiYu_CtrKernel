@@ -9,7 +9,7 @@ def get_by_id(machine_id:int):
     return Machine.query.get(machine_id)
 
 def get_id_by_ip(machine_ip:str):
-    machine = Machine.query.filter_by(machineip=machine_ip).first()
+    machine = Machine.query.filter_by(machine_ip=machine_ip).first()
     return machine.id if machine else None
 
 def get_the_first_free_port(machine_id:int)->int:
@@ -33,23 +33,23 @@ def get_the_first_free_port(machine_id:int)->int:
     raise RuntimeError(f"No free ports available on machine {machine_id}")
 
 def get_by_name(machine_name:str):
-    return Machine.query.filter_by(machine_name==machine_name).first()
+    return Machine.query.filter_by(machine_name=machine_name).first()
 
 def list_machines(limit: int = 50, offset: int = 0) -> Sequence[Machine]:
 	return Machine.query.order_by(Machine.id).offset(offset).limit(limit).all()
 
 def create_machine(machinename:str,
-                   machineip:str,
+                   machine_ip:str,
                    machine_type:MachineTypes,
                    machine_description:str,
                    cpu_core_number:int,
                    gpu_number:int,
-                   gpu_type:int,
+                   gpu_type:str,
                    memory_size:int,
                    disk_size:int)->bool:
     machine=Machine(
          machine_name=machinename,
-         machine_ip=machineip,
+         machine_ip=machine_ip,
          machine_type=machine_type,
          machine_description=machine_description,
          cpu_core_number=cpu_core_number,
@@ -81,8 +81,8 @@ def update_machine(machine_id: int, *, commit: bool = True, **fields) -> bool:
     if not machine:
         return None
 
-    allowed = {"machine_name", "machine_ip", "machine_type", "machine_status","cpu_core_number",
-               "memory_size_gb","gpu_number","gpu_type","disk_size_gb","machine_description"}
+    allowed = {"machine_name", "machine_ip", "machine_type", "machine_status", "cpu_core_number",
+               "memory_size_gb", "gpu_number", "gpu_type", "disk_size_gb", "machine_description"}
     dirty = False
     for k, v in fields.items():
         if k not in allowed:

@@ -10,7 +10,6 @@ class MachineTypes(Enum):
     GPU = "GPU"
     CPU = "CPU"
 
-
 class ContainerStatus(Enum):
     ONLINE = "online"
     OFFLINE = "offline"
@@ -18,6 +17,6 @@ class ContainerStatus(Enum):
 
 
 class ROLE(Enum):
-    ADMIN="admin"
-    COLLABORATOR="collaborator"
-    ROOT="root"
+    ADMIN="ADMIN"
+    COLLABORATOR="COLLABORATOR"
+    ROOT="ROOT"
