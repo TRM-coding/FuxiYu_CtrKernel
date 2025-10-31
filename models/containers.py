@@ -15,8 +15,11 @@ class Container(db.Model):
     # 关系：指向 Machine
     machine = db.relationship("Machine", back_populates="containers")
 
-    container_status: ContainerStatus = db.Column(db.Enum(ContainerStatus), nullable=False, default=ContainerStatus.MAINTENANCE)
-    
+    container_status: MachineStatus = db.Column(
+        db.Enum(ContainerStatus, values_callable=lambda obj: [e.value for e in obj]),
+        nullable=False,
+        default=ContainerStatus.MAINTENANCE
+    )
     port: int = db.Column(db.Integer, nullable=False, index=True)
 
     users = db.relationship(
