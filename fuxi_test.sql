@@ -43,7 +43,7 @@ CREATE TABLE `containers` (
 
 LOCK TABLES `containers` WRITE;
 /*!40000 ALTER TABLE `containers` DISABLE KEYS */;
-INSERT INTO `containers` VALUES (1,'web','nginx:1.25',1,'RUNNING',8080),(2,'db','mysql:8.0',1,'MAINTENANCE',3306),(3,'api','python:3.11',2,'STOPPED',9000),(4,'web','nginx:1.25',2,'RUNNING',8081),(5,'cache','redis:7',1,'RUNNING',6379),(6,'ml','pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime',1,'RUNNING',7010),(7,'db','postgres:16',2,'RUNNING',5432),(8,'runner','ghcr.io/actions/runner:latest',2,'MAINTENANCE',9123),(9,'web','nginx:1.27',3,'RUNNING',8082),(10,'api','python:3.12',3,'RUNNING',9001),(11,'db','mysql:8.4',3,'MAINTENANCE',3307),(12,'monitor','prom/prometheus:latest',4,'RUNNING',9090),(13,'web','nginx:1.27',4,'STOPPED',8083);
+INSERT INTO `containers` VALUES (1,'web','nginx:1.25',1,'ONLINE',8080),(2,'db','mysql:8.0',1,'MAINTENANCE',3306),(3,'api','python:3.11',2,'STOPPED',9000),(4,'web','nginx:1.25',2,'ONLINE',8081),(5,'cache','redis:7',1,'ONLINE',6379),(6,'ml','pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime',1,'ONLINE',7010),(7,'db','postgres:16',2,'ONLINE',5432),(8,'runner','ghcr.io/actions/runner:latest',2,'MAINTENANCE',9123),(9,'web','nginx:1.27',3,'ONLINE',8082),(10,'api','python:3.12',3,'ONLINE',9001),(11,'db','mysql:8.4',3,'MAINTENANCE',3307),(12,'monitor','prom/prometheus:latest',4,'ONLINE',9090),(13,'web','nginx:1.27',4,'STOPPED',8083);
 /*!40000 ALTER TABLE `containers` ENABLE KEYS */;
 UNLOCK TABLES;
 
