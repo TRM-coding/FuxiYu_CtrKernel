@@ -1,6 +1,6 @@
 #machine_tasks.py 单元测试
 import pytest
-from ..services.machine_tasks import Add_machine, Remove_machine, Update_machine, Get_detail_information, List_all_machine_brief_information
+from ..services.machine_tasks import Add_machine, Remove_machine, Update_machine, Get_detail_information, List_all_machine_bref_information
 from ..models.machine import Machine, MachineTypes, MachineStatus
 from ..extensions import db
 from .. import create_app
@@ -410,7 +410,7 @@ def test_Get_detail_information():
 
 ##################################
 #获取一批机器的概要信息
-def test_List_all_machine_brief_information():
+def test_List_all_machine_bref_information():
     import uuid
     import random
 
@@ -446,7 +446,7 @@ def test_List_all_machine_brief_information():
         # 2) 测试第一页，每页3条数据
         page_number = 0
         page_size = 3
-        result_page1 = List_all_machine_brief_information(page_number, page_size)
+        result_page1 = List_all_machine_bref_information(page_number, page_size)
         
         # 检查返回结果
         assert result_page1 is not None, "函数应该返回列表，而不是None"
@@ -471,7 +471,7 @@ def test_List_all_machine_brief_information():
         # 3) 测试第二页，每页3条数据
         page_number = 1
         page_size = 3
-        result_page2 = List_all_machine_brief_information(page_number, page_size)
+        result_page2 = List_all_machine_bref_information(page_number, page_size)
         
         total_count = Machine.query.count()
         assert result_page2 is not None, "第二页函数应该返回列表，而不是None"
@@ -483,7 +483,7 @@ def test_List_all_machine_brief_information():
         # 4) 测试空页（超出数据范围）
         page_number = 2
         page_size = 3
-        result_empty = List_all_machine_brief_information(page_number, page_size)
+        result_empty = List_all_machine_bref_information(page_number, page_size)
 
         total_count = Machine.query.count()
         expected_count = max(0, min(page_size, total_count - page_number * page_size))
@@ -495,7 +495,7 @@ def test_List_all_machine_brief_information():
         # 5) 测试所有机器（大页面）
         page_number = 0
         page_size = 100  # 足够大的页面大小获取所有机器
-        result_all = List_all_machine_brief_information(page_number, page_size)
+        result_all = List_all_machine_bref_information(page_number, page_size)
 
         # 动态计算预期数量（根据实际数据库）
         total_count = Machine.query.count()
@@ -513,7 +513,7 @@ def test_List_all_machine_brief_information():
             assert first_result.machine_type == corresponding_machine.machine_type.value, "返回的机器类型应该与数据库中的值匹配"
             assert first_result.machine_status == corresponding_machine.machine_status.value, "返回的机器状态应该与数据库中的值匹配"
         
-        print("List_all_machine_brief_information 测试通过")
+        print("List_all_machine_bref_information 测试通过")
             
     finally:
         # 7) 清理测试数据

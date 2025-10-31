@@ -3,7 +3,7 @@ from ..repositories.machine_repo import *
 from pydantic import BaseModel
 #######################################
 #API Definition
-class machine_brief_information(BaseModel):
+class machine_bref_information(BaseModel):
     machine_ip:str
     machine_type:str
     machine_status:str
@@ -91,11 +91,11 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
 
 #######################################
 # 获取一批机器的概要信息
-def List_all_machine_brief_information(page_number:int, page_size:int)->list[machine_brief_information]:
+def List_all_machine_bref_information(page_number:int, page_size:int)->list[machine_bref_information]:
     machines = list_machines(limit=page_size, offset=page_number*page_size)
     res = []
     for machine in machines:
-        info = machine_brief_information(
+        info = machine_bref_information(
             machine_ip=machine.machine_ip,
             machine_type=machine.machine_type.value,
             machine_status=machine.machine_status.value
