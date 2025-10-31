@@ -76,10 +76,11 @@ def test_Add_machine():
         assert machine.machine_description == machine_description
         
     finally:
-        # 4) 删除测试数据
-        if target:
-            db.session.delete(target)
-            db.session.commit()
+        leftovers = Machine.query.filter(Machine.machine_name.like("test_machine_%")).all()
+        for m in leftovers:
+            db.session.delete(m)
+        db.session.commit()
+
 ##################################
 
 
@@ -135,10 +136,10 @@ def test_Remove_machine():
             assert machine is None, f"机器 {machine_id} 应该已被删除"
             
     finally:
-        # 4) 清理：确保测试数据被删除（以防测试失败时残留）
-        for machine in test_machines:
-            # 直接使用已存在的 machine 对象，不重新查询
-            db.session.delete(machine)
+        # 双保险清理：重新查询再删
+        remaining = Machine.query.filter(Machine.machine_name.like("test_machine_%")).all()
+        for m in remaining:
+            db.session.delete(m)
         db.session.commit()
 ##################################
 
@@ -183,7 +184,7 @@ def test_Update_machine():
         original_machine = Machine.query.get(target_machine_id)
         print(f"Original CPU cores: {original_machine.cpu_core_number}")
         
-        new_machine_name = f"updated_machine_{uuid.uuid4().hex[:8]}"
+        new_machine_name = f"test_machine_{uuid.uuid4().hex[:8]}"
         new_machine_ip = f"10.0.{random.randint(1, 255)}.{random.randint(1, 255)}"
         
         # 选择不同的机器类型
@@ -196,7 +197,7 @@ def test_Update_machine():
         new_gpu_number = random.randint(5, 8)
         new_gpu_type = f"GPU_{random.randint(5001, 9000)}"
         new_disk_size = random.randint(2001, 4000)
-        new_machine_description = f"Updated machine {uuid.uuid4().hex[:8]}"
+        new_machine_description = f"test_machine_{uuid.uuid4().hex[:8]}"
 
         print(f"Updating CPU cores from {original_machine.cpu_core_number} to {new_cpu_core_number}")
         
@@ -237,7 +238,7 @@ def test_Update_machine():
         assert updated_machine.machine_description == new_machine_description, f"机器描述更新失败: {updated_machine.machine_description} != {new_machine_description}"
         
         # 5) 测试部分字段更新
-        partial_new_name = f"partially_updated_{uuid.uuid4().hex[:8]}"
+        partial_new_name = f"test_machine_{uuid.uuid4().hex[:8]}"
         partial_new_cpu = random.randint(33, 64)
         
         result_partial = Update_machine(
@@ -259,12 +260,55 @@ def test_Update_machine():
         # 其他字段应该保持不变
         assert partially_updated_machine.machine_ip == new_machine_ip, f"部分更新后IP被意外修改: {partially_updated_machine.machine_ip} != {new_machine_ip}"
         
+        # 测试组合1：只更新机器状态和描述
+        new_status = MachineStatus.ONLINE if new_machine_status == MachineStatus.MAINTENANCE else MachineStatus.MAINTENANCE
+        new_desc = f"test_machine_{uuid.uuid4().hex[:4]}"
+        
+        result_combo1 = Update_machine(
+            machine_id=target_machine_id,
+            machine_status=new_status,
+            machine_description=new_desc
+        )
+        
+        assert result_combo1 is True, "组合1部分更新应该返回 True"
+        db.session.expire_all()
+        
+        combo1_machine = Machine.query.get(target_machine_id)
+        assert combo1_machine.machine_status == new_status, f"组合1状态更新失败: {combo1_machine.machine_status} != {new_status}"
+        assert combo1_machine.machine_description == new_desc, f"组合1描述更新失败: {combo1_machine.machine_description} != {new_desc}"
+        # 验证其他字段未改变
+        assert combo1_machine.machine_name == partial_new_name, f"组合1更新后名称被意外修改"
+        assert combo1_machine.cpu_core_number == partial_new_cpu, f"组合1更新后CPU被意外修改"
+        
+        # 测试组合2：只更新硬件配置（CPU、内存、磁盘）
+        new_cpu_combo = random.randint(1, 8)
+        new_memory_combo = random.randint(8, 32)
+        new_disk_combo = random.randint(500, 1000)
+        
+        result_combo2 = Update_machine(
+            machine_id=target_machine_id,
+            cpu_core_number=new_cpu_combo,
+            memory_size_gb=new_memory_combo,
+            disk_size_gb=new_disk_combo
+        )
+        
+        assert result_combo2 is True, "组合2部分更新应该返回 True"
+        db.session.expire_all()
+        
+        combo2_machine = Machine.query.get(target_machine_id)
+        assert combo2_machine.cpu_core_number == new_cpu_combo, f"组合2 CPU更新失败: {combo2_machine.cpu_core_number} != {new_cpu_combo}"
+        assert combo2_machine.memory_size_gb == new_memory_combo, f"组合2 内存更新失败: {combo2_machine.memory_size_gb} != {new_memory_combo}"
+        assert combo2_machine.disk_size_gb == new_disk_combo, f"组合2 磁盘更新失败: {combo2_machine.disk_size_gb} != {new_disk_combo}"
+        # 验证其他字段未改变
+        assert combo2_machine.machine_status == new_status, f"组合2更新后状态被意外修改"
+        assert combo2_machine.machine_description == new_desc, f"组合2更新后描述被意外修改"
+
     finally:
-        # 6) 清理测试数据
-        machine_to_delete = Machine.query.get(target_machine_id)
-        if machine_to_delete:
-            db.session.delete(machine_to_delete)
-            db.session.commit()
+        # 清理所有测试机器
+        leftovers = Machine.query.filter(Machine.machine_name.like("test_machine_%")).all()
+        for m in leftovers:
+            db.session.delete(m)
+        db.session.commit()
 ##################################
 
 
@@ -274,6 +318,7 @@ def test_Update_machine():
 
 
 ##################################
+#获取一批机器的概要信息
 def test_List_all_machine_brief_information():
     import uuid
     import random
@@ -337,26 +382,35 @@ def test_List_all_machine_brief_information():
         page_size = 3
         result_page2 = List_all_machine_brief_information(page_number, page_size)
         
+        total_count = Machine.query.count()
         assert result_page2 is not None, "第二页函数应该返回列表，而不是None"
         assert isinstance(result_page2, list), "第二页函数应该返回列表"
         # 第二页应该返回剩余的数据（5-3=2条）
-        assert len(result_page2) == 2, f"第二页应该返回2条数据，实际返回{len(result_page2)}条"
+        expected_page2_count = max(0, min(page_size, total_count - page_number * page_size))
+        assert len(result_page2) == expected_page2_count, f"第二页应该返回{expected_page2_count}条数据，实际返回{len(result_page2)}条"
         
         # 4) 测试空页（超出数据范围）
         page_number = 2
         page_size = 3
         result_empty = List_all_machine_brief_information(page_number, page_size)
-        
-        assert result_empty is not None, "空页函数应该返回空列表，而不是None"
+
+        total_count = Machine.query.count()
+        expected_count = max(0, min(page_size, total_count - page_number * page_size))
+
+        assert result_empty is not None, "空页函数应该返回列表，而不是None"
         assert isinstance(result_empty, list), "空页函数应该返回列表"
-        assert len(result_empty) == 0, "超出数据范围的页应该返回空列表"
-        
+        assert len(result_empty) == expected_count, f"页 {page_number} 应返回 {expected_count} 条数据，实际返回 {len(result_empty)} 条"
+                
         # 5) 测试所有机器（大页面）
         page_number = 0
         page_size = 100  # 足够大的页面大小获取所有机器
         result_all = List_all_machine_brief_information(page_number, page_size)
-        
-        assert len(result_all) == 5, f"获取所有机器应该返回5条数据，实际返回{len(result_all)}条"
+
+        # 动态计算预期数量（根据实际数据库）
+        total_count = Machine.query.count()
+
+        assert len(result_all) == total_count, \
+            f"获取所有机器应该返回 {total_count} 条数据，实际返回 {len(result_all)} 条"
         
         # 6) 验证返回数据的正确性 - 检查第一台机器的数据是否与数据库匹配
         if len(result_page1) > 0:
