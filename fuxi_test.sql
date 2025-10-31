@@ -27,7 +27,7 @@ CREATE TABLE `containers` (
   `name` varchar(120) NOT NULL,
   `image` varchar(200) NOT NULL,
   `machine_id` int NOT NULL,
-  `container_status` varchar(255) NOT NULL DEFAULT 'MAINTENANCE',
+  `container_status` varchar(255) NOT NULL DEFAULT 'maintenance',
   `port` int NOT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_container_name_machine` (`name`,`machine_id`),
@@ -43,7 +43,7 @@ CREATE TABLE `containers` (
 
 LOCK TABLES `containers` WRITE;
 /*!40000 ALTER TABLE `containers` DISABLE KEYS */;
-INSERT INTO `containers` VALUES (1,'web','nginx:1.25',1,'RUNNING',8080),(2,'db','mysql:8.0',1,'MAINTENANCE',3306),(3,'api','python:3.11',2,'STOPPED',9000),(4,'web','nginx:1.25',2,'RUNNING',8081),(5,'cache','redis:7',1,'RUNNING',6379),(6,'ml','pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime',1,'RUNNING',7010),(7,'db','postgres:16',2,'RUNNING',5432),(8,'runner','ghcr.io/actions/runner:latest',2,'MAINTENANCE',9123),(9,'web','nginx:1.27',3,'RUNNING',8082),(10,'api','python:3.12',3,'RUNNING',9001),(11,'db','mysql:8.4',3,'MAINTENANCE',3307),(12,'monitor','prom/prometheus:latest',4,'RUNNING',9090),(13,'web','nginx:1.27',4,'STOPPED',8083);
+INSERT INTO `containers` VALUES (1,'web','nginx:1.25',1,'online',8080),(2,'db','mysql:8.0',1,'maintenance',3306),(3,'api','python:3.11',2,'offline',9000),(4,'web','nginx:1.25',2,'online',8081),(5,'cache','redis:7',1,'online',6379),(6,'ml','pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime',1,'online',7010),(7,'db','postgres:16',2,'online',5432),(8,'runner','ghcr.io/actions/runner:latest',2,'maintenance',9123),(9,'web','nginx:1.27',3,'online',8082),(10,'api','python:3.12',3,'online',9001),(11,'db','mysql:8.4',3,'maintenance',3307),(12,'monitor','prom/prometheus:latest',4,'online',9090),(13,'web','nginx:1.27',4,'offline',8083);
 /*!40000 ALTER TABLE `containers` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -59,7 +59,7 @@ CREATE TABLE `machines` (
   `machine_name` varchar(120) NOT NULL,
   `machine_ip` varchar(120) NOT NULL,
   `machine_type` varchar(255) NOT NULL,
-  `machine_status` varchar(255) NOT NULL DEFAULT 'MAINTENANCE',
+  `machine_status` varchar(255) NOT NULL DEFAULT 'maintenance',
   `cpu_core_number` int DEFAULT NULL,
   `memory_size_gb` int DEFAULT NULL,
   `gpu_number` int DEFAULT NULL,
@@ -78,7 +78,7 @@ CREATE TABLE `machines` (
 
 LOCK TABLES `machines` WRITE;
 /*!40000 ALTER TABLE `machines` DISABLE KEYS */;
-INSERT INTO `machines` VALUES (1,'node-a','10.0.0.10','CPU','ONLINE',16,64,2,'RTX 3090',2000,'Rack A main host'),(2,'node-b','10.0.0.11','GPU','MAINTENANCE',8,32,0,NULL,500,'KVM guest'),(3,'node-c','10.0.0.12','CPU','OFFLINE',32,128,4,'RTX 4090',6000,'GPU box'),(4,'node-d','10.0.0.13','GPU','MAINTENANCE',4,8,0,NULL,200,'Test VM');
+INSERT INTO `machines` VALUES (1,'node-a','10.0.0.10','CPU','online',16,64,2,'RTX 3090',2000,'Rack A main host'),(2,'node-b','10.0.0.11','GPU','maintenance',8,32,0,NULL,500,'KVM guest'),(3,'node-c','10.0.0.12','CPU','offline',32,128,4,'RTX 4090',6000,'GPU box'),(4,'node-d','10.0.0.13','GPU','maintenance',4,8,0,NULL,200,'Test VM');
 /*!40000 ALTER TABLE `machines` ENABLE KEYS */;
 UNLOCK TABLES;
 
