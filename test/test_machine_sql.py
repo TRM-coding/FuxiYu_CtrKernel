@@ -1,6 +1,6 @@
 #machine_tasks.py 单元测试
 import pytest
-from ..services.machine_tasks import Add_machine, Remove_machine, Update_machine, List_all_machine_brief_information
+from ..services.machine_tasks import Add_machine, Remove_machine, Update_machine, Get_detail_information, List_all_machine_brief_information
 from ..models.machine import Machine, MachineTypes, MachineStatus
 from ..extensions import db
 from .. import create_app
@@ -314,6 +314,97 @@ def test_Update_machine():
 
 ##################################
 #机器的详细信息获取单元测试
+def test_Get_detail_information():
+    import uuid
+    import random
+    from ..models.containers import Container, ContainerStatus
+
+    # 1) 创建一台测试机器
+    machine_name = f"test_machine_{uuid.uuid4().hex[:8]}"
+    machine_ip = f"10.10.{random.randint(1,255)}.{random.randint(1,255)}"
+    machine_type = random.choice(list(MachineTypes))
+    machine_status = random.choice(list(MachineStatus))
+    cpu_core_number = random.randint(1, 16)
+    gpu_number = random.randint(0, 4)
+    gpu_type = f"GPU_{random.randint(1000, 5000)}"
+    memory_size_gb = random.randint(8, 64)
+    disk_size_gb = random.randint(100, 500)
+    machine_description = "Test machine for detail check"
+
+    test_machine = Machine(
+        machine_name=machine_name,
+        machine_ip=machine_ip,
+        machine_type=machine_type,
+        machine_status=machine_status,
+        cpu_core_number=cpu_core_number,
+        gpu_number=gpu_number,
+        gpu_type=gpu_type,
+        memory_size_gb=memory_size_gb,
+        disk_size_gb=disk_size_gb,
+        machine_description=machine_description
+    )
+    db.session.add(test_machine)
+    db.session.commit()
+    machine_id = test_machine.id
+
+    try:
+        # 2)  创建两个容器并关联机器
+        container1 = Container(
+            name=f"container_{uuid.uuid4().hex[:6]}",
+            image="nginx:latest",
+            machine_id=machine_id,
+            container_status=random.choice(list(ContainerStatus)),
+            port=random.randint(2000, 6000)
+        )
+        container2 = Container(
+            name=f"container_{uuid.uuid4().hex[:6]}",
+            image="redis:latest",
+            machine_id=machine_id,
+            container_status=random.choice(list(ContainerStatus)),
+            port=random.randint(6001, 9000)
+        )
+        db.session.add_all([container1, container2])
+        db.session.commit()
+
+        # 3) 调用被测函数
+        result = Get_detail_information(machine_id)
+
+        # 4) 验证返回类型与结构
+        assert result is not None, "Get_detail_information 应该返回对象，而不是 None"
+        assert isinstance(result.containers, list), "containers 字段应为列表"
+        assert len(result.containers) == 2, f"应返回2个容器，实际返回 {len(result.containers)}"
+
+        # 5) 验证字段正确性
+        assert result.machine_name == machine_name
+        assert result.machine_ip == machine_ip
+        assert result.machine_type == machine_type.value
+        assert result.machine_status == machine_status.value
+        assert result.cpu_core_number == cpu_core_number
+        assert result.gpu_number == gpu_number
+        assert result.gpu_type == gpu_type
+        assert result.memory_size_gb == memory_size_gb
+        assert result.disk_size_gb == disk_size_gb
+        assert result.machine_description == machine_description
+
+        # 验证容器ID匹配
+        container_ids = {container1.id, container2.id}
+        assert set(result.containers) == container_ids, f"返回的容器ID不匹配，应为 {container_ids}，实际为{result.containers}"
+
+        # 6) 测试不存在的ID
+        invalid_id = machine_id + 9999
+        result_none = Get_detail_information(invalid_id)
+        assert result_none is None, "不存在的机器ID应返回 None"
+
+        print("Get_detail_information 测试通过")
+
+    finally:
+        leftovers_containers = Container.query.filter(Container.machine_id == machine_id).all()
+        for c in leftovers_containers:
+            db.session.delete(c)
+        leftovers_machines = Machine.query.filter(Machine.machine_name.like("test_machine_%")).all()
+        for m in leftovers_machines:
+            db.session.delete(m)
+        db.session.commit()
 ##################################
 
 
