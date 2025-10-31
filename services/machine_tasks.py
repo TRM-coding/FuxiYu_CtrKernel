@@ -19,7 +19,7 @@ class machine_detail_information(BaseModel):
     memory_size_gb:int
     disk_size_gb:int
     machine_description:str
-    containers:list[str] #容器id
+    containers:list[int] #容器id
 #######################################
 
 
