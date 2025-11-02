@@ -8,7 +8,11 @@ class Machine(db.Model):
     machine_name: str = db.Column(db.String(120), unique=True, nullable=False, index=True)
     machine_ip: str = db.Column(db.String(120), unique=True, nullable=False, index=True)
     machine_type: MachineTypes = db.Column(db.Enum(MachineTypes), nullable=False)
-    machine_status: MachineStatus = db.Column(db.Enum(MachineStatus), nullable=False, default=MachineStatus.MAINTENANCE)
+    machine_status: MachineStatus = db.Column(
+    db.Enum(MachineStatus, values_callable=lambda obj: [e.value for e in obj]),
+        nullable=False,
+        default=MachineStatus.MAINTENANCE
+    )
     cpu_core_number: int = db.Column(db.Integer, nullable=True)
     memory_size_gb: int = db.Column(db.Integer, nullable=True)
     gpu_number: int = db.Column(db.Integer, nullable=True)
