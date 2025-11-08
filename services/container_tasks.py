@@ -69,6 +69,8 @@ class container_detail_information(BaseModel):
 
 # 将user_id作为admin，创建新容器
 def Create_container(user_name:str,machine_ip:str,container:Container_info,public_key=None)->bool:
+    full_url = "http://172.17.0.6:5000/api/create_container"
+
     machine_id=get_id_by_ip(machine_ip=machine_ip)
     free_port = get_the_first_free_port(machine_id=machine_id)
     container.set_port(free_port)
@@ -77,7 +79,20 @@ def Create_container(user_name:str,machine_ip:str,container:Container_info,publi
     container_info=json.dumps(container_info)
     signatured_message=signature(container_info)
     encryptioned_message=signature(container_info)
-    # res=send(encryptioned_message,signatured_message,machine_ip)
+    res=send(encryptioned_message,signatured_message,full_url)
+    print(res)
+
+    original_plaintext = container_info
+    server_decrypted = res.get("decrypted_message")
+    Key=False
+    if server_decrypted == original_plaintext:
+        print("验证成功：服务端返回的解密内容与原始明文一致")
+        # （可选）如果验证通过，再执行实际的容器创建逻辑
+        # 这里放原有的容器创建、数据库写入等代码
+        Key=True
+    else:
+        print("验证失败：解密内容不一致")
+
 
     # 写入容器记录
     create_container(name=container.NAME,
@@ -94,10 +109,15 @@ def Create_container(user_name:str,machine_ip:str,container:Container_info,publi
                 public_key=public_key,
                 username=user_name,
                 role=ROLE.ADMIN)
-    return True
+    
+    if Key:
+        return True
+    return False
 
 #删除容器并删除其所有者记录
 def remove_container(machine_ip:str,container_id:str)->bool:
+    full_url = "http://172.17.0.6:5000/api/create_container"
+
     machine_id=get_id_by_ip(machine_ip=machine_ip)
     data={
         "config":{
@@ -108,14 +128,31 @@ def remove_container(machine_ip:str,container_id:str)->bool:
     container_info=json.dumps(data)
     signatured_message=signature(container_info)
     encryptioned_message=signature(container_info)
-    res=send(encryptioned_message,signatured_message,machine_ip)
+    res=send(encryptioned_message,signatured_message,full_url)
+
+    original_plaintext = container_info
+    server_decrypted = res.get("decrypted_message")
+    Key=False
+    if server_decrypted == original_plaintext:
+        print("验证成功：服务端返回的解密内容与原始明文一致")
+        # （可选）如果验证通过，再执行实际的容器创建逻辑
+        # 这里放原有的容器创建、数据库写入等代码
+        Key=True
+    else:
+        print("验证失败：解密内容不一致")
+    
     # 移除所有绑定并删除容器
     remove_binding(0, container_id, all=True)
     delete_container(container_id)
-    return True
+
+    if Key:
+        return True
+    return False
 #将container_id对应的容器新增user_id作为collaborator,其权限为role
 
 def add_collaborator(machine_ip,container_id:int,user_id:int,role:ROLE)->bool:
+    full_url = "http://172.17.0.6:5000/api/create_container"
+
     machine_id=get_id_by_ip(machine_ip=machine_ip)
     user_name=get_name_by_id(user_id)
     data={
@@ -129,17 +166,34 @@ def add_collaborator(machine_ip,container_id:int,user_id:int,role:ROLE)->bool:
     container_info=json.dumps(data)
     signatured_message=signature(container_info)
     encryptioned_message=signature(container_info)
-    res=send(encryptioned_message,signatured_message,machine_ip)
+    res=send(encryptioned_message,signatured_message,full_url)
+
+    original_plaintext = container_info
+    server_decrypted = res.get("decrypted_message")
+    Key=False
+    if server_decrypted == original_plaintext:
+        print("验证成功：服务端返回的解密内容与原始明文一致")
+        # （可选）如果验证通过，再执行实际的容器创建逻辑
+        # 这里放原有的容器创建、数据库写入等代码
+        Key=True
+    else:
+        print("验证失败：解密内容不一致")
+
     # 直接通过绑定表建立关联
     add_binding(user_id=user_id,
                 container_id=container_id,
                 username=user_name,
                 public_key=None,
                 role=role)
-    return True
+    
+    if Key:
+        return True
+    return False
 #从container_id中移除user_id对应的用户访问权
 
 def remove_collaborator(machine_ip:str,container_id:int,user_id:int)->bool:
+    full_url = "http://172.17.0.6:5000/api/create_container"
+
     machine_id=get_id_by_ip(machine_ip=machine_ip)
     user_name=get_name_by_id(user_id)
     data={
@@ -151,14 +205,31 @@ def remove_collaborator(machine_ip:str,container_id:int,user_id:int)->bool:
     container_info=json.dumps(data)
     signatured_message=signature(container_info)
     encryptioned_message=signature(container_info)
-    res=send(encryptioned_message,signatured_message,machine_ip)
+    res=send(encryptioned_message,signatured_message,full_url)
+    
+    original_plaintext = container_info
+    server_decrypted = res.get("decrypted_message")
+    Key=False
+    if server_decrypted == original_plaintext:
+        print("验证成功：服务端返回的解密内容与原始明文一致")
+        # （可选）如果验证通过，再执行实际的容器创建逻辑
+        # 这里放原有的容器创建、数据库写入等代码
+        Key=True
+    else:
+        print("验证失败：解密内容不一致")
+    
     # 仅删除绑定
     remove_binding(user_id,container_id)
-    return True
+    
+    if Key:
+        return True
+    return False
 
 #修改user_id对container_id的访问权
 
 def update_role(machine_ip:str,container_id:int,user_id:int,updated_role:ROLE)->bool:
+    full_url = "http://172.17.0.6:5000/api/create_container"
+
     machine_id=get_id_by_ip(machine_ip=machine_ip)
     user_name=get_name_by_id(user_id)
     data={
@@ -172,9 +243,24 @@ def update_role(machine_ip:str,container_id:int,user_id:int,updated_role:ROLE)->
     signatured_message=signature(container_info)
     encryptioned_message=signature(container_info)
     # 使用 machine_ip 发送
-    res=send(encryptioned_message,signatured_message,machine_ip)
+    res=send(encryptioned_message,signatured_message,full_url)
+
+    original_plaintext = container_info
+    server_decrypted = res.get("decrypted_message")
+    Key=False
+    if server_decrypted == original_plaintext:
+        print("验证成功：服务端返回的解密内容与原始明文一致")
+        # （可选）如果验证通过，再执行实际的容器创建逻辑
+        # 这里放原有的容器创建、数据库写入等代码
+        Key=True
+    else:
+        print("验证失败：解密内容不一致")
+    
     update_binding(user_id,container_id,role=updated_role)
-    return True
+    
+    if Key:
+        return True
+    return False
 
 #返回容器的细节信息
 def get_container_detail_information(container_id:int)->container_detail_information:
