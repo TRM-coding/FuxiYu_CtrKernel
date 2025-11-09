@@ -38,7 +38,7 @@ def test_Create_container():
     assert len(users) > 0, "数据库中没有测试用户数据"
     assert len(machines) > 0, "数据库中没有测试机器数据"
 
-    # 使用第一台机器的 IP 地址
+    # 使用第一台机器的 ID
     machine = machines[0]
 
     for user in users:
@@ -62,7 +62,7 @@ def test_Create_container():
             # 创建容器
             Create_container(
                 user_name=user.username,
-                machine_ip=machine.machine_ip,
+                machine_id=machine.id,
                 container=Container_info(
                     name=cname,
                     image="ubuntu:latest",
@@ -135,16 +135,15 @@ def test_update_role():
     
     container_id = existing_container.id
     user_id = existing_user.id
-    machine_ip = existing_machine.machine_ip
     
     try:
         # 测试1: 正常更新角色
         result = update_role(
-            machine_ip=machine_ip,
             container_id=container_id,
             user_id=user_id,
             updated_role=ROLE.ADMIN
         )
+
         
         # 验证返回结果
         assert result is True, "更新角色应该返回 True"
@@ -165,11 +164,11 @@ def test_update_role():
     try:
         # 测试2: 更新为 collaborator 角色
         result = update_role(
-            machine_ip=machine_ip,
             container_id=container_id,
             user_id=user_id,
             updated_role=ROLE.COLLABORATOR
         )
+
         
         assert result is True, "更新为 collaborator 角色应该返回 True"
         
@@ -185,29 +184,10 @@ def test_update_role():
     except Exception as e:
         pytest.fail(f"更新为 collaborator 角色时发生异常: {str(e)}")
     
-    # 测试3: 不存在的机器IP
-    non_existent_ip = "999.999.999.999"
-    try:
-        result = update_role(
-            machine_ip=non_existent_ip,
-            container_id=container_id,
-            user_id=user_id,
-            updated_role=ROLE.ADMIN
-        )
-        # 如果函数没有抛出异常，检查返回值
-        if result is not None:
-            # 根据实际实现，可能返回 False 或 True
-            # 我们只记录这种情况，不强制要求返回 False
-            pass
-    except Exception:
-        # 允许抛出异常
-        pass
-    
     # 测试4: 不存在的容器ID
     non_existent_container_id = 999999
     try:
         result = update_role(
-            machine_ip=machine_ip,
             container_id=non_existent_container_id,
             user_id=user_id,
             updated_role=ROLE.ADMIN
@@ -223,7 +203,6 @@ def test_update_role():
     non_existent_user_id = 999999
     try:
         result = update_role(
-            machine_ip=machine_ip,
             container_id=container_id,
             user_id=non_existent_user_id,
             updated_role=ROLE.ADMIN
@@ -238,7 +217,6 @@ def test_update_role():
     # 测试6: 边界情况 - 容器ID为0
     try:
         result = update_role(
-            machine_ip=machine_ip,
             container_id=0,
             user_id=user_id,
             updated_role=ROLE.ADMIN
@@ -256,7 +234,6 @@ def test_update_role():
     # 测试7: 边界情况 - 用户ID为0
     try:
         result = update_role(
-            machine_ip=machine_ip,
             container_id=container_id,
             user_id=0,
             updated_role=ROLE.ADMIN
@@ -268,25 +245,10 @@ def test_update_role():
         # 允许抛出异常
         pass
     
-    # 测试8: 空机器IP
-    try:
-        result = update_role(
-            machine_ip="",
-            container_id=container_id,
-            user_id=user_id,
-            updated_role=ROLE.ADMIN
-        )
-        # 不强制要求必须抛出异常
-        if result is not None:
-            pass
-    except Exception:
-        # 允许抛出异常
-        pass
     
     # 测试9: 验证更新到 ROOT 角色
     try:
         result = update_role(
-            machine_ip=machine_ip,
             container_id=container_id,
             user_id=user_id,
             updated_role=ROLE.ROOT
@@ -311,7 +273,6 @@ def test_update_role():
     try:
         # 第一次更新
         result1 = update_role(
-            machine_ip=machine_ip,
             container_id=container_id,
             user_id=user_id,
             updated_role=ROLE.COLLABORATOR
@@ -319,7 +280,6 @@ def test_update_role():
         
         # 第二次更新
         result2 = update_role(
-            machine_ip=machine_ip,
             container_id=container_id,
             user_id=user_id,
             updated_role=ROLE.ADMIN
@@ -365,7 +325,6 @@ def test_update_role():
         try:
             # 尝试更新一个不存在的绑定关系
             result = update_role(
-                machine_ip=machine_ip,
                 container_id=test_container.id,
                 user_id=test_user.id,
                 updated_role=ROLE.ADMIN
@@ -409,7 +368,7 @@ def test_get_container_detail_information():
         
         # 验证必需的字段
         required_fields = [
-            "container_name", "container_image", "machine_ip", 
+            "container_name", "container_image", "machine_id", 
             "container_status", "port", "owners", "accounts"
         ]
         for field in required_fields:
@@ -418,7 +377,7 @@ def test_get_container_detail_information():
         # 验证字段数据类型和内容
         assert isinstance(result["container_name"], str), "容器名称应该是字符串"
         assert isinstance(result["container_image"], str), "容器镜像应该是字符串"
-        assert isinstance(result["machine_ip"], str), "机器IP应该是字符串"
+        assert isinstance(result["machine_id"], int), "机器ID应该是字符串"
         assert isinstance(result["container_status"], str), "容器状态应该是字符串"
         assert isinstance(result["port"], int), "端口应该是整数"
         assert isinstance(result["owners"], list), "所有者应该是列表"
@@ -478,9 +437,9 @@ def test_get_container_detail_information():
         assert result["container_image"] == existing_container.image, "容器镜像应该一致"
         assert result["port"] == existing_container.port, "容器端口应该一致"
         
-        # 验证机器IP一致性
+        # 验证机器ID一致性
         if existing_container.machine:
-            assert result["machine_ip"] == existing_container.machine.machine_ip, "机器IP应该一致"
+            assert result["machine_id"] == existing_container.id, "机器ID应该一致"
         
         # 验证状态一致性
         assert result["container_status"] == existing_container.container_status.value, "容器状态应该一致"
@@ -493,34 +452,34 @@ def test_list_all_container_bref_information():
     from ..services.container_tasks import list_all_container_bref_information
     
     # 测试1: 正常分页查询
-    machine_ip = "10.0.0.10"  # 使用测试数据库中存在的机器IP
+    machine_id = 1  # 使用测试数据库中存在的机器ID
     page_number = 0
     page_size = 5
     
-    result = list_all_container_bref_information(machine_ip, page_number, page_size)
+    result = list_all_container_bref_information(machine_id, page_number, page_size)
     
     # 验证返回结果
     assert isinstance(result, list), "应该返回列表"
     
-    # 根据测试数据库，10.0.0.10机器上有多个容器
+    # 根据测试数据库，id为1机器上有多个容器
     assert len(result) > 0, "应该返回容器信息"
     
     # 验证每个容器的数据结构
     for container_info in result:
         assert hasattr(container_info, 'container_name'), "容器信息应该包含容器名称"
-        assert hasattr(container_info, 'machine_ip'), "容器信息应该包含机器IP"
+        assert hasattr(container_info, 'machine_id'), "容器信息应该包含机器Id"
         assert hasattr(container_info, 'port'), "容器信息应该包含端口"
         assert hasattr(container_info, 'container_status'), "容器信息应该包含状态"
         
-        assert container_info.machine_ip == machine_ip, "机器IP应该匹配"
+        assert container_info.machine_id == machine_id, "机器ID应该匹配"
         assert isinstance(container_info.port, int), "端口应该是整数"
         valid_status_values = ['online', 'offline', 'maintenance']
         assert container_info.container_status in valid_status_values, f"状态应该是有效值，当前状态: {container_info.container_status}"
     
     # 测试2: 分页功能验证
     page_size_2 = 3
-    result_page1 = list_all_container_bref_information(machine_ip, 0, page_size_2)
-    result_page2 = list_all_container_bref_information(machine_ip, 1, page_size_2)
+    result_page1 = list_all_container_bref_information(machine_id, 0, page_size_2)
+    result_page2 = list_all_container_bref_information(machine_id, 1, page_size_2)
     
     # 验证分页结果不重复（如果数据足够多）
     if len(result_page1) == page_size_2 and len(result_page2) > 0:
@@ -529,20 +488,20 @@ def test_list_all_container_bref_information():
         # 确保两页数据没有重复（理想情况）
         assert page1_names.isdisjoint(page2_names), "分页数据不应该重复"
     
-    # 测试3: 不存在的机器IP
-    non_existent_ip = "192.168.1.999"
-    result_empty = list_all_container_bref_information(non_existent_ip, 0, 10)
+    # 测试3: 不存在的机器ID
+    non_existent_id = 999999
+    result_empty = list_all_container_bref_information(non_existent_id, 0, 10)
     
     assert isinstance(result_empty, list), "即使机器不存在也应该返回列表"
     
-    # 修复：检查返回的容器是否都属于不存在的机器IP
+    # 检查返回的容器是否都属于不存在的机器ID
     for container_info in result_empty:
-        assert container_info.machine_ip != non_existent_ip, f"返回的容器IP {container_info.machine_ip} 不应该匹配不存在的IP {non_existent_ip}"
+        assert container_info.machine_id != non_existent_id, f"返回的容器ID {container_info.machine_id} 不应该匹配不存在的ID {non_existent_id}"
     
     # 测试4: 边界情况 - 页数为负数（修复这个测试）
     # 使用 try-except 处理可能的异常，或者测试函数应该处理负数页数
     try:
-        result_negative = list_all_container_bref_information(machine_ip, -1, 5)
+        result_negative = list_all_container_bref_information(machine_id, -1, 5)
         # 如果函数成功处理了负数，验证返回类型
         assert isinstance(result_negative, list), "负页数应该返回列表"
     except Exception:
@@ -551,15 +510,15 @@ def test_list_all_container_bref_information():
         pass
     
     # 测试5: 边界情况 - 页面大小为0
-    result_zero_size = list_all_container_bref_information(machine_ip, 0, 0)
+    result_zero_size = list_all_container_bref_information(machine_id, 0, 0)
     assert isinstance(result_zero_size, list), "页面大小为0应该返回列表"
     
     # 测试6: 验证不同机器的容器
-    other_machine_ip = "10.0.0.11"
-    result_other = list_all_container_bref_information(other_machine_ip, 0, 10)
+    other_machine_id = 2
+    result_other = list_all_container_bref_information(other_machine_id, 0, 10)
     
     assert isinstance(result_other, list), "应该返回列表"
     if len(result_other) > 0:
         for container_info in result_other:
-            assert container_info.machine_ip == other_machine_ip, "机器IP应该匹配查询的机器"
+            assert container_info.machine_id == other_machine_id, "机器ID应该匹配查询的机器"
 ##################################

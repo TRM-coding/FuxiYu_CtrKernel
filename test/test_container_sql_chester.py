@@ -102,7 +102,7 @@ def test_remove_container():
         assert test_binding is not None, "测试绑定应该存在"
         
         # 3) 调用被测试函数
-        result = remove_container(machine_ip=machine_ip, container_id=container_id)
+        result = remove_container(container_id=container_id)
         
         # 4) 验证函数返回结果
         assert result is True, "remove_container 应该返回 True"
@@ -233,7 +233,6 @@ def test_add_collaborator():
         
         # 3) 调用 add_collaborator 函数
         result = add_collaborator(
-            machine_ip=machine_ip,
             container_id=container.id,
             user_id=collaborator_user.id,
             role=ROLE.COLLABORATOR
@@ -361,7 +360,6 @@ def test_remove_collaborator():
         # 3) 调用 remove_collaborator 移除第一个用户的访问权
         user_to_remove = test_users[0]
         result = remove_collaborator(
-            machine_ip=test_machine.machine_ip,
             container_id=test_container.id,
             user_id=user_to_remove.id
         )
@@ -390,7 +388,6 @@ def test_remove_collaborator():
         # 5) 测试移除不存在的绑定关系（应该仍然返回True，但数据库不变）
         non_existent_user_id = 99999
         result_nonexistent = remove_collaborator(
-            machine_ip=test_machine.machine_ip,
             container_id=test_container.id,
             user_id=non_existent_user_id
         )

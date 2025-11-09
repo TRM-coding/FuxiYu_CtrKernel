@@ -52,7 +52,7 @@ def send(ciphertext:bytes,signature:bytes,mechine_ip:str, timeout:float=5.0)->di
 ####################################################
 class container_bref_information(BaseModel):
     container_name:str
-    machine_ip:str
+    machine_id:int
     port:int
     container_status:str
 
@@ -72,9 +72,8 @@ class container_detail_information(BaseModel):
 ####################################################
 
 # 将user_id作为admin，创建新容器
-def Create_container(user_name:str,machine_ip:str,container:Container_info,public_key=None)->bool:
+def Create_container(user_name:str,machine_id:str,container:Container_info,public_key=None)->bool:
     full_url = base_url+"/create_container"
-    machine_id=get_id_by_ip(machine_ip=machine_ip)
     free_port = get_the_first_free_port(machine_id=machine_id)
     container.set_port(free_port)
     container_info=dict()
@@ -86,6 +85,8 @@ def Create_container(user_name:str,machine_ip:str,container:Container_info,publi
     res=send(encryptioned_message,signatured_message,full_url)
     print(res)
 
+    #######
+    # DEBUG PURPOSE
     Key=False
     original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
     server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
@@ -95,8 +96,10 @@ def Create_container(user_name:str,machine_ip:str,container:Container_info,publi
         # 这里放原有的容器创建、数据库写入等代码
         Key=True
     else:
-        raise Exception("验证失败：解密内容不一致: \n原始："+ original_plaintext
+        raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
                         + "\n回应：" + str(res))
+    # DEBUG PURPOSE
+    #######
 
 
     # 写入容器记录
@@ -120,10 +123,9 @@ def Create_container(user_name:str,machine_ip:str,container:Container_info,publi
     return False
 
 #删除容器并删除其所有者记录
-def remove_container(machine_ip:str,container_id:str)->bool:
+def remove_container(container_id:int)->bool:
     full_url = base_url+"/remove_container"
 
-    machine_id=get_id_by_ip(machine_ip=machine_ip)
     data={
         "config":{
             "container_id":container_id
@@ -135,6 +137,8 @@ def remove_container(machine_ip:str,container_id:str)->bool:
     encryptioned_message=encryption(container_info)
     res=send(encryptioned_message,signatured_message,full_url)
 
+    #######
+    # DEBUG PURPOSE
     Key=False
     original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
     server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
@@ -144,8 +148,10 @@ def remove_container(machine_ip:str,container_id:str)->bool:
         # 这里放原有的容器创建、数据库写入等代码
         Key=True
     else:
-        raise Exception("验证失败：解密内容不一致: \n原始："+ original_plaintext
+        raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
                         + "\n回应：" + str(res))
+    # DEBUG PURPOSE
+    #######
     
     # 移除所有绑定并删除容器
     remove_binding(0, container_id, all=True)
@@ -156,10 +162,9 @@ def remove_container(machine_ip:str,container_id:str)->bool:
     return False
 #将container_id对应的容器新增user_id作为collaborator,其权限为role
 
-def add_collaborator(machine_ip,container_id:int,user_id:int,role:ROLE)->bool:
+def add_collaborator(container_id:int,user_id:int,role:ROLE)->bool:
     full_url = base_url+"/add_collaborator"
 
-    machine_id=get_id_by_ip(machine_ip=machine_ip)
     user_name=get_name_by_id(user_id)
     data={
         "config":{
@@ -174,6 +179,8 @@ def add_collaborator(machine_ip,container_id:int,user_id:int,role:ROLE)->bool:
     encryptioned_message=encryption(container_info)
     res=send(encryptioned_message,signatured_message,full_url)
 
+    #######
+    # DEBUG PURPOSE
     Key=False
     original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
     server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
@@ -183,8 +190,10 @@ def add_collaborator(machine_ip,container_id:int,user_id:int,role:ROLE)->bool:
         # 这里放原有的容器创建、数据库写入等代码
         Key=True
     else:
-        raise Exception("验证失败：解密内容不一致: \n原始："+ original_plaintext
+        raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
                         + "\n回应：" + str(res))
+    # DEBUG PURPOSE
+    #######
 
     # 直接通过绑定表建立关联
     add_binding(user_id=user_id,
@@ -198,10 +207,9 @@ def add_collaborator(machine_ip,container_id:int,user_id:int,role:ROLE)->bool:
     return False
 #从container_id中移除user_id对应的用户访问权
 
-def remove_collaborator(machine_ip:str,container_id:int,user_id:int)->bool:
+def remove_collaborator(container_id:int,user_id:int)->bool:
     full_url = base_url+"/remove_collaborator"
 
-    machine_id=get_id_by_ip(machine_ip=machine_ip)
     user_name=get_name_by_id(user_id)
     data={
         "config":{
@@ -214,6 +222,8 @@ def remove_collaborator(machine_ip:str,container_id:int,user_id:int)->bool:
     encryptioned_message=encryption(container_info)
     res=send(encryptioned_message,signatured_message,full_url)
     
+    #######
+    # DEBUG PURPOSE
     Key=False
     original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
     server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
@@ -223,8 +233,10 @@ def remove_collaborator(machine_ip:str,container_id:int,user_id:int)->bool:
         # 这里放原有的容器创建、数据库写入等代码
         Key=True
     else:
-        raise Exception("验证失败：解密内容不一致: \n原始："+ original_plaintext
+        raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
                         + "\n回应：" + str(res))
+    # DEBUG PURPOSE
+    #######
     
     # 仅删除绑定
     remove_binding(user_id,container_id)
@@ -235,10 +247,9 @@ def remove_collaborator(machine_ip:str,container_id:int,user_id:int)->bool:
 
 #修改user_id对container_id的访问权
 
-def update_role(machine_ip:str,container_id:int,user_id:int,updated_role:ROLE)->bool:
+def update_role(container_id:int,user_id:int,updated_role:ROLE)->bool:
     full_url = base_url+"/update_role"
 
-    machine_id=get_id_by_ip(machine_ip=machine_ip)
     user_name=get_name_by_id(user_id)
     data={
         "config":{
@@ -253,6 +264,8 @@ def update_role(machine_ip:str,container_id:int,user_id:int,updated_role:ROLE)->
     # 使用 machine_ip 发送
     res=send(encryptioned_message,signatured_message,full_url)
 
+    #######
+    # DEBUG PURPOSE
     Key=False
     original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
     server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
@@ -262,9 +275,11 @@ def update_role(machine_ip:str,container_id:int,user_id:int,updated_role:ROLE)->
         # 这里放原有的容器创建、数据库写入等代码
         Key=True
     else:
-        raise Exception("验证失败：解密内容不一致: \n原始："+ original_plaintext
+        raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
                         + "\n回应：" + str(res))
-    
+    # DEBUG PURPOSE
+    #######
+
     update_binding(user_id,container_id,role=updated_role)
     
     if Key:
@@ -280,7 +295,7 @@ def get_container_detail_information(container_id:int)->container_detail_informa
     res={
         "container_name":container.name,
         "container_image":container.image,
-        "machine_ip":container.machine.machine_ip,
+        "machine_id":container.machine_id,
         "container_status":container.container_status.value,
         "port":container.port,
         "owners":[get_name_by_id(binding['user_id']) for binding in owener_bindings],
@@ -291,14 +306,13 @@ def get_container_detail_information(container_id:int)->container_detail_informa
 
 
 #返回一页容器的概要信息
-def list_all_container_bref_information(machine_ip:str, page_number:int, page_size:int)->list[container_bref_information]:
-    machine_id = get_id_by_ip(machine_ip=machine_ip)
+def list_all_container_bref_information(machine_id:int, page_number:int, page_size:int)->list[container_bref_information]:
     containers = list_containers(machine_id=machine_id, limit=page_size, offset=page_number*page_size)
     res = []
     for container in containers:
         info = container_bref_information(
             container_name=container.name,
-            machine_ip=container.machine.machine_ip,
+            machine_id=container.machine_id,
             port=container.port,
             container_status=container.container_status.value
         )
