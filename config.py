@@ -15,6 +15,7 @@ class SqlConfig:
 class KeyConfig:
     PUBLIC_KEY_PATH='public_A.pem'
     PRIVATE_KEY_PATH='private_A.pem'
+    PUBLIC_KEY_NODE='public_node.pem'
 
 # 新增：统一的 AppConfig 和 get_config
 class AppConfig(SqlConfig, KeyConfig):
