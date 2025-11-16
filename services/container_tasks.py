@@ -7,7 +7,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
 from pydantic import BaseModel
 
-from ..config import KeyConfig
+from ..config import CommsConfig
 from ..constant import *
 from ..repositories import containers_repo, machine_repo
 from ..repositories.machine_repo import *
@@ -21,7 +21,7 @@ from ..repositories.usercontainer_repo import *
 ####################################################
 #发送指令到集群实体机
 
-base_url = "http://172.17.0.6:5000/api"
+base_url = CommsConfig.BASE_URL
 
 def send(ciphertext:bytes,signature:bytes,mechine_ip:str, timeout:float=5.0)->dict:
     """
@@ -72,7 +72,7 @@ class container_detail_information(BaseModel):
 ####################################################
 
 # 将user_id作为admin，创建新容器
-def Create_container(user_name:str,machine_id:str,container:Container_info,public_key=None)->bool:
+def Create_container(user_name:str,machine_id:str,container:Container_info,public_key=None, debug=False)->bool:
     full_url = base_url+"/create_container"
     free_port = get_the_first_free_port(machine_id=machine_id)
     container.set_port(free_port)
@@ -85,21 +85,24 @@ def Create_container(user_name:str,machine_id:str,container:Container_info,publi
     res=send(encryptioned_message,signatured_message,full_url)
     print(res)
 
-    #######
-    # DEBUG PURPOSE
-    Key=False
-    original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
-    server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
-    if server_decrypted_dict == original_dict:
-        print("验证成功：服务端返回的解密内容与原始明文一致")
-        # （可选）如果验证通过，再执行实际的容器创建逻辑
-        # 这里放原有的容器创建、数据库写入等代码
-        Key=True
+    if debug:
+        #######
+        # DEBUG PURPOSE
+        Key=False
+        original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
+        server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
+        if server_decrypted_dict == original_dict:
+            print("验证成功：服务端返回的解密内容与原始明文一致")
+            # （可选）如果验证通过，再执行实际的容器创建逻辑
+            # 这里放原有的容器创建、数据库写入等代码
+            Key=True
+        else:
+            raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
+                            + "\n回应：" + str(res))
+        # DEBUG PURPOSE
+        #######
     else:
-        raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
-                        + "\n回应：" + str(res))
-    # DEBUG PURPOSE
-    #######
+        Key=True
 
 
     # 写入容器记录
@@ -123,7 +126,7 @@ def Create_container(user_name:str,machine_id:str,container:Container_info,publi
     return False
 
 #删除容器并删除其所有者记录
-def remove_container(container_id:int)->bool:
+def remove_container(container_id:int, debug=False)->bool:
     full_url = base_url+"/remove_container"
 
     data={
@@ -137,21 +140,24 @@ def remove_container(container_id:int)->bool:
     encryptioned_message=encryption(container_info)
     res=send(encryptioned_message,signatured_message,full_url)
 
-    #######
-    # DEBUG PURPOSE
-    Key=False
-    original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
-    server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
-    if server_decrypted_dict == original_dict:
-        print("验证成功：服务端返回的解密内容与原始明文一致")
-        # （可选）如果验证通过，再执行实际的容器创建逻辑
-        # 这里放原有的容器创建、数据库写入等代码
-        Key=True
+    if debug:
+        #######
+        # DEBUG PURPOSE
+        Key=False
+        original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
+        server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
+        if server_decrypted_dict == original_dict:
+            print("验证成功：服务端返回的解密内容与原始明文一致")
+            # （可选）如果验证通过，再执行实际的容器创建逻辑
+            # 这里放原有的容器创建、数据库写入等代码
+            Key=True
+        else:
+            raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
+                            + "\n回应：" + str(res))
+        # DEBUG PURPOSE
+        #######
     else:
-        raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
-                        + "\n回应：" + str(res))
-    # DEBUG PURPOSE
-    #######
+        Key=True
     
     # 移除所有绑定并删除容器
     remove_binding(0, container_id, all=True)
@@ -162,7 +168,7 @@ def remove_container(container_id:int)->bool:
     return False
 #将container_id对应的容器新增user_id作为collaborator,其权限为role
 
-def add_collaborator(container_id:int,user_id:int,role:ROLE)->bool:
+def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
     full_url = base_url+"/add_collaborator"
 
     user_name=get_name_by_id(user_id)
@@ -179,22 +185,24 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE)->bool:
     encryptioned_message=encryption(container_info)
     res=send(encryptioned_message,signatured_message,full_url)
 
-    #######
-    # DEBUG PURPOSE
-    Key=False
-    original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
-    server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
-    if server_decrypted_dict == original_dict:
-        print("验证成功：服务端返回的解密内容与原始明文一致")
-        # （可选）如果验证通过，再执行实际的容器创建逻辑
-        # 这里放原有的容器创建、数据库写入等代码
-        Key=True
+    if debug:
+        #######
+        # DEBUG PURPOSE
+        Key=False
+        original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
+        server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
+        if server_decrypted_dict == original_dict:
+            print("验证成功：服务端返回的解密内容与原始明文一致")
+            # （可选）如果验证通过，再执行实际的容器创建逻辑
+            # 这里放原有的容器创建、数据库写入等代码
+            Key=True
+        else:
+            raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
+                            + "\n回应：" + str(res))
+        # DEBUG PURPOSE
+        #######
     else:
-        raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
-                        + "\n回应：" + str(res))
-    # DEBUG PURPOSE
-    #######
-
+        Key=True
     # 直接通过绑定表建立关联
     add_binding(user_id=user_id,
                 container_id=container_id,
@@ -207,7 +215,7 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE)->bool:
     return False
 #从container_id中移除user_id对应的用户访问权
 
-def remove_collaborator(container_id:int,user_id:int)->bool:
+def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
     full_url = base_url+"/remove_collaborator"
 
     user_name=get_name_by_id(user_id)
@@ -222,22 +230,24 @@ def remove_collaborator(container_id:int,user_id:int)->bool:
     encryptioned_message=encryption(container_info)
     res=send(encryptioned_message,signatured_message,full_url)
     
-    #######
-    # DEBUG PURPOSE
-    Key=False
-    original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
-    server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
-    if server_decrypted_dict == original_dict:
-        print("验证成功：服务端返回的解密内容与原始明文一致")
-        # （可选）如果验证通过，再执行实际的容器创建逻辑
-        # 这里放原有的容器创建、数据库写入等代码
-        Key=True
+    if debug:
+        #######
+        # DEBUG PURPOSE
+        Key=False
+        original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
+        server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
+        if server_decrypted_dict == original_dict:
+            print("验证成功：服务端返回的解密内容与原始明文一致")
+            # （可选）如果验证通过，再执行实际的容器创建逻辑
+            # 这里放原有的容器创建、数据库写入等代码
+            Key=True
+        else:
+            raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
+                            + "\n回应：" + str(res))
+        # DEBUG PURPOSE
+        #######
     else:
-        raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
-                        + "\n回应：" + str(res))
-    # DEBUG PURPOSE
-    #######
-    
+        Key=True
     # 仅删除绑定
     remove_binding(user_id,container_id)
     
@@ -247,7 +257,7 @@ def remove_collaborator(container_id:int,user_id:int)->bool:
 
 #修改user_id对container_id的访问权
 
-def update_role(container_id:int,user_id:int,updated_role:ROLE)->bool:
+def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->bool:
     full_url = base_url+"/update_role"
 
     user_name=get_name_by_id(user_id)
@@ -264,22 +274,24 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE)->bool:
     # 使用 machine_ip 发送
     res=send(encryptioned_message,signatured_message,full_url)
 
-    #######
-    # DEBUG PURPOSE
-    Key=False
-    original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
-    server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
-    if server_decrypted_dict == original_dict:
-        print("验证成功：服务端返回的解密内容与原始明文一致")
-        # （可选）如果验证通过，再执行实际的容器创建逻辑
-        # 这里放原有的容器创建、数据库写入等代码
-        Key=True
+    if debug:
+        #######
+        # DEBUG PURPOSE
+        Key=False
+        original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
+        server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
+        if server_decrypted_dict == original_dict:
+            print("验证成功：服务端返回的解密内容与原始明文一致")
+            # （可选）如果验证通过，再执行实际的容器创建逻辑
+            # 这里放原有的容器创建、数据库写入等代码
+            Key=True
+        else:
+            raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
+                            + "\n回应：" + str(res))
+        # DEBUG PURPOSE
+        #######
     else:
-        raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
-                        + "\n回应：" + str(res))
-    # DEBUG PURPOSE
-    #######
-
+        Key=True
     update_binding(user_id,container_id,role=updated_role)
     
     if Key:

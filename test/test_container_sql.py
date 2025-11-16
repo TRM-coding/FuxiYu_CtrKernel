@@ -70,7 +70,8 @@ def test_Create_container():
                     cpu_number=2,
                     memory=2048
                 ),
-                public_key="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7..."
+                public_key="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7...",
+                debug=True
             )
 
             # 验证插入
@@ -191,7 +192,7 @@ def test_remove_container():
         assert test_binding is not None, "测试绑定应该存在"
         
         # 3) 调用被测试函数
-        result = remove_container(container_id=container_id)
+        result = remove_container(container_id=container_id, debug=True)
         
         # 4) 验证函数返回结果
         assert result is True, "remove_container 应该返回 True"
@@ -324,7 +325,8 @@ def test_add_collaborator():
         result = add_collaborator(
             container_id=container.id,
             user_id=collaborator_user.id,
-            role=ROLE.COLLABORATOR
+            role=ROLE.COLLABORATOR,
+            debug=True
         )
         
         # 4) 验证函数返回结果
@@ -450,7 +452,8 @@ def test_remove_collaborator():
         user_to_remove = test_users[0]
         result = remove_collaborator(
             container_id=test_container.id,
-            user_id=user_to_remove.id
+            user_id=user_to_remove.id,
+            debug=True
         )
         
         # 检查函数返回结果
@@ -478,7 +481,8 @@ def test_remove_collaborator():
         non_existent_user_id = 99999
         result_nonexistent = remove_collaborator(
             container_id=test_container.id,
-            user_id=non_existent_user_id
+            user_id=non_existent_user_id,
+            debug=True
         )
         
         assert result_nonexistent is True, "移除不存在的绑定关系也应该返回 True"
@@ -529,7 +533,8 @@ def test_update_role():
         result = update_role(
             container_id=container_id,
             user_id=user_id,
-            updated_role=ROLE.ADMIN
+            updated_role=ROLE.ADMIN,
+            debug=True
         )
 
         
@@ -554,7 +559,8 @@ def test_update_role():
         result = update_role(
             container_id=container_id,
             user_id=user_id,
-            updated_role=ROLE.COLLABORATOR
+            updated_role=ROLE.COLLABORATOR,
+            debug=True
         )
 
         
@@ -578,7 +584,8 @@ def test_update_role():
         result = update_role(
             container_id=non_existent_container_id,
             user_id=user_id,
-            updated_role=ROLE.ADMIN
+            updated_role=ROLE.ADMIN,
+            debug=True
         )
         if result is not None:
             # 根据实际实现，可能返回 False 或 True
@@ -593,7 +600,8 @@ def test_update_role():
         result = update_role(
             container_id=container_id,
             user_id=non_existent_user_id,
-            updated_role=ROLE.ADMIN
+            updated_role=ROLE.ADMIN,
+            debug=True
         )
         if result is not None:
             # 根据实际实现，可能返回 False 或 True
@@ -607,7 +615,8 @@ def test_update_role():
         result = update_role(
             container_id=0,
             user_id=user_id,
-            updated_role=ROLE.ADMIN
+            updated_role=ROLE.ADMIN,
+            debug=True
         )
         # 如果函数没有抛出异常，我们只记录这种情况
         # 不强制要求必须抛出异常或返回False
@@ -624,7 +633,8 @@ def test_update_role():
         result = update_role(
             container_id=container_id,
             user_id=0,
-            updated_role=ROLE.ADMIN
+            updated_role=ROLE.ADMIN,
+            debug=True
         )
         # 同样，不强制要求必须抛出异常
         if result is not None:
@@ -639,7 +649,8 @@ def test_update_role():
         result = update_role(
             container_id=container_id,
             user_id=user_id,
-            updated_role=ROLE.ROOT
+            updated_role=ROLE.ROOT,
+            debug=True
         )
         # 如果支持 ROOT 角色，验证结果
         if result is not None:
@@ -663,14 +674,16 @@ def test_update_role():
         result1 = update_role(
             container_id=container_id,
             user_id=user_id,
-            updated_role=ROLE.COLLABORATOR
+            updated_role=ROLE.COLLABORATOR,
+            debug=True
         )
         
         # 第二次更新
         result2 = update_role(
             container_id=container_id,
             user_id=user_id,
-            updated_role=ROLE.ADMIN
+            updated_role=ROLE.ADMIN,
+            debug=True
         )
         
         assert result1 is True and result2 is True, "连续更新应该都返回 True"
@@ -715,7 +728,8 @@ def test_update_role():
             result = update_role(
                 container_id=test_container.id,
                 user_id=test_user.id,
-                updated_role=ROLE.ADMIN
+                updated_role=ROLE.ADMIN,
+                debug=True
             )
             # 根据函数实现，这可能创建新绑定或返回False
             if result is not None:
