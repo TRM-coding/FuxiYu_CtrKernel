@@ -68,6 +68,7 @@ class container_detail_information(BaseModel):
 ####################################################
 
 # 将user_id作为admin，创建新容器
+##TODO:修改user_name为user_id
 def Create_container(user_name:str,machine_ip:str,container:Container_info,public_key=None)->bool:
     machine_id=get_id_by_ip(machine_ip=machine_ip)
     free_port = get_the_first_free_port(machine_id=machine_id)
@@ -97,6 +98,7 @@ def Create_container(user_name:str,machine_ip:str,container:Container_info,publi
     return True
 
 #删除容器并删除其所有者记录
+##TODO:修改machine_ip为machine_id
 def remove_container(machine_ip:str,container_id:str)->bool:
     machine_id=get_id_by_ip(machine_ip=machine_ip)
     data={
@@ -114,7 +116,7 @@ def remove_container(machine_ip:str,container_id:str)->bool:
     delete_container(container_id)
     return True
 #将container_id对应的容器新增user_id作为collaborator,其权限为role
-
+##TODO:修改machine_ip为machine_id
 def add_collaborator(machine_ip,container_id:int,user_id:int,role:ROLE)->bool:
     machine_id=get_id_by_ip(machine_ip=machine_ip)
     user_name=get_name_by_id(user_id)
@@ -139,6 +141,7 @@ def add_collaborator(machine_ip,container_id:int,user_id:int,role:ROLE)->bool:
     return True
 #从container_id中移除user_id对应的用户访问权
 
+##TODO:修改machine_ip为machine_id
 def remove_collaborator(machine_ip:str,container_id:int,user_id:int)->bool:
     machine_id=get_id_by_ip(machine_ip=machine_ip)
     user_name=get_name_by_id(user_id)
@@ -157,6 +160,7 @@ def remove_collaborator(machine_ip:str,container_id:int,user_id:int)->bool:
     return True
 
 #修改user_id对container_id的访问权
+##TODO:修改machine_ip为machine_id
 
 def update_role(machine_ip:str,container_id:int,user_id:int,updated_role:ROLE)->bool:
     machine_id=get_id_by_ip(machine_ip=machine_ip)
@@ -196,6 +200,7 @@ def get_container_detail_information(container_id:int)->container_detail_informa
 
 
 #返回一页容器的概要信息
+##TODO:修改machine_ip为machine_id
 def list_all_container_bref_information(machine_ip:str, page_number:int, page_size:int)->list[container_bref_information]:
     machine_id = get_id_by_ip(machine_ip=machine_ip)
     containers = list_containers(machine_id=machine_id, limit=page_size, offset=page_number*page_size)
