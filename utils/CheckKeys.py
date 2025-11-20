@@ -6,7 +6,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
 import json
 # 加载公钥和私钥，返回公钥和私钥对象
-def load_keys(private_key_path:str,pub_key_path:str,pub_key_control_path)->tuple[RSAPrivateKey,RSAPublicKey,RSAPublicKey]:
+def load_keys(private_key_path:str,pub_key_path:str,pub_key_node_path)->tuple[RSAPrivateKey,RSAPublicKey,RSAPublicKey]:
     with open(private_key_path, "rb") as f:
         private_key_A = serialization.load_pem_private_key(
             f.read(),
@@ -16,10 +16,10 @@ def load_keys(private_key_path:str,pub_key_path:str,pub_key_control_path)->tuple
     # 加载公钥
     with open(pub_key_path, "rb") as f:
         public_key_A = serialization.load_pem_public_key(f.read())
-    with open(pub_key_control_path,"rb") as f:
-        public_control=serialization.load_pem_public_key(f.read())
+    with open(pub_key_node_path,"rb") as f:
+        public_node = serialization.load_pem_public_key(f.read())
 
-    return (private_key_A,public_key_A,public_control)
+    return (private_key_A,public_key_A,public_node)
 
 def generate_keys()->tuple[RSAPrivateKey,RSAPublicKey]:
     private_key_A = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -47,8 +47,11 @@ def write_keys(path:str,key):
             )
 
 #加密信息
-def encryption(message:str,public_key_B:RSAPublicKey)->bytes:
-    ciphertext = public_key_B.encrypt(
+def encryption(message:str)->bytes:
+    _,_,PUBLIC_KEY_B=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH)
+    if isinstance(message, str):
+        message = message.encode('utf-8')
+    ciphertext = PUBLIC_KEY_B.encrypt(
         message,
         padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),
                     algorithm=hashes.SHA256(),
@@ -82,9 +85,9 @@ def decryption(ciphertext:bytes)->bytes:
 
 #验证签名
 def verify_signature(message:bytes, signature:bytes)->bool:
-    _,_,public_key_B=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH)
+    _,_,PUBLIC_KEY_B=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH)
     try:
-        public_key_B.verify(
+        PUBLIC_KEY_B.verify(
             signature,
             message,
             padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
