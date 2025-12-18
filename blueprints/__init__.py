@@ -59,8 +59,8 @@ def login():
 			'auth_token',
 			auth.token,
 			max_age=24*3600,  # 24小时
-			httponly=False,  
-			secure=False, 
+			httponly=True,   # 防止XSS攻击
+			secure=True, 
 			samesite='Lax'  # CSRF保护
 		)
 		
