@@ -6,7 +6,7 @@ from http import HTTPStatus
 from .. import create_app
 from ..extensions import db
 from ..models.user import User
-from ..utils.Authentication import Authentication
+from ..models.authentications import Authentication
 
 
 @pytest.fixture(scope="session")
@@ -15,8 +15,7 @@ def app():
     app.config.update(TESTING=True)
     with app.app_context():
         # 确保所有模型已导入后再建表
-        from ..models import user, machine, containers, usercontainer  # noqa: F401
-        from ..utils import Authentication as _auth  # noqa: F401
+        from ..models import user, machine, containers, usercontainer, authentications  # noqa: F401
         db.create_all()
         yield app
         # 为避免误删开发库数据，这里不 drop_all

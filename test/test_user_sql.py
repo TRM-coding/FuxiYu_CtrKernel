@@ -53,7 +53,10 @@ def test_Register():
         assert u.email == email
         assert u.graduation_year == graduation_year
         # 登录应成功
-        assert Login(username, password) is True
+        success, user, token = Login(username, password)
+        assert success is True
+        assert isinstance(user, User)
+        assert token is not None
     finally:
         # 4) 删除测试数据
         if target:
@@ -82,7 +85,10 @@ def test_Login():
 
     try:
         # 直接调用 login 验证是否能正常登录
-        assert Login(username, password) is True
+        success, user_or_reason, token = Login(username, password)
+        assert success is True
+        assert isinstance(user_or_reason, User)
+        assert token is not None
     finally:
         # 清理测试数据
         db.session.delete(u)
@@ -115,17 +121,20 @@ def test_Change_password():
         assert result is True, "正确旧密码应该修改成功"
         
         # 验证新密码可以登录
-        assert Login(username, new_password) is True, "新密码应该可以登录"
+        success, _, _ = Login(username, new_password)
+        assert success is True, "新密码应该可以登录"
         
         # 验证旧密码不能登录
-        assert Login(username, old_password) is False, "旧密码应该不能登录"
+        success_old, _, _ = Login(username, old_password)
+        assert success_old is False, "旧密码应该不能登录"
         
         # 测试2: 错误旧密码修改失败
         result_fail = Change_password(user, "wrong_old_password", "another_new_password")
         assert result_fail is False, "错误旧密码应该修改失败"
         
         # 验证密码仍然是之前设置的新密码
-        assert Login(username, new_password) is True, "密码修改失败后应该保持原密码"
+        success_check, _, _ = Login(username, new_password)
+        assert success_check is True, "密码修改失败后应该保持原密码"
         
         # 测试3: 空新密码（边界情况）
         #result_empty = Change_password(user, new_password, "")
@@ -136,13 +145,13 @@ def test_Change_password():
         
         # 测试4: 新旧密码相同 - 重构测试逻辑
         # 先确认当前状态
-        current_login_before = Login(username, new_password)
+        current_login_before, _, _ = Login(username, new_password)
         
         # 尝试修改为相同密码
         result_same = Change_password(user, new_password, new_password)
         
         # 修改后再次尝试登录
-        current_login_after = Login(username, new_password)
+        current_login_after, _, _ = Login(username, new_password)
         
         # 核心断言：无论修改操作结果如何，原密码必须始终有效
         assert current_login_before is True, "修改前原密码必须可以登录"
@@ -203,7 +212,7 @@ def test_Delete_user():
         assert user_after is None, "注销后用户应该从数据库中删除"
         
         # 验证用户无法再登录
-        login_result = Login(username, password)
+        login_result, _, _ = Login(username, password)
         assert login_result is False, "注销后用户应该无法登录"
         
     except Exception as e:

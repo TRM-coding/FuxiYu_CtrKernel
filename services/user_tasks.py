@@ -3,7 +3,10 @@ from ..models.user import User
 from werkzeug.security import check_password_hash, generate_password_hash
 from ..extensions import db
 from ..repositories.user_repo import *
+from ..repositories import authentications_repo
 from pydantic import BaseModel
+from datetime import datetime, timedelta
+import secrets
 
 #####################################
 # API Definition
@@ -17,12 +20,34 @@ class user_bref_information(BaseModel):
 
 #####################################
 #登录验证
-def Login(username: str, password: str) -> bool:
-
+def Login(username: str, password: str):
+    """用户登录验证并生成认证 token
+    
+    Args:
+        username: 用户名
+        password: 密码
+        
+    Returns:
+        tuple: (是否成功, User对象或错误原因, token或None)
+               - 用户不存在: (False, "user_not_found", None)
+               - 密码错误: (False, "password_incorrect", None)
+               - 登录成功: (True, User对象, token)
+    """
+    # 检查用户是否存在
     user = User.query.filter_by(username=username).first()
-    if user and check_password_hash(user.password_hash, password):
-        return True
-    return False
+    if not user:
+        return False, "user_not_found", None
+    
+    # 检查密码是否正确
+    if not check_password_hash(user.password_hash, password):
+        return False, "password_incorrect", None
+    
+    # 登录成功，生成 token
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.utcnow() + timedelta(hours=24)
+    auth = authentications_repo.create_auth(token, expires_at)
+    
+    return True, user, auth.token
 #####################################
 
 

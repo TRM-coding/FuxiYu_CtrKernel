@@ -1,6 +1,6 @@
-from flask import jsonify, request
+from flask import jsonify, request, make_response
 from . import api_bp
-from ..services import user_tasks as user_service
+from ..services import user_tasks
 from ..repositories import user_repo
 from ..schemas.user_schema import user_schema, users_schema
 
@@ -10,64 +10,132 @@ def list_users():
 	pass
 
 
-@api_bp.post("/users/register")
-def create_user():
-	pass
-
-@api_bp.post("/users/login")
-def login_user():
-    # 1. 解析请求体 JSON
-    data = request.get_json() or {}
-    username = data.get("username")
-    password = data.get("password")
-
-    if not username or not password:
-        return jsonify({
-            "code": 400,
-            "msg": "username and password are required"
-        }), 400
-
-    # 2. 调用你自己的登录逻辑
-    # 假设 Login 返回 (是否成功, 用户对象/错误信息, token)
-    ok, user_or_msg, token = Login(username, password)
-
-    if not ok:
-        # 登录失败
-        return jsonify({
-            "code": 401,
-            "msg": user_or_msg  # 比如 “用户名或密码错误”
-        }), 401
-
-    # 3. 组织响应数据
-    resp_body = {
-        "code": 0,
-        "msg": "ok",
-        "data": {
-            "user": {
-                "id": user_or_msg.id,
-                "username": user_or_msg.username,
-                # 其他需要返回的字段
-            },
-            "token": token
-        }
-    }
-
-    # 4. 如需设置 cookie（比如保存 token）
-    resp = make_response(jsonify(resp_body))
-    resp.set_cookie(
-        "auth_token",
-        token,
-        httponly=True,   # 防止 JS 读取，降低 XSS 风险
-        secure=True,     # 只在 HTTPS 发送
-        samesite="Lax",  # 减少 CSRF
-        max_age=7 * 24 * 3600  # 过期时间（秒）
-    )
-
-    return resp
+@api_bp.post("/register")
+def register():
+	'''
+	通信数据格式：
+	发送格式：
+	{
+		"username":"xxxx",
+		"email":"xxxx",
+		"password":"xxxx",
+		"graduation_year":xxxx
+	}
+	返回格式：
+	{
+		"success": [0|1],
+		"message": "xxxx",
+		"user": {...}
+	}
+	'''
+	"""用户注册 API"""
+	print("Register Called")
+	recived_data = request.get_json(silent=True)
+	if not recived_data:
+		return jsonify({"error":"invalid json"}), 400
 	
+	# 直接读取明文字段
+	username = recived_data.get("username")
+	email = recived_data.get("email")
+	password = recived_data.get("password")
+	graduation_year = recived_data.get("graduation_year")
+	
+	if not username or not email or not password:
+		return jsonify({"error": "username, email and password required"}), 400
+	
+	# 调用 service 层注册用户
+	user = user_tasks.Register(username, email, password, graduation_year)
+	
+	if user:
+		return jsonify({
+			"success": 1,
+			"message": "Registration successful",
+			"user": user_schema.dump(user)
+		}), 201
+	else:
+		return jsonify({
+			"success": 0,
+			"message": "Username or email already exists"
+		}), 400
+
+
+@api_bp.post("/login")
+def login():
+	'''
+	通信数据格式：
+	发送格式：
+	{
+		"username":"xxxx",
+		"password":"xxxx"
+	}
+	返回格式：
+	{
+		"success": [0|1],
+		"message": "xxxx",
+		"user_id": xxxx,
+		"username": "xxxx",
+		"email": "xxxx",
+		"token": "xxxx"
+	}
+	'''
+	"""用户登录 API"""
+	print("Login Called")
+	recived_data = request.get_json(silent=True)
+	if not recived_data:
+		return jsonify({"error":"invalid json"}), 400
+	
+	# 直接读取明文字段
+	username = recived_data.get("username")
+	password = recived_data.get("password")
+	
+	if not username or not password:
+		return jsonify({"error": "username and password required"}), 400
+	
+	# 调用 Login 函数，返回结果和错误原因
+	success, user_or_reason, token = user_tasks.Login(username, password)
+	
+	if success:
+		# 创建响应
+		response = make_response(jsonify({
+			"success": 1,
+			"message": "Login successful",
+			"user_id": user_or_reason.id,
+			"username": user_or_reason.username,
+			"email": user_or_reason.email,
+			"token": token,
+		}), 200)
+		
+		# 设置 cookies
+		response.set_cookie(
+			'auth_token',
+			token,
+			max_age=24*3600,  # 24小时
+			httponly=True,
+			secure=False,  # 内网环境
+			samesite='Lax'
+		)
+		
+		return response
+	else:
+		# user_or_reason 是错误原因字符串
+		error_reason = user_or_reason
+		error_messages = {
+			"user_not_found": "User does not exist",
+			"password_incorrect": "Password is incorrect"
+		}
+		message = error_messages.get(error_reason, "Login failed")
+		
+		return jsonify({
+			"success": 0,
+			"message": message,
+			"error_reason": error_reason
+		}), 401
+
+
 @api_bp.post("/users/change_password")
 def change_password_user():
 	pass
+
 
 @api_bp.post("/users/delete_user")
 def delete_user_api():
