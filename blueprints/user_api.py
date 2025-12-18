@@ -25,7 +25,9 @@ def register():
 	{
 		"success": [0|1],
 		"message": "xxxx",
-		"user": {...}
+		"user_id": xxxx,
+		"username": "xxxx",
+		"email": "xxxx"
 	}
 	'''
 	"""用户注册 API"""
@@ -44,18 +46,29 @@ def register():
 		return jsonify({"error": "username, email and password required"}), 400
 	
 	# 调用 service 层注册用户
-	user = user_tasks.Register(username, email, password, graduation_year)
+	success, user_or_reason, _ = user_tasks.Register(username, email, password, graduation_year)
 	
-	if user:
+	if success:
 		return jsonify({
 			"success": 1,
 			"message": "Registration successful",
-			"user": user_schema.dump(user)
+			"user_id": user_or_reason.id,
+			"username": user_or_reason.username,
+			"email": user_or_reason.email
 		}), 201
 	else:
+		# user_or_reason 是错误原因字符串
+		error_reason = user_or_reason
+		error_messages = {
+			"username_exists": "Username already exists",
+			"email_exists": "Email already exists"
+		}
+		message = error_messages.get(error_reason, "Registration failed")
+		
 		return jsonify({
 			"success": 0,
-			"message": "Username or email already exists"
+			"message": message,
+			"error_reason": error_reason
 		}), 400
 
 

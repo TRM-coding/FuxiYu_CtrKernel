@@ -188,9 +188,11 @@ def test_Delete_user():
     graduation_year = str(random.randint(2020, 2030))
 
     # 注册用户
-    user = Register(username, email, password, graduation_year)
-    if user is None:
+    success, user_or_reason, _ = Register(username, email, password, graduation_year)
+    if not success:
         pytest.skip("随机用户名或邮箱冲突，跳过测试")
+    
+    user = user_or_reason
 
     try:
         # 获取用户ID

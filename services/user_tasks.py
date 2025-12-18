@@ -53,11 +53,29 @@ def Login(username: str, password: str):
 
 #####################################
 #注册
-def Register(username: str, email: str, password: str, graduation_year) -> User | None:
-    # 检查用户名或邮箱是否已存在
-    if User.query.filter((User.username == username) | (User.email == email)).first():
-        return None  # 用户名或邮箱已存在，注册失败
-
+def Register(username: str, email: str, password: str, graduation_year):
+    """用户注册
+    
+    Args:
+        username: 用户名
+        email: 邮箱
+        password: 密码
+        graduation_year: 毕业年份
+        
+    Returns:
+        tuple: (是否成功, User对象或错误原因, None)
+               - 用户名已存在: (False, "username_exists", None)
+               - 邮箱已存在: (False, "email_exists", None)
+               - 注册成功: (True, User对象, None)
+    """
+    # 检查用户名是否已存在
+    if User.query.filter_by(username=username).first():
+        return False, "username_exists", None
+    
+    # 检查邮箱是否已存在
+    if User.query.filter_by(email=email).first():
+        return False, "email_exists", None
+    
     # 创建新用户
     new_user = User(
         username=username,
@@ -67,7 +85,7 @@ def Register(username: str, email: str, password: str, graduation_year) -> User 
     )
     db.session.add(new_user)
     db.session.commit()
-    return new_user
+    return True, new_user, None
 #####################################
 
 
