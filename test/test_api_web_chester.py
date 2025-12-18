@@ -48,11 +48,10 @@ def test_register_api_success(client):
     assert data.get("success") == 1
     assert data.get("user", {}).get("username") == payload["username"]
 
-    # 清理：删除创建的用户与其认证记录
+    # 清理：删除创建的用户
     with client.application.app_context():
         u = User.query.filter_by(username=payload["username"]).first()
         if u:
-            Authentication.query.filter_by(user_id=u.id).delete()
             db.session.delete(u)
             db.session.commit()
 
@@ -82,7 +81,6 @@ def test_login_api_success_sets_cookie(client):
     with client.application.app_context():
         u = User.query.filter_by(username=payload["username"]).first()
         if u:
-            Authentication.query.filter_by(user_id=u.id).delete()
             db.session.delete(u)
             db.session.commit()
 
@@ -108,6 +106,5 @@ def test_login_api_failure_wrong_password(client):
     with client.application.app_context():
         u = User.query.filter_by(username=payload["username"]).first()
         if u:
-            Authentication.query.filter_by(user_id=u.id).delete()
             db.session.delete(u)
             db.session.commit()

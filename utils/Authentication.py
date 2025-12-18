@@ -5,14 +5,8 @@ import secrets
 class Authentication(db.Model):
     __tablename__ = "authentications"
     
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
-    token = db.Column(db.String(255), unique=True, nullable=False, index=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    token = db.Column(db.String(255), primary_key=True, unique=True, nullable=False, index=True)
     expires_at = db.Column(db.DateTime, nullable=False)
-    
-    # 关系
-    user = db.relationship('User', backref='authentications')
     
     @staticmethod
     def generate_token():
@@ -24,7 +18,7 @@ class Authentication(db.Model):
         """为用户创建新的认证token
         
         Args:
-            user_id: 用户ID
+            user_id: 用户ID（此处不再使用，保留以兼容调用代码）
             expires_in_hours: token过期时间（小时数）
             
         Returns:
@@ -34,7 +28,6 @@ class Authentication(db.Model):
         expires_at = datetime.utcnow() + timedelta(hours=expires_in_hours)
         
         auth = Authentication(
-            user_id=user_id,
             token=token,
             expires_at=expires_at
         )
