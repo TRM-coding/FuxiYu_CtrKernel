@@ -256,6 +256,7 @@ def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
     return False
 
 #修改user_id对container_id的访问权
+##TODO:修改machine_ip为machine_id
 
 def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->bool:
     full_url = base_url+"/update_role"

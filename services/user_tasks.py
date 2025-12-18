@@ -3,6 +3,17 @@ from ..models.user import User
 from werkzeug.security import check_password_hash, generate_password_hash
 from ..extensions import db
 from ..repositories.user_repo import *
+from pydantic import BaseModel
+
+#####################################
+# API Definition
+
+class user_bref_information(BaseModel):
+    user_id:int
+    username:str
+    email:str
+    graduation_year:int
+#####################################
 
 #####################################
 #登录验证
@@ -52,6 +63,11 @@ def Delete_user(user_id: int) -> bool:
     
 #####################################
 
+
+#####################################
+# 分页返回users
+def List_all_user_bref_information(page_number:int, page_size:int)->list[user_bref_information]:
+    raise NotImplementedError
 
 #####################################
 #忘记密码
