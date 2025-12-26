@@ -5,7 +5,9 @@ from ..extensions import db
 from ..repositories.user_repo import *
 from ..repositories import authentications_repo
 from pydantic import BaseModel
+from typing import Any
 from datetime import datetime, timedelta
+from ..repositories.authentications_repo import *
 import secrets
 
 #####################################
@@ -92,24 +94,30 @@ def Register(username: str, email: str, password: str, graduation_year):
 #####################################
 #修改密码
 #####################################
-def Change_password(user: User, old_password: str, new_password: str) -> bool:
+def Change_password(user: User, old_password: str, new_password: str, token:str) -> dict:
+    if not is_token_valid(token):
+        return  {"error": "Invalid or expired token.","token": token}
     if check_password_hash(user.password_hash, old_password):
         update_user(user.id, password_hash=generate_password_hash(new_password))
-        return True
-    return False
+        return {"status": "Password changed successfully."}
+    return {"error": "Old password incorrect."}
 
 #####################################
 #注销用户
-def Delete_user(user_id: int) -> bool:
+def Delete_user(user_id: int, token:str) -> dict:
+    if not is_token_valid(token):
+        return  {"error": "Invalid or expired token.","token": token}
     delete_user(user_id=user_id)
-    return True
+    return {"status": "User deleted successfully."}
     
 #####################################
 
 
 #####################################
 # 分页返回users
-def List_all_user_bref_information(page_number:int, page_size:int)->list[user_bref_information]:
+def List_all_user_bref_information(page_number:int, page_size:int, token:str)->Any:
+    if not is_token_valid(token):
+        return  {"error": "Invalid or expired token.","token": token}
     raise NotImplementedError
 
 #####################################

@@ -1,6 +1,8 @@
 #TODO:完善异常处理机制
 from ..repositories.machine_repo import *
+from ..repositories.authentications_repo import *
 from pydantic import BaseModel
+from typing import Any
 #######################################
 #API Definition
 class machine_bref_information(BaseModel):
@@ -26,54 +28,62 @@ class machine_detail_information(BaseModel):
 #######################################
 # 添加一个新的机器到集群
 def Add_machine(machine_name:str,
-                   machine_ip:str,
-                   machine_type:MachineTypes,
-                   machine_description:str,
-                   cpu_core_number:int,
-                   gpu_number:int,
-                   gpu_type:str,
-                   memory_size:int,
-                   disk_size:int)->bool:
+                machine_ip:str,
+                machine_type:MachineTypes,
+                machine_description:str,
+                cpu_core_number:int,
+                gpu_number:int,
+                gpu_type:str,
+                memory_size:int,
+                disk_size:int,
+                token:str)->dict:
+    if not is_token_valid(token):
+       return  {"error": "Invalid or expired token.","token": token}
     create_machine(
-         machinename=machine_name,
-         machine_ip=machine_ip,
-         machine_type=machine_type,
-         machine_description=machine_description,
-         cpu_core_number=cpu_core_number,
-         gpu_number=gpu_number,
-         gpu_type=gpu_type,
-         memory_size=memory_size,
-         disk_size=disk_size
+        machinename=machine_name,
+        machine_ip=machine_ip,
+        machine_type=machine_type,
+        machine_description=machine_description,
+        cpu_core_number=cpu_core_number,
+        gpu_number=gpu_number,
+        gpu_type=gpu_type,
+        memory_size=memory_size,
+        disk_size=disk_size
     )
-    return True
+    return {"status": "Machine created successfully."}
 
 #######################################
 
 
 #######################################
 # 删除集群中的一个（一组）机器
-def Remove_machine(machine_id:list[int])->bool:
+def Remove_machine(machine_id:list[int], token:str)->dict:
+    if not is_token_valid(token):
+        return  {"error": "Invalid or expired token.","token": token}
     for id in machine_id:
         delete_machine(id)
-    return True
+    return {"status": "Machines deleted successfully."}
 #######################################
 
 
 #######################################
 # 更新机器的信息
-def Update_machine(machine_id: int, **fields) -> bool:
+def Update_machine(machine_id: int, token:str, **fields) -> dict:
+    if not is_token_valid(token):
+        return  {"error": "Invalid or expired token.","token": token}
     update_machine(machine_id, **fields)
-    return True    
+    return {"status": "Machine updated successfully."}
 #######################################
 
 
 #######################################
 # 根据机器ID获取机器的详细信息
-def Get_detail_information(machine_id:int)->machine_detail_information|None:
+def Get_detail_information(machine_id:int, token:str)->Any:
+    if not is_token_valid(token):
+        return  {"error": "Invalid or expired token.","token": token}
     machine=get_by_id(machine_id)
     if not machine:
-        return None
-
+        return {"error": "Machine not found"}
     return machine_detail_information(
         machine_name=machine.machine_name,
         machine_ip=machine.machine_ip,
@@ -91,7 +101,9 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
 
 #######################################
 # 获取一批机器的概要信息
-def List_all_machine_bref_information(page_number:int, page_size:int)->list[machine_bref_information]:
+def List_all_machine_bref_information(page_number:int, page_size:int, token:str)->Any:
+    if not is_token_valid(token):
+        return  {"error": "Invalid or expired token.","token": token}
     machines = list_machines(limit=page_size, offset=page_number*page_size)
     res = []
     for machine in machines:

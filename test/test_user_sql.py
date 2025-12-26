@@ -22,6 +22,20 @@ def app():
 def _ctx(app):
     with app.app_context():
         yield
+
+
+# 每个测试文件统一使用同一个 token，作用域为 module
+@pytest.fixture(scope="module")
+def auth_token(app):
+    import secrets
+    from datetime import datetime, timedelta
+    from ..repositories import authentications_repo
+
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.utcnow() + timedelta(hours=24)
+    authentications_repo.create_auth(token, expires_at)
+    yield token
+    authentications_repo.delete_auth(token)
 ##################################
 
 
@@ -98,7 +112,7 @@ def test_Login():
 ##################################
 #修改密码验证单元测试
 
-def test_Change_password():
+def test_Change_password(auth_token):
     import uuid
     import random
     from ..services.user_tasks import Change_password  # 导入修改密码函数
@@ -119,9 +133,10 @@ def test_Change_password():
     user = user_or_reason
 
     try:
-        # 测试1: 正确旧密码修改成功
-        result = Change_password(user, old_password, new_password)
-        assert result is True, "正确旧密码应该修改成功"
+        # 获取 token 并测试1: 正确旧密码修改成功
+        token = auth_token
+        result = Change_password(user, old_password, new_password, token)
+        assert isinstance(result, dict) and result.get("status") is not None, "正确旧密码应该修改成功"
         new_login_success, _, _ = Login(username, new_password)
         assert new_login_success is True, "新密码应该可以登录"
         
@@ -130,8 +145,8 @@ def test_Change_password():
         assert old_login_success is False, "旧密码应该不能登录"
         
         # 测试2: 错误旧密码修改失败
-        result_fail = Change_password(user, "wrong_old_password", "another_new_password")
-        assert result_fail is False, "错误旧密码应该修改失败"
+        result_fail = Change_password(user, "wrong_old_password", "another_new_password", token)
+        assert isinstance(result_fail, dict) and "error" in result_fail, "错误旧密码应该修改失败"
         
         # 验证密码仍然是之前设置的新密码
         check_login_success, _, _ = Login(username, new_password)
@@ -149,7 +164,7 @@ def test_Change_password():
         same_login_before, _, _ = Login(username, new_password)
         
         # 尝试修改为相同密码
-        result_same = Change_password(user, new_password, new_password)
+        result_same = Change_password(user, new_password, new_password, token)
         
         # 修改后再次尝试登录
         current_login_after, _, _ = Login(username, new_password)
@@ -159,10 +174,10 @@ def test_Change_password():
         assert current_login_after is True, "修改后原密码必须仍然可以登录"
         
         # 根据实际业务逻辑调整断言
-        if result_same is True:
+        if isinstance(result_same, dict) and result_same.get("status") is not None:
             # 如果允许修改相同密码，这是合理的
             pass
-        elif result_same is False:
+        elif isinstance(result_same, dict) and "error" in result_same:
             # 如果不允许修改相同密码，这也是合理的（安全性考虑）
             pass
         # 如果返回None或其他值，也不断言失败
@@ -176,7 +191,7 @@ def test_Change_password():
 ##################################
 #注销用户验证单元测试
 
-def test_Delete_user():
+def test_Delete_user(auth_token):
     import uuid
     import random
     from ..services.user_tasks import Delete_user  # 导入注销用户函数
@@ -204,11 +219,12 @@ def test_Delete_user():
         assert user_before is not None, "删除前用户应该存在于数据库中"
         assert user_before.username == username, "用户名应该匹配"
         
-        # 调用注销用户函数
-        result = Delete_user(user_id)
+        # 获取 token 并调用注销用户函数
+        token = auth_token
+        result = Delete_user(user_id, token)
         
-        # 验证函数返回True
-        assert result is True, "注销用户函数应该返回True"
+        # 验证函数返回成功字典
+        assert isinstance(result, dict) and result.get("status") is not None, "注销用户函数应该返回成功字典"
         
         # 验证用户已从数据库中删除
         user_after = db.session.get(User, user_id)

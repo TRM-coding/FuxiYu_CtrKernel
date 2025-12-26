@@ -22,6 +22,21 @@ def app():
 def _ctx(app):
     with app.app_context():
         yield
+
+
+# 每个测试文件统一使用同一个 token，作用域为 module
+@pytest.fixture(scope="module")
+def auth_token(app):
+    import secrets
+    from datetime import datetime, timedelta
+    from ..repositories import authentications_repo
+
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.utcnow() + timedelta(hours=24)
+    authentications_repo.create_auth(token, expires_at)
+    yield token
+    # 清理
+    authentications_repo.delete_auth(token)
 ##################################
 
 ##################################
@@ -51,11 +66,12 @@ def test_Add_machine():
         gpu_number=gpu_number,
         gpu_type=gpu_type,
         memory_size=memory_size,
-        disk_size=disk_size
+        disk_size=disk_size,
+        token=auth_token
     )
 
-    # 检查函数返回结果
-    assert result is True, "Add_machine 应该返回 True"
+    # 检查函数返回结果（现在返回字典，包含 status 字段）
+    assert isinstance(result, dict) and result.get("status") is not None, "Add_machine 应该返回包含 'status' 的字典"
 
     target = None
     try:
@@ -125,10 +141,10 @@ def test_Remove_machine():
             assert machine is not None, f"机器 {machine_id} 应该存在于数据库中"
         
         # 2) 调用 Remove_machine 执行删除
-        result = Remove_machine(machine_ids)
+        result = Remove_machine(machine_ids, token=auth_token)
         
-        # 检查函数返回结果
-        assert result is True, "Remove_machine 应该返回 True"
+        # 检查函数返回结果（现在返回字典，包含 status 字段）
+        assert isinstance(result, dict) and result.get("status") is not None, "Remove_machine 应该返回包含 'status' 的字典"
         
         # 3) 验证机器已被删除
         for machine_id in machine_ids:
@@ -204,6 +220,7 @@ def test_Update_machine():
         # 3) 调用 Update_machine 执行更新
         result = Update_machine(
             machine_id=target_machine_id,
+            token=auth_token,
             machine_name=new_machine_name,
             machine_ip=new_machine_ip,
             machine_type=new_machine_type,
@@ -216,8 +233,8 @@ def test_Update_machine():
             machine_description=new_machine_description
         )
 
-        # 检查函数返回结果
-        assert result is True, "Update_machine 应该返回 True"
+        # 检查函数返回结果（现在返回字典，包含 status 字段）
+        assert isinstance(result, dict) and result.get("status") is not None, "Update_machine 应该返回包含 'status' 的字典"
 
         # 刷新session以确保获取最新数据
         db.session.expire_all()
@@ -243,11 +260,12 @@ def test_Update_machine():
         
         result_partial = Update_machine(
             machine_id=target_machine_id,
+            token=auth_token,
             machine_name=partial_new_name,
             cpu_core_number=partial_new_cpu
         )
         
-        assert result_partial is True, "部分更新也应该返回 True"
+        assert isinstance(result_partial, dict) and result_partial.get("status") is not None, "部分更新应该返回包含 'status' 的字典"
         
         # 刷新session
         db.session.expire_all()
@@ -266,11 +284,12 @@ def test_Update_machine():
         
         result_combo1 = Update_machine(
             machine_id=target_machine_id,
+            token=auth_token,
             machine_status=new_status,
             machine_description=new_desc
         )
         
-        assert result_combo1 is True, "组合1部分更新应该返回 True"
+        assert isinstance(result_combo1, dict) and result_combo1.get("status") is not None, "组合1部分更新应该返回包含 'status' 的字典"
         db.session.expire_all()
         
         combo1_machine = Machine.query.get(target_machine_id)
@@ -287,12 +306,13 @@ def test_Update_machine():
         
         result_combo2 = Update_machine(
             machine_id=target_machine_id,
+            token=auth_token,
             cpu_core_number=new_cpu_combo,
             memory_size_gb=new_memory_combo,
             disk_size_gb=new_disk_combo
         )
         
-        assert result_combo2 is True, "组合2部分更新应该返回 True"
+        assert isinstance(result_combo2, dict) and result_combo2.get("status") is not None, "组合2部分更新应该返回包含 'status' 的字典"
         db.session.expire_all()
         
         combo2_machine = Machine.query.get(target_machine_id)
@@ -367,7 +387,7 @@ def test_Get_detail_information():
         db.session.commit()
 
         # 3) 调用被测函数
-        result = Get_detail_information(machine_id)
+        result = Get_detail_information(machine_id, token=auth_token)
 
         # 4) 验证返回类型与结构
         assert result is not None, "Get_detail_information 应该返回对象，而不是 None"
@@ -392,7 +412,7 @@ def test_Get_detail_information():
 
         # 6) 测试不存在的ID
         invalid_id = machine_id + 9999
-        result_none = Get_detail_information(invalid_id)
+        result_none = Get_detail_information(invalid_id, token=auth_token)
         assert result_none is None, "不存在的机器ID应返回 None"
 
         print("Get_detail_information 测试通过")
@@ -446,7 +466,7 @@ def test_List_all_machine_bref_information():
         # 2) 测试第一页，每页3条数据
         page_number = 0
         page_size = 3
-        result_page1 = List_all_machine_bref_information(page_number, page_size)
+        result_page1 = List_all_machine_bref_information(page_number, page_size, token=auth_token)
         
         # 检查返回结果
         assert result_page1 is not None, "函数应该返回列表，而不是None"
@@ -471,7 +491,7 @@ def test_List_all_machine_bref_information():
         # 3) 测试第二页，每页3条数据
         page_number = 1
         page_size = 3
-        result_page2 = List_all_machine_bref_information(page_number, page_size)
+        result_page2 = List_all_machine_bref_information(page_number, page_size, token=auth_token)
         
         total_count = Machine.query.count()
         assert result_page2 is not None, "第二页函数应该返回列表，而不是None"
@@ -483,7 +503,7 @@ def test_List_all_machine_bref_information():
         # 4) 测试空页（超出数据范围）
         page_number = 2
         page_size = 3
-        result_empty = List_all_machine_bref_information(page_number, page_size)
+        result_empty = List_all_machine_bref_information(page_number, page_size, token=auth_token)
 
         total_count = Machine.query.count()
         expected_count = max(0, min(page_size, total_count - page_number * page_size))
@@ -495,7 +515,7 @@ def test_List_all_machine_bref_information():
         # 5) 测试所有机器（大页面）
         page_number = 0
         page_size = 100  # 足够大的页面大小获取所有机器
-        result_all = List_all_machine_bref_information(page_number, page_size)
+        result_all = List_all_machine_bref_information(page_number, page_size, token=auth_token)
 
         # 动态计算预期数量（根据实际数据库）
         total_count = Machine.query.count()

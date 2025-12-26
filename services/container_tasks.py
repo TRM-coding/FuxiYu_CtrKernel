@@ -6,6 +6,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
 from pydantic import BaseModel
+from typing import Any
 
 from ..config import CommsConfig
 from ..constant import *
@@ -16,6 +17,7 @@ from ..utils.CheckKeys import *
 from ..utils.Container import Container_info
 from ..repositories.containers_repo import *
 from ..repositories.usercontainer_repo import *
+from ..repositories.authentications_repo import *
 
 
 ####################################################
@@ -72,7 +74,7 @@ class container_detail_information(BaseModel):
 ####################################################
 
 # 将user_id作为admin，创建新容器
-def Create_container(user_name:str,machine_id:str,container:Container_info,public_key=None, debug=False)->bool:
+def Create_container(user_name:str,machine_id:str,container:Container_info,public_key=None, token:str = None, debug=False)->dict:
     full_url = base_url+"/create_container"
     free_port = get_the_first_free_port(machine_id=machine_id)
     container.set_port(free_port)
@@ -80,6 +82,12 @@ def Create_container(user_name:str,machine_id:str,container:Container_info,publi
     container_info['config']=container.get_config()
     container_info=json.dumps(container_info)
     signatured_message=signature(container_info)
+    token = token
+
+    if (not is_token_valid(token)):
+        return  {"error": "Invalid or expired token.","token": token}
+
+
     
     encryptioned_message=encryption(container_info)
     res=send(encryptioned_message,signatured_message,full_url)
@@ -122,11 +130,13 @@ def Create_container(user_name:str,machine_id:str,container:Container_info,publi
                 role=ROLE.ADMIN)
     
     if Key:
-        return True
-    return False
+        return {"status": "Container created successfully."}
+    return {"error": "Failed to create container."}
 
 #删除容器并删除其所有者记录
-def remove_container(container_id:int, debug=False)->bool:
+def remove_container(container_id:int, token:str, debug=False)->dict:
+    if not is_token_valid(token):
+        return {"error": "Invalid or expired token.","token": token}
     full_url = base_url+"/remove_container"
 
     data={
@@ -164,11 +174,13 @@ def remove_container(container_id:int, debug=False)->bool:
     delete_container(container_id)
 
     if Key:
-        return True
-    return False
+        return {"status": "Container removed successfully."}
+    return {"error": "Failed to create container."}
 #将container_id对应的容器新增user_id作为collaborator,其权限为role
 
-def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
+def add_collaborator(container_id:int,user_id:int,role:ROLE, token:str, debug=False)->dict:
+    if not is_token_valid(token):
+        return  {"error": "Invalid or expired token.","token": token}
     full_url = base_url+"/add_collaborator"
 
     user_name=get_name_by_id(user_id)
@@ -211,11 +223,13 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
                 role=role)
     
     if Key:
-        return True
-    return False
+        return {"status": "Collaborator added successfully."}
+    return {"error": "Failed to add collaborator."}
 #从container_id中移除user_id对应的用户访问权
 
-def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
+def remove_collaborator(container_id:int,user_id:int, token:str, debug=False)->dict:
+    if not is_token_valid(token):
+        return  {"error": "Invalid or expired token.","token": token}
     full_url = base_url+"/remove_collaborator"
 
     user_name=get_name_by_id(user_id)
@@ -252,13 +266,15 @@ def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
     remove_binding(user_id,container_id)
     
     if Key:
-        return True
-    return False
+        return {"status": "Collaborator removed successfully."}
+    return {"error": "Failed to remove collaborator."}
 
 #修改user_id对container_id的访问权
 ##TODO:修改machine_ip为machine_id
 
-def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->bool:
+def update_role(container_id:int,user_id:int,updated_role:ROLE, token:str, debug=False)->dict:
+    if not is_token_valid(token):
+        return  {"error": "Invalid or expired token.","token": token}
     full_url = base_url+"/update_role"
 
     user_name=get_name_by_id(user_id)
@@ -296,14 +312,16 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->boo
     update_binding(user_id,container_id,role=updated_role)
     
     if Key:
-        return True
-    return False
+        return {"status": "Role updated successfully."}
+    return {"error": "Failed to update role."}
 
 #返回容器的细节信息
-def get_container_detail_information(container_id:int)->container_detail_information:
+def get_container_detail_information(container_id:int, token:str)->dict:
+    if not is_token_valid(token):
+        return  {"error": "Invalid or expired token.","token": token}
     container=get_by_id(container_id)
     if not container:
-        raise ValueError("Container not found")
+        return {"error": "Container not found"}
     owener_bindings= get_container_bindings(container_id)
     res={
         "container_name":container.name,
@@ -319,7 +337,9 @@ def get_container_detail_information(container_id:int)->container_detail_informa
 
 
 #返回一页容器的概要信息
-def list_all_container_bref_information(machine_id:int, page_number:int, page_size:int)->list[container_bref_information]:
+def list_all_container_bref_information(machine_id:int, page_number:int, page_size:int, token:str)->Any:
+    if not is_token_valid(token):
+        return  {"error": "Invalid or expired token.","token": token}
     containers = list_containers(machine_id=machine_id, limit=page_size, offset=page_number*page_size)
     res = []
     for container in containers:
