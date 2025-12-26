@@ -27,25 +27,11 @@ def app():
 def _ctx(app):
     with app.app_context():
         yield
-
-
-# 每个测试文件统一使用同一个 token，作用域为 module
-@pytest.fixture(scope="module")
-def auth_token(app):
-    import secrets
-    from datetime import datetime, timedelta
-    from ..repositories import authentications_repo
-
-    token = secrets.token_urlsafe(32)
-    expires_at = datetime.utcnow() + timedelta(hours=24)
-    authentications_repo.create_auth(token, expires_at)
-    yield token
-    authentications_repo.delete_auth(token)
 ##################################
 
 ##################################
 #创建容器单元测试
-def test_Create_container(auth_token):
+def test_Create_container():
     users = User.query.all()
     machines = Machine.query.all()
 
@@ -85,7 +71,6 @@ def test_Create_container(auth_token):
                     memory=2048
                 ),
                 public_key="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7...",
-                token=auth_token,
                 debug=True
             )
 
@@ -134,7 +119,7 @@ def test_Create_container(auth_token):
 
 ##################################
 #删除容器单元测试
-def test_remove_container(auth_token):
+def test_remove_container():
     import uuid
     import random
     
@@ -207,10 +192,10 @@ def test_remove_container(auth_token):
         assert test_binding is not None, "测试绑定应该存在"
         
         # 3) 调用被测试函数
-        result = remove_container(container_id=container_id, token=auth_token, debug=True)
+        result = remove_container(container_id=container_id, debug=True)
         
-        # 4) 验证函数返回结果（现在返回字典，包含 status 字段）
-        assert isinstance(result, dict) and result.get("status") is not None, "remove_container 应该返回包含 'status' 的字典"
+        # 4) 验证函数返回结果
+        assert result is True, "remove_container 应该返回 True"
         
         # 5) 验证数据库状态
         # 检查容器是否被删除
@@ -262,7 +247,7 @@ def test_remove_container(auth_token):
 
 ##################################
 # add_collaborator 单元测试
-def test_add_collaborator(auth_token):
+def test_add_collaborator():
     import uuid
     import random
     
@@ -341,12 +326,11 @@ def test_add_collaborator(auth_token):
             container_id=container.id,
             user_id=collaborator_user.id,
             role=ROLE.COLLABORATOR,
-            token=auth_token,
             debug=True
         )
         
-        # 4) 验证函数返回结果（现在返回字典，包含 status 字段）
-        assert isinstance(result, dict) and result.get("status") is not None, "add_collaborator 应该返回包含 'status' 的字典"
+        # 4) 验证函数返回结果
+        assert result is True, "add_collaborator 应该返回 True"
         
         # 5) 验证数据库状态：现在应该有两个绑定
         updated_bindings = UserContainer.query.filter_by(container_id=container.id).all()
@@ -391,7 +375,7 @@ def test_add_collaborator(auth_token):
 
 ##################################
 # remove_collaborator 单元测试
-def test_remove_collaborator(auth_token):
+def test_remove_collaborator():
     import uuid
     import random
     
@@ -469,12 +453,11 @@ def test_remove_collaborator(auth_token):
         result = remove_collaborator(
             container_id=test_container.id,
             user_id=user_to_remove.id,
-            token=auth_token,
             debug=True
         )
         
-        # 检查函数返回结果（现在返回字典，包含 status 字段）
-        assert isinstance(result, dict) and result.get("status") is not None, "remove_collaborator 应该返回包含 'status' 的字典"
+        # 检查函数返回结果
+        assert result is True, "remove_collaborator 应该返回 True"
         
         # 4) 验证绑定关系已被删除
         remaining_bindings_count = UserContainer.query.filter_by(container_id=test_container.id).count()
@@ -499,11 +482,10 @@ def test_remove_collaborator(auth_token):
         result_nonexistent = remove_collaborator(
             container_id=test_container.id,
             user_id=non_existent_user_id,
-            token=auth_token,
             debug=True
         )
         
-        assert isinstance(result_nonexistent, dict) and result_nonexistent.get("status") is not None, "移除不存在的绑定关系应该返回包含 'status' 的字典"
+        assert result_nonexistent is True, "移除不存在的绑定关系也应该返回 True"
         
         # 验证绑定关系数量不变
         final_bindings_count = UserContainer.query.filter_by(container_id=test_container.id).count()
@@ -529,7 +511,7 @@ def test_remove_collaborator(auth_token):
 ##################################
 # 修改用户对容器访问权限单元测试
 
-def test_update_role(auth_token):
+def test_update_role():
     from ..services.container_tasks import update_role
     from ..models.containers import Container
     from ..models.usercontainer import UserContainer
@@ -552,13 +534,12 @@ def test_update_role(auth_token):
             container_id=container_id,
             user_id=user_id,
             updated_role=ROLE.ADMIN,
-            token=auth_token,
             debug=True
         )
 
         
-        # 验证返回结果（现在返回字典，包含 status 字段）
-        assert isinstance(result, dict) and result.get("status") is not None, "更新角色应该返回包含 'status' 的字典"
+        # 验证返回结果
+        assert result is True, "更新角色应该返回 True"
         
         # 验证数据库中的更新
         binding = UserContainer.query.filter_by(
@@ -579,12 +560,11 @@ def test_update_role(auth_token):
             container_id=container_id,
             user_id=user_id,
             updated_role=ROLE.COLLABORATOR,
-            token=auth_token,
             debug=True
         )
 
         
-        assert isinstance(result, dict) and result.get("status") is not None, "更新为 collaborator 角色应该返回包含 'status' 的字典"
+        assert result is True, "更新为 collaborator 角色应该返回 True"
         
         # 验证数据库更新
         binding = UserContainer.query.filter_by(
@@ -605,7 +585,6 @@ def test_update_role(auth_token):
             container_id=non_existent_container_id,
             user_id=user_id,
             updated_role=ROLE.ADMIN,
-            token=auth_token,
             debug=True
         )
         if result is not None:
@@ -622,7 +601,6 @@ def test_update_role(auth_token):
             container_id=container_id,
             user_id=non_existent_user_id,
             updated_role=ROLE.ADMIN,
-            token=auth_token,
             debug=True
         )
         if result is not None:
@@ -638,7 +616,6 @@ def test_update_role(auth_token):
             container_id=0,
             user_id=user_id,
             updated_role=ROLE.ADMIN,
-            token=auth_token,
             debug=True
         )
         # 如果函数没有抛出异常，我们只记录这种情况
@@ -657,7 +634,6 @@ def test_update_role(auth_token):
             container_id=container_id,
             user_id=0,
             updated_role=ROLE.ADMIN,
-            token=auth_token,
             debug=True
         )
         # 同样，不强制要求必须抛出异常
@@ -674,12 +650,11 @@ def test_update_role(auth_token):
             container_id=container_id,
             user_id=user_id,
             updated_role=ROLE.ROOT,
-            token=auth_token,
             debug=True
         )
         # 如果支持 ROOT 角色，验证结果
         if result is not None:
-            assert isinstance(result, dict) and result.get("status") is not None, "更新为 ROOT 角色应该返回包含 'status' 的字典"
+            assert result is True, "更新为 ROOT 角色应该返回 True"
             
             # 验证数据库更新
             binding = UserContainer.query.filter_by(
@@ -700,7 +675,6 @@ def test_update_role(auth_token):
             container_id=container_id,
             user_id=user_id,
             updated_role=ROLE.COLLABORATOR,
-            token=auth_token,
             debug=True
         )
         
@@ -709,11 +683,10 @@ def test_update_role(auth_token):
             container_id=container_id,
             user_id=user_id,
             updated_role=ROLE.ADMIN,
-            token=auth_token,
             debug=True
         )
         
-        assert isinstance(result1, dict) and result1.get("status") is not None and isinstance(result2, dict) and result2.get("status") is not None, "连续更新应该都返回包含 'status' 的字典"
+        assert result1 is True and result2 is True, "连续更新应该都返回 True"
         
         # 验证最终状态
         binding = UserContainer.query.filter_by(
@@ -756,7 +729,6 @@ def test_update_role(auth_token):
                 container_id=test_container.id,
                 user_id=test_user.id,
                 updated_role=ROLE.ADMIN,
-                token=auth_token,
                 debug=True
             )
             # 根据函数实现，这可能创建新绑定或返回False
@@ -777,7 +749,7 @@ def test_update_role(auth_token):
 ##################################
 # 获取容器详细信息单元测试
 
-def test_get_container_detail_information(auth_token):
+def test_get_container_detail_information():
     from ..services.container_tasks import get_container_detail_information
     from ..models.containers import Container
     from ..constant import ROLE
@@ -791,7 +763,7 @@ def test_get_container_detail_information(auth_token):
     
     try:
         # 测试1: 正常获取容器详细信息
-        result = get_container_detail_information(container_id, token=auth_token)
+        result = get_container_detail_information(container_id)
         
         # 验证返回结果类型和结构
         assert isinstance(result, dict), "应该返回字典"
@@ -834,7 +806,7 @@ def test_get_container_detail_information(auth_token):
     # 测试2: 不存在的容器ID
     non_existent_id = 999999  # 假设这个ID不存在
     try:
-        result = get_container_detail_information(non_existent_id, token=auth_token)
+        result = get_container_detail_information(non_existent_id)
         pytest.fail("对不存在的容器ID应该抛出异常")
     except ValueError as e:
         assert "Container not found" in str(e), "应该抛出'Container not found'错误"
@@ -844,7 +816,7 @@ def test_get_container_detail_information(auth_token):
     
     # 测试3: 边界情况 - 容器ID为0
     try:
-        result = get_container_detail_information(0, token=auth_token)
+        result = get_container_detail_information(0)
         pytest.fail("对容器ID为0应该抛出异常")
     except Exception:
         # 允许抛出任何异常
@@ -852,7 +824,7 @@ def test_get_container_detail_information(auth_token):
     
     # 测试4: 边界情况 - 容器ID为负数
     try:
-        result = get_container_detail_information(-1, token=auth_token)
+        result = get_container_detail_information(-1)
         pytest.fail("对负数容器ID应该抛出异常")
     except Exception:
         # 允许抛出任何异常
@@ -860,7 +832,7 @@ def test_get_container_detail_information(auth_token):
     
     # 测试5: 验证返回数据与数据库一致性
     if existing_container:
-        result = get_container_detail_information(container_id, token=auth_token)
+        result = get_container_detail_information(container_id)
         
         # 验证基本数据一致性
         assert result["container_name"] == existing_container.name, "容器名称应该一致"
@@ -878,7 +850,7 @@ def test_get_container_detail_information(auth_token):
 ##################################
 # 获取容器简要信息列表单元测试
 
-def test_list_all_container_bref_information(auth_token):
+def test_list_all_container_bref_information():
     from ..services.container_tasks import list_all_container_bref_information
     
     # 测试1: 正常分页查询
@@ -886,7 +858,7 @@ def test_list_all_container_bref_information(auth_token):
     page_number = 0
     page_size = 5
     
-    result = list_all_container_bref_information(machine_id, page_number, page_size, token=auth_token)
+    result = list_all_container_bref_information(machine_id, page_number, page_size)
     
     # 验证返回结果
     assert isinstance(result, list), "应该返回列表"
@@ -908,8 +880,8 @@ def test_list_all_container_bref_information(auth_token):
     
     # 测试2: 分页功能验证
     page_size_2 = 3
-    result_page1 = list_all_container_bref_information(machine_id, 0, page_size_2, token=auth_token)
-    result_page2 = list_all_container_bref_information(machine_id, 1, page_size_2, token=auth_token)
+    result_page1 = list_all_container_bref_information(machine_id, 0, page_size_2)
+    result_page2 = list_all_container_bref_information(machine_id, 1, page_size_2)
     
     # 验证分页结果不重复（如果数据足够多）
     if len(result_page1) == page_size_2 and len(result_page2) > 0:
@@ -920,7 +892,7 @@ def test_list_all_container_bref_information(auth_token):
     
     # 测试3: 不存在的机器ID
     non_existent_id = 999999
-    result_empty = list_all_container_bref_information(non_existent_id, 0, 10, token=auth_token)
+    result_empty = list_all_container_bref_information(non_existent_id, 0, 10)
     
     assert isinstance(result_empty, list), "即使机器不存在也应该返回列表"
     
@@ -931,7 +903,7 @@ def test_list_all_container_bref_information(auth_token):
     # 测试4: 边界情况 - 页数为负数（修复这个测试）
     # 使用 try-except 处理可能的异常，或者测试函数应该处理负数页数
     try:
-        result_negative = list_all_container_bref_information(machine_id, -1, 5, token=auth_token)
+        result_negative = list_all_container_bref_information(machine_id, -1, 5)
         # 如果函数成功处理了负数，验证返回类型
         assert isinstance(result_negative, list), "负页数应该返回列表"
     except Exception:
@@ -940,12 +912,12 @@ def test_list_all_container_bref_information(auth_token):
         pass
     
     # 测试5: 边界情况 - 页面大小为0
-    result_zero_size = list_all_container_bref_information(machine_id, 0, 0, token=auth_token)
+    result_zero_size = list_all_container_bref_information(machine_id, 0, 0)
     assert isinstance(result_zero_size, list), "页面大小为0应该返回列表"
     
     # 测试6: 验证不同机器的容器
     other_machine_id = 2
-    result_other = list_all_container_bref_information(other_machine_id, 0, 10, token=auth_token)
+    result_other = list_all_container_bref_information(other_machine_id, 0, 10)
     
     assert isinstance(result_other, list), "应该返回列表"
     if len(result_other) > 0:
