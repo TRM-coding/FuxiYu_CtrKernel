@@ -57,7 +57,7 @@ from types import SimpleNamespace
 def test_add_machine_api_unauth(client, monkeypatch):
     from ..blueprints import machine_api as machine_api_module
     monkeypatch.setattr(machine_api_module.authentications_repo, "is_token_valid", lambda t: False)
-    resp = client.get("/api/containers/add_machine", json={})
+    resp = client.get("/api/machines/add_machine", json={})
     assert resp.status_code == 401
 
 
@@ -66,7 +66,7 @@ def test_add_machine_api_success(client, monkeypatch, token):
     monkeypatch.setattr(machine_api_module.authentications_repo, "is_token_valid", lambda t: True)
     monkeypatch.setattr(machine_api_module.machine_service, "Add_machine", lambda **kwargs: True)
     headers = {"token": token or "dummy"}
-    resp = client.get("/api/containers/add_machine", json={"machine_name": "m1"}, headers=headers)
+    resp = client.get("/api/machines/add_machine", json={"machine_name": "m1"}, headers=headers)
     assert resp.status_code == 201
     data = resp.get_json()
     assert data.get("success") == 1

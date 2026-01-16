@@ -5,7 +5,7 @@ from ..repositories import machine_repo, authentications_repo
 from ..schemas.user_schema import user_schema, users_schema
 
 
-@api_bp.get("/containers/add_machine")
+@api_bp.get("/machines/add_machine")
 def add_machine_api():
     '''
     通信数据格式：
