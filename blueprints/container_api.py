@@ -30,7 +30,7 @@ def create_container_api():
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-        return jsonify({"error": "invalid or missing token"}), 401
+           return jsonify({"success": 0, "message": "invalid or missing token"}), 401
     data = request.get_json() or {}
     user_name = data.get("user_name", "")
     machine_id = data.get("machine_id", 0)
@@ -68,7 +68,7 @@ def delete_container_api():
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-        return jsonify({"error": "invalid or missing token"}), 401
+           return jsonify({"success": 0, "message": "invalid or missing token"}), 401
     data = request.get_json() or {}
     container_id = data.get("container_id", 0)
     if not container_service.remove_container(container_id=container_id):
@@ -93,7 +93,7 @@ def add_collaborator_api():
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
-        return jsonify({"error":"invalid or missing token"}),401
+           return jsonify({"success":0,"message":"invalid or missing token"}),401
     data=request.get_json() or {}
     user_id=data.get("user_id","")
     container_id=data.get("container_id",0)
@@ -123,7 +123,7 @@ def remove_collaborator_api():
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
-        return jsonify({"error":"invalid or missing token"}),401
+           return jsonify({"success":0,"message":"invalid or missing token"}),401
     data=request.get_json() or {}
     container_id=data.get("container_id",0)
     user_id=data.get("user_id","")
@@ -151,7 +151,7 @@ def update_role_api():
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
-        return jsonify({"error":"invalid or missing token"}),401
+           return jsonify({"success":0,"message":"invalid or missing token"}),401
     data=request.get_json() or {}
     container_id=data.get("container_id",0)
     user_id=data.get("user_id","")
@@ -178,7 +178,7 @@ def get_container_detail_information_api():
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
-        return jsonify({"error":"invalid or missing token"}),401
+           return jsonify({"success":0,"message":"invalid or missing token"}),401
     data=request.get_json() or {}
     container_id=data.get("container_id",0)
     try:
@@ -205,7 +205,7 @@ def list_all_containers_bref_information_api():
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
-        return jsonify({"error":"invalid or missing token"}),401
+           return jsonify({"success":0,"message":"invalid or missing token"}),401
     data=request.get_json() or {}
     machine_id=data.get("machine_id","")
     page_number=data.get("page_number",1)

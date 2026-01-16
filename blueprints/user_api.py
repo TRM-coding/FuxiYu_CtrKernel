@@ -34,7 +34,7 @@ def register():
 	print("Register Called")
 	recived_data = request.get_json(silent=True)
 	if not recived_data:
-		return jsonify({"error":"invalid json"}), 400
+		return jsonify({"success": 0, "message": "invalid json"}), 400
 	
 	# 直接读取明文字段
 	username = recived_data.get("username")
@@ -43,7 +43,7 @@ def register():
 	graduation_year = recived_data.get("graduation_year")
 	
 	if not username or not email or not password:
-		return jsonify({"error": "username, email and password required"}), 400
+		return jsonify({"success": 0, "message": "username, email and password required"}), 400
 	
 	# 调用 service 层注册用户
 	success, user_or_reason, _ = user_tasks.Register(username, email, password, graduation_year)
@@ -95,14 +95,14 @@ def login():
 	print("Login Called")
 	recived_data = request.get_json(silent=True)
 	if not recived_data:
-		return jsonify({"error":"invalid json"}), 400
+		return jsonify({"success": 0, "message": "invalid json"}), 400
 	
 	# 直接读取明文字段
 	username = recived_data.get("username")
 	password = recived_data.get("password")
 	
 	if not username or not password:
-		return jsonify({"error": "username and password required"}), 400
+		return jsonify({"success": 0, "message": "username and password required"}), 400
 	
 	# 调用 Login 函数，返回结果和错误原因
 	success, user_or_reason, token = user_tasks.Login(username, password)

@@ -29,7 +29,7 @@ def add_machine_api():
 	}
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-        return jsonify({"error": "invalid or missing token"}), 401
+        return jsonify({"success": 0, "message": "invalid or missing token"}), 401
     data = request.get_json() or {}
     machine_name = data.get("machine_name", "")
     machine_ip = data.get("machine_ip", "")
@@ -69,7 +69,7 @@ def remove_machine_api():
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-        return jsonify({"error": "invalid or missing token"}), 401
+        return jsonify({"success": 0, "message": "invalid or missing token"}), 401
     data = request.get_json() or {}
     machine_ids = data.get("machine_ids", [])
     success = machine_service.Remove_machine(machine_id=machine_ids)
