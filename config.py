@@ -18,7 +18,7 @@ class KeyConfig:
     PUBLIC_KEY_NODE='public_node.pem'
 
 class CommsConfig:
-    BASE_URL='http://172.17.0.4:5000/api'
+    BASE_URL='http://172.17.0.3:5000/api'
 
 # 新增：统一的 AppConfig 和 get_config
 class AppConfig(SqlConfig, KeyConfig):
