@@ -5,7 +5,7 @@ from ..repositories import machine_repo, authentications_repo
 from ..schemas.user_schema import user_schema, users_schema
 
 
-@api_bp.get("/machines/add_machine")
+@api_bp.post("/machines/add_machine")
 def add_machine_api():
     '''
     通信数据格式：
@@ -78,7 +78,7 @@ def remove_machine_api():
     else:
         return jsonify({"success": 0, "message": "Failed to remove machine(s)"}), 500
     
-@api_bp.get("/machines/update_machine")
+@api_bp.post("/machines/update_machine")
 def update_machine_api():
     '''
     allowed = {"machine_name", "machine_ip", "machine_type", "machine_status", "cpu_core_number",
@@ -118,7 +118,7 @@ def update_machine_api():
         return jsonify({"success": 0, "message": "Failed to update machine"}), 500
             
 
-@api_bp.post("/machines/get_detail_information")
+@api_bp.get("/machines/get_detail_information")
 def get_detail_information_api():
     '''
     通信数据格式：
