@@ -118,7 +118,7 @@ def update_machine_api():
         return jsonify({"success": 0, "message": "Failed to update machine"}), 500
             
 
-@api_bp.get("/machines/get_detail_information")
+@api_bp.post("/machines/get_detail_information")
 def get_detail_information_api():
     '''
     通信数据格式：
@@ -140,7 +140,6 @@ def get_detail_information_api():
     machine_info = machine_service.Get_detail_information(machine_id=machine_id)
     if machine_info:
         return jsonify({
-            "machine_id": machine_info.id,
             "machine_name": machine_info.machine_name,
             "machine_ip": machine_info.machine_ip,
             "machine_type": machine_info.machine_type,
@@ -155,7 +154,7 @@ def get_detail_information_api():
     else:
         return jsonify({"error": "Machine not found"}), 404
     
-@api_bp.get("/machines/list_all_machine_bref_information")
+@api_bp.post("/machines/list_all_machine_bref_information")
 def list_all_machine_bref_information_api():
     '''
     通信数据格式：
@@ -173,15 +172,17 @@ def list_all_machine_bref_information_api():
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
         return jsonify({"error": "invalid or missing token"}), 401
-    data = request.get_json() or {}
-    page_number = data.get("page_number", 0)
-    page_size = data.get("page_size", 10)
-    machines_info = machine_service.List_all_machine_bref_information(page_number=page_number, page_size=page_size)
+    data = request.get_json(silent=True) or {}
+    page_number = int(data.get("page_number", 0))
+    page_size = int(data.get("page_size", 10))
+    machines_info, total_pages = machine_service.List_all_machine_bref_information(page_number=page_number, page_size=page_size)
     machines_list = []
     for machine in machines_info:
         machines_list.append({
+            "machine_id": getattr(machine, 'id', None),
+            "machine_name": machine.machine_name,
             "machine_ip": machine.machine_ip,
             "machine_type": machine.machine_type,
             "machine_status": machine.machine_status
         })
-    return jsonify({"machines": machines_list}), 200
+    return jsonify({"machines": machines_list, "total_pages": total_pages}), 200

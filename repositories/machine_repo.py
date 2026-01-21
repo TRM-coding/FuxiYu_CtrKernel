@@ -38,6 +38,10 @@ def get_by_name(machine_name:str):
 def list_machines(limit: int = 50, offset: int = 0) -> Sequence[Machine]:
 	return Machine.query.order_by(Machine.id).offset(offset).limit(limit).all()
 
+def count_machines() -> int: # 增加的额外方法 只辅助用于计算总数
+    """Return total number of machines in DB."""
+    return Machine.query.count()
+
 def create_machine(machinename:str,
                    machine_ip:str,
                    machine_type:MachineTypes,
