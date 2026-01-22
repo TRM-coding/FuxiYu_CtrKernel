@@ -1,7 +1,7 @@
 from flask import jsonify, request, make_response
 from . import api_bp
 from ..services import user_tasks
-from ..repositories import user_repo
+from ..repositories import user_repo, authentications_repo
 from ..schemas.user_schema import user_schema, users_schema
 
 
@@ -144,12 +144,96 @@ def login():
 			"error_reason": error_reason
 		}), 401
 
+@api_bp.get("/users/get_user_detail_information")
+def get_user_detail_information_api():
+	# require valid token
+	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+		return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+
+	data = request.get_json(silent=True) or {}
+	# support both JSON body and querystring
+	user_id = data.get("user_id") or request.args.get("user_id")
+	if not user_id:
+		return jsonify({"success": 0, "message": "user_id required"}), 400
+
+	info = user_tasks.Get_user_detail_information(user_id)
+	if not info:
+		return jsonify({"success": 0, "message": "user not found"}), 404
+
+	# if pydantic model, convert to dict
+	try:
+		payload = info.dict()
+	except Exception:
+		payload = info
+
+	return jsonify({"success": 1, "user_info": payload}), 200
+
+@api_bp.get("/users/list_all_user_bref_information")
+def list_all_user_bref_information_api():
+	# require valid token
+	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+		return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+
+	data = request.get_json(silent=True) or {}
+	page_number = data.get("page_number") or request.args.get("page_number") or 1
+	page_size = data.get("page_size") or request.args.get("page_size") or 10
+
+	try:
+		users = user_tasks.List_all_user_bref_information(page_number=int(page_number), page_size=int(page_size))
+	except Exception as e:
+		return jsonify({"success": 0, "message": "failed to list users"}), 500
+
+	# convert pydantic models to dicts if necessary
+	out = []
+	for u in users:
+		try:
+			out.append(u.dict())
+		except Exception:
+			out.append(u)
+
+	return jsonify({"success": 1, "users": out}), 200
 
 @api_bp.post("/users/change_password")
 def change_password_user():
-	pass
+	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+		return jsonify({"success": 0, "message": "invalid or missing token"}), 401
 
+	data = request.get_json(silent=True) or {}
+	
+	user_id = data.get("user_id") or request.args.get("user_id")
+	old_password = data.get("old_password")
+	new_password = data.get("new_password")
+
+	if not user_id or not old_password or not new_password:
+		return jsonify({"success": 0, "message": "user_id, old_password and new_password required"}), 400
+
+	# fetch user object
+	user = user_repo.get_by_id(int(user_id))
+	if not user:
+		return jsonify({"success": 0, "message": "user not found"}), 404
+
+	ok = user_tasks.Change_password(user, old_password, new_password)
+	if ok:
+		return jsonify({"success": 1, "message": "password changed"}), 200
+	else:
+		return jsonify({"success": 0, "message": "old password incorrect"}), 400
 
 @api_bp.post("/users/delete_user")
 def delete_user_api():
-	pass
+	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+		return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+
+	data = request.get_json(silent=True) or {}
+	user_id = data.get("user_id") or request.args.get("user_id")
+	if not user_id:
+		return jsonify({"success": 0, "message": "user_id required"}), 400
+
+	try:
+		ok = user_tasks.Delete_user(int(user_id))
+	except Exception:
+		return jsonify({"success": 0, "message": "failed to delete user"}), 500
+
+	if ok:
+		return jsonify({"success": 1, "message": "user deleted"}), 200
+	else:
+		return jsonify({"success": 0, "message": "user not found"}), 404
