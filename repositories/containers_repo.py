@@ -19,6 +19,13 @@ def list_containers(limit: int = 50, offset: int = 0, machine_id: int | None = N
 		q = q.filter_by(machine_id=machine_id)
 	return q.order_by(Container.id).offset(offset).limit(limit).all()
 
+# 增加主要目的是为了增加可读性
+def count_containers(machine_id: int | None = None) -> int:
+    q = Container.query
+    if machine_id is not None:
+        q = q.filter_by(machine_id=machine_id)
+    return q.count()
+
 
 def create_container(name: str, image: str, machine_id: int, port:int,status=None) -> Container:
 	container = Container(name=name, image=image, machine_id=machine_id, port=port)

@@ -16,6 +16,8 @@ from ..utils.CheckKeys import *
 from ..utils.Container import Container_info
 from ..repositories.containers_repo import *
 from ..repositories.usercontainer_repo import *
+from ..models.containers import Container
+import math
 
 
 ####################################################
@@ -51,12 +53,14 @@ def send(ciphertext:bytes,signature:bytes,mechine_ip:str, timeout:float=5.0)->di
 #API Definition
 ####################################################
 class container_bref_information(BaseModel):
+    container_id: int # 加入这个 只是为了方便调取详细信息
     container_name:str
     machine_id:int
     port:int
     container_status:str
 
 class container_detail_information(BaseModel):
+    container_id: int # 与上方结构对称
     container_name:str
     container_image:str
     machine_ip:str
@@ -305,31 +309,45 @@ def get_container_detail_information(container_id:int)->container_detail_informa
     if not container:
         raise ValueError("Container not found")
     owener_bindings= get_container_bindings(container_id)
-    res={
-        "container_name":container.name,
-        "container_image":container.image,
-        "machine_id":container.machine_id,
-        "container_status":container.container_status.value,
-        "port":container.port,
-        "owners":[get_name_by_id(binding['user_id']) for binding in owener_bindings],
-        "accounts":[(binding['username'],ROLE(binding['role'])) for binding in owener_bindings],
+    res={ 
+        "container_id": container.id,
+        "container_name": container.name,
+        "container_image": container.image,
+        "machine_id": container.machine_id,
+        "container_status": container.container_status.value,
+        "port": container.port,
+        "owners": [get_name_by_id(binding['user_id']) for binding in owener_bindings],
+        # 这里的变动是防止报错
+        "accounts": [
+            {"username": binding.get('username'), "role": (ROLE(binding.get('role')).value if binding.get('role') is not None else None)}
+            for binding in owener_bindings
+        ],
     }
     return res
 
 
 
 #返回一页容器的概要信息
-def list_all_container_bref_information(machine_id:int, page_number:int, page_size:int)->list[container_bref_information]:
-    containers = list_containers(machine_id=machine_id, limit=page_size, offset=page_number*page_size)
+def list_all_container_bref_information(machine_id:int, page_number:int, page_size:int)->dict:
+    containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id)
     res = []
     for container in containers:
         info = container_bref_information(
+            container_id=container.id,
             container_name=container.name,
             machine_id=container.machine_id,
             port=container.port,
             container_status=container.container_status.value
         )
         res.append(info)
-    return res
+
+    # 这里计算总页数
+    try: # 理论不会报错 但是被建议保留
+        total_count = count_containers(machine_id=machine_id)
+        total_page = max(1, math.ceil(total_count / page_size))
+    except Exception:
+        total_page = 1
+
+    return {"containers": res, "total_page": total_page}
 
 ####################################################

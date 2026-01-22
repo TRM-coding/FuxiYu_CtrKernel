@@ -162,7 +162,7 @@ def update_role_api():
         return jsonify({"success":0,"message":"Failed to update role"}),500
     return jsonify({"success":1,"message":"Role updated successfully"}),200
 
-@api_bp.get("/containers/get_container_detail_information")
+@api_bp.post("/containers/get_container_detail_information")
 def get_container_detail_information_api():
     '''
     通信数据格式：
@@ -174,7 +174,16 @@ def get_container_detail_information_api():
     返回格式：
     {
         "success": [0|1],
-        "container_info": {...},
+        "container_info": {
+            "container_id",
+            "container_name",
+            "container_image",
+            "machine_id",
+            "container_status",
+            "port",
+            "owners":['user_id'],
+            "accounts":[(binding['username'],ROLE(binding['role']))],
+        }
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
@@ -187,7 +196,7 @@ def get_container_detail_information_api():
         return jsonify({"success":0,"message":"Failed to get container detail information"}),500
     return jsonify({"success":1,"container_info":container_info}),200
 
-@api_bp.get("/containers/list_all_container_bref_information")
+@api_bp.post("/containers/list_all_container_bref_information")
 def list_all_containers_bref_information_api():
     '''
     通信数据格式：
@@ -201,20 +210,38 @@ def list_all_containers_bref_information_api():
     返回格式：
     {
         "success": [0|1],
-        "containers_info": [...],
+        "containers_info": [{
+            "container_id",
+            "container_name",
+            "machine_id",
+            "port",
+            "container_status"
+        }],
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
            return jsonify({"success":0,"message":"invalid or missing token"}),401
     data=request.get_json() or {}
     machine_id=data.get("machine_id","")
-    page_number=data.get("page_number",1)
+    page_number=data.get("page_number",0)
     page_size=data.get("page_size",10)
     try: # 这里其实理论不会报错 但是保留
-        containers_info=container_service.list_all_container_bref_information(
+        result = container_service.list_all_container_bref_information(
             machine_id=machine_id,
             page_number=page_number,
             page_size=page_size)
+        # expect a dict: { containers: [...], total_page: n }
+        containers_info = result.get('containers', [])
+        total_page = result.get('total_page', 1)
     except Exception as e:
         return jsonify({"success":0,"message":"Failed to list containers"}),500
-    return jsonify({"success":1,"containers_info":containers_info}),200
+
+    # convert pydantic models to plain dicts so jsonify can serialize
+    out = []
+    for c in containers_info:
+        try:
+            out.append(c.dict())
+        except Exception:
+            out.append(c)
+
+    return jsonify({"success":1,"containers_info":out, "total_page": total_page}),200
