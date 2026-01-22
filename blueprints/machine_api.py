@@ -3,6 +3,7 @@ from . import api_bp
 from ..services import machine_tasks as machine_service
 from ..repositories import machine_repo, authentications_repo
 from ..schemas.user_schema import user_schema, users_schema
+from sqlalchemy.exc import IntegrityError
 
 
 @api_bp.post("/machines/add_machine")
@@ -40,15 +41,22 @@ def add_machine_api():
     gpu_type = data.get("gpu_type", "")
     memory_size = data.get("memory_size", 0)
     disk_size = data.get("disk_size", 0)
-    success = machine_service.Add_machine(machine_name=machine_name,
-                                        machine_ip=machine_ip,
-                                        machine_type=machine_type,
-                                        machine_description=machine_description,
-                                        cpu_core_number=cpu_core_number,
-                                        gpu_number=gpu_number,
-                                        gpu_type=gpu_type,
-                                        memory_size=memory_size,
-                                        disk_size=disk_size)
+    try: # 仅仅是防御性质的措施
+        success = machine_service.Add_machine(machine_name=machine_name,
+                                            machine_ip=machine_ip,
+                                            machine_type=machine_type,
+                                            machine_description=machine_description,
+                                            cpu_core_number=cpu_core_number,
+                                            gpu_number=gpu_number,
+                                            gpu_type=gpu_type,
+                                            memory_size=memory_size,
+                                            disk_size=disk_size)
+    except IntegrityError as ie:
+        # likely duplicate unique constraint (e.g. machine_name)
+        return jsonify({"success": 0, "message": f"Integrity error: {str(ie.orig) if hasattr(ie, 'orig') else str(ie)}"}), 400
+    except Exception as e:
+        return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
+
     if success:
         return jsonify({"success": 1, "message": "Container created successfully"}), 201
     else:
