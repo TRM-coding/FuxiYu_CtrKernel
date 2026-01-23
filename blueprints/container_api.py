@@ -223,11 +223,28 @@ def list_all_containers_bref_information_api():
            return jsonify({"success":0,"message":"invalid or missing token"}),401
     data=request.get_json() or {}
     machine_id=data.get("machine_id","")
+    user_id=data.get("user_id","")
     page_number=data.get("page_number",0)
     page_size=data.get("page_size",10)
+    # 在此处统一为 None，并数字化 ID
+    if machine_id == "" or machine_id is None:
+        machine_id = None
+    else:
+        try:
+            machine_id = int(machine_id)
+        except Exception:
+            machine_id = None
+    if user_id == "" or user_id is None:
+        user_id = None
+    else:
+        try:
+            user_id = int(user_id)
+        except Exception:
+            user_id = None
     try: # 这里其实理论不会报错 但是保留
         result = container_service.list_all_container_bref_information(
             machine_id=machine_id,
+            user_id=user_id,
             page_number=page_number,
             page_size=page_size)
         # expect a dict: { containers: [...], total_page: n }

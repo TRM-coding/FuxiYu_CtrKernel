@@ -316,8 +316,10 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         "machine_id": container.machine_id,
         "container_status": container.container_status.value,
         "port": container.port,
+        # 备忘：owners才是系统对应的用户名列表
         "owners": [get_name_by_id(binding['user_id']) for binding in owener_bindings],
-        # 这里的变动是防止报错
+        # 这里的变动是防止报错 TODO 2026年1月24日
+        # 备忘：accounts是docker容器内的用户名和角色列表
         "accounts": [
             {"username": binding.get('username'), "role": (ROLE(binding.get('role')).value if binding.get('role') is not None else None)}
             for binding in owener_bindings
@@ -328,8 +330,8 @@ def get_container_detail_information(container_id:int)->container_detail_informa
 
 
 #返回一页容器的概要信息
-def list_all_container_bref_information(machine_id:int, page_number:int, page_size:int)->dict:
-    containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id)
+def list_all_container_bref_information(machine_id:int, user_id:int, page_number:int, page_size:int)->dict:
+    containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=user_id)
     res = []
     for container in containers:
         info = container_bref_information(

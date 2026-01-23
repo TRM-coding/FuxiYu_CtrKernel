@@ -13,10 +13,13 @@ def get_id_by_name_machine(container_name: str, machine_id: int) -> int | None:
 	container = Container.query.filter_by(name=container_name, machine_id=machine_id).first()
 	return container.id if container else None
 
-def list_containers(limit: int = 50, offset: int = 0, machine_id: int | None = None) -> Sequence[Container]:
+def list_containers(limit: int = 50, offset: int = 0, machine_id: int | None = None, user_id: int | None = None) -> Sequence[Container]:
 	q = Container.query
 	if machine_id is not None:
 		q = q.filter_by(machine_id=machine_id)
+
+	if user_id is not None:
+		q = q.join(Container.users).filter(User.id == user_id)
 	return q.order_by(Container.id).offset(offset).limit(limit).all()
 
 # 增加主要目的是为了增加可读性
