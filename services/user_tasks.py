@@ -5,7 +5,7 @@ from ..extensions import db
 from ..repositories.user_repo import *
 from ..repositories import authentications_repo
 from ..repositories import usercontainer_repo, containers_repo
-from ..constant import ROLE
+from ..constant import ROLE, ContainerStatus
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 import secrets
@@ -166,8 +166,33 @@ def List_all_user_bref_information(page_number:int, page_size:int)->list[user_br
         bindings = usercontainer_repo.get_user_bindings(u.id) or []
         container_ids = [b.get('container_id') for b in bindings]
         total = len(container_ids)
-        functional = sum(1 for b in bindings if b.get('role') == ROLE.COLLABORATOR.value)
-        managed = sum(1 for b in bindings if b.get('role') in (ROLE.ADMIN.value, ROLE.ROOT.value))
+        # count functional containers as bindings where role is COLLABORATOR and the container is ONLINE
+        functional = 0
+        managed = 0
+        for b in bindings:
+            try:
+                role_val = b.get('role')
+                cid = b.get('container_id')
+                if cid is None:
+                    continue
+                # fetch container to check status
+                container = containers_repo.get_by_id(int(cid))
+                is_online = False
+                if container and getattr(container, 'container_status', None) is not None:
+                    # container.container_status may be an Enum
+                    try:
+                        is_online = (container.container_status == ContainerStatus.ONLINE or getattr(container.container_status, 'value', None) == ContainerStatus.ONLINE.value)
+                    except Exception:
+                        is_online = (str(container.container_status).lower() == ContainerStatus.ONLINE.value)
+
+                # functional now counts any bound container that is ONLINE (regardless of role)
+                if is_online:
+                    functional += 1
+                if role_val in (ROLE.ADMIN.value, ROLE.ROOT.value):
+                    managed += 1
+            except Exception:
+                # ignore binding errors and continue
+                continue
 
         # Optionally use containers_repo to validate container ids or fetch additional info
         result.append(user_bref_information(
