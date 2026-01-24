@@ -182,7 +182,7 @@ def get_container_detail_information_api():
             "container_status",
             "port",
             "owners":['user_id'],
-            "accounts":[(binding['username'],ROLE(binding['role']))],
+            "accounts":[(binding['user_id'],binding['username'],ROLE(binding['role']))],
         }
     }
     '''

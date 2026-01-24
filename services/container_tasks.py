@@ -122,8 +122,8 @@ def Create_container(user_name:str,machine_id:str,container:Container_info,publi
     add_binding(user_id=user.id,
                 container_id=container_id,
                 public_key=public_key,
-                username=user_name,
-                role=ROLE.ADMIN)
+                username='root', # 强制使用 root 作为用户名
+                role=ROLE.ROOT) # 这里在创建时，自动变成 ROOT
     
     if Key:
         return True
@@ -266,6 +266,7 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->boo
     full_url = base_url+"/update_role"
 
     user_name=get_name_by_id(user_id)
+    # 远侧处理ROOT相关的角色变更 可能需单独考察
     data={
         "config":{
             "container_id":container_id,
@@ -297,7 +298,14 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->boo
         #######
     else:
         Key=True
-    update_binding(user_id,container_id,role=updated_role)
+    if updated_role == ROLE.ROOT:
+        # 强制使用 root 作为用户名
+        username = 'root'
+    else:
+        username = user_name
+
+    # 更新绑定时同时传入 username 和 role，确保数据库中的 username 在变更为 ROOT 时被设置为 'root'
+    update_binding(user_id, container_id, username=username, role=updated_role)
     
     if Key:
         return True
@@ -318,10 +326,11 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         "port": container.port,
         # 备忘：owners才是系统对应的用户名列表
         "owners": [get_name_by_id(binding['user_id']) for binding in owener_bindings],
-        # 这里的变动是防止报错 TODO 2026年1月24日
-        # 备忘：accounts是docker容器内的用户名和角色列表
+        # 这里的变动是为了
+        # 1. 语句写法 - 防止报错（针对API提取时的格式问题）
+        # 2. username -> user_id 使得在页面层对应性更强，并避免可能存在的 user_name与username不同
         "accounts": [
-            {"username": binding.get('username'), "role": (ROLE(binding.get('role')).value if binding.get('role') is not None else None)}
+            {"user_id": binding.get('user_id'), "username": binding.get("username"), "role": (ROLE(binding.get('role')).value if binding.get('role') is not None else None)}
             for binding in owener_bindings
         ],
     }
