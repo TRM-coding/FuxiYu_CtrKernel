@@ -21,7 +21,8 @@ class CommsConfig:
     BASE_URL='http://172.17.0.3:5000/api'
 
 class CORSHeaderConfig:
-    ALLOW_ORIGINS='http://localhost:5173'
+    # Allow both localhost and 127.0.0.1 origins used in development
+    ALLOW_ORIGINS='http://localhost:5173,http://127.0.0.1:5173'
 
 # 新增：统一的 AppConfig 和 get_config
 class AppConfig(SqlConfig, KeyConfig):

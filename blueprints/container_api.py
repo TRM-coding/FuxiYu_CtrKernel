@@ -1,6 +1,7 @@
 from flask import jsonify, request
 from . import api_bp
 from ..services import container_tasks as container_service
+from ..utils.Container import Container_info
 from ..constant import ROLE
 from ..repositories import containers_repo, authentications_repo
 from ..schemas.user_schema import user_schema, users_schema
@@ -33,20 +34,45 @@ def create_container_api():
            return jsonify({"success": 0, "message": "invalid or missing token"}), 401
     data = request.get_json() or {}
     user_name = data.get("user_name", "")
-    machine_id = data.get("machine_id", 0)
-    container = {
-        "GPU_LIST": data.get("GPU_LIST", []),
-        "CPU_NUMBER": data.get("CPU_NUMBER", 0),
-        "MEMORY": data.get("MEMORY", 0),
-        "NAME": data.get("NAME", ""),
-        "image": data.get("image", ""),
-    }
+    machine_id = data.get("machine_id", None)
+
+    # 似乎是一些结构问题
+    container_raw = data.get("container") or {}
+    # fallback to top-level keys for backward compatibility
+    if not container_raw:
+        container_raw = {
+            "GPU_LIST": data.get("GPU_LIST", []),
+            "CPU_NUMBER": data.get("CPU_NUMBER", 0),
+            "MEMORY": data.get("MEMORY", 0),
+            "NAME": data.get("NAME", ""),
+            "image": data.get("image", ""),
+        }
+
     public_key = data.get("public_key", "")
 
-    
+    # 这里纯粹只是为了增加报错信息的友好性
+    try:
+        gpu_list = container_raw.get("GPU_LIST") or container_raw.get("gpu_list") or []
+        cpu_number = int(container_raw.get("CPU_NUMBER") or container_raw.get("cpu_number") or 0)
+        memory = int(container_raw.get("MEMORY") or container_raw.get("memory") or 0)
+        name = container_raw.get("NAME") or container_raw.get("name") or ""
+        image = container_raw.get("image") or container_raw.get("IMAGE") or ""
+
+        # construct Container_info instance expected by service layer
+        container_obj = Container_info(gpu_list=gpu_list, cpu_number=cpu_number, memory=memory, name=name, image=image)
+
+        # normalize machine_id to string (service expects str in many places)
+        if machine_id is None or machine_id == "":
+            machine_id = None
+        else:
+            machine_id = str(machine_id)
+
+    except Exception as e:
+        return jsonify({"success": 0, "message": f"Invalid container payload: {str(e)}"}), 400
+
     if not container_service.Create_container(user_name=user_name,
                      machine_id=machine_id,
-                     container=container,
+                     container=container_obj,
                      public_key=public_key):
         return jsonify({"success": 0, "message": "Failed to create container"}), 500
     return jsonify({"success": 1, "message": "Container created successfully"}), 201
