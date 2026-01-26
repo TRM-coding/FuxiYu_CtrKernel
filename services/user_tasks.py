@@ -188,7 +188,18 @@ def List_all_user_bref_information(page_number:int, page_size:int)->list[user_br
                 # functional now counts any bound container that is ONLINE (regardless of role)
                 if is_online:
                     functional += 1
-                if role_val in (ROLE.ADMIN.value, ROLE.ROOT.value):
+
+                # manage counts ADMIN and ROOT roles
+                # role_val from DB can be either an Enum or a raw string depending on DB driver; normalize to string
+                try:
+                    if isinstance(role_val, ROLE):
+                        role_name = role_val.value
+                    else:
+                        role_name = str(role_val)
+                except Exception:
+                    role_name = str(role_val)
+
+                if role_name == ROLE.ADMIN.value or role_name == ROLE.ROOT.value:
                     managed += 1
             except Exception:
                 # ignore binding errors and continue
