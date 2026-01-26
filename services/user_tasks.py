@@ -29,6 +29,9 @@ class user_detail_information(BaseModel):
     email:str
     graduation_year:int
     containers:list[int]  # 容器id列表
+    amount_of_container: int = 0
+    amount_of_functional_container: int = 0
+    amount_of_managed_container: int = 0
     
 #####################################
 
@@ -134,16 +137,18 @@ def Get_user_detail_information(user_id: int)->user_detail_information:
         return None
 
     # get container bindings for this user
-    bindings = usercontainer_repo.get_user_bindings(user.id) or []
-    container_ids = [b.get('container_id') for b in bindings]
-
-    # compute counts based on role values stored in bindings
+    # compute container ids and counts using centralized helper
+    counts = usercontainer_repo.compute_user_container_counts(user.id)
+    container_ids = counts.get('container_ids', [])
     return user_detail_information(
         user_id=user.id,
         username=user.username,
         email=user.email,
         graduation_year=user.graduation_year,
         containers=container_ids,
+        amount_of_container=counts.get('total', 0),
+        amount_of_functional_container=counts.get('functional', 0),
+        amount_of_managed_container=counts.get('managed', 0),
     )
 #####################################
 
@@ -163,47 +168,12 @@ def List_all_user_bref_information(page_number:int, page_size:int)->list[user_br
     users = list_users(limit=ps, offset=offset)
     result: list[user_bref_information] = []
     for u in users:
-        bindings = usercontainer_repo.get_user_bindings(u.id) or []
-        container_ids = [b.get('container_id') for b in bindings]
-        total = len(container_ids)
-        # count functional containers as bindings where role is COLLABORATOR and the container is ONLINE
-        functional = 0
-        managed = 0
-        for b in bindings:
-            try:
-                role_val = b.get('role')
-                cid = b.get('container_id')
-                if cid is None:
-                    continue
-                # fetch container to check status
-                container = containers_repo.get_by_id(int(cid))
-                is_online = False
-                if container and getattr(container, 'container_status', None) is not None:
-                    # container.container_status may be an Enum
-                    try:
-                        is_online = (container.container_status == ContainerStatus.ONLINE or getattr(container.container_status, 'value', None) == ContainerStatus.ONLINE.value)
-                    except Exception:
-                        is_online = (str(container.container_status).lower() == ContainerStatus.ONLINE.value)
-
-                # functional now counts any bound container that is ONLINE (regardless of role)
-                if is_online:
-                    functional += 1
-
-                # manage counts ADMIN and ROOT roles
-                # role_val from DB can be either an Enum or a raw string depending on DB driver; normalize to string
-                try:
-                    if isinstance(role_val, ROLE):
-                        role_name = role_val.value
-                    else:
-                        role_name = str(role_val)
-                except Exception:
-                    role_name = str(role_val)
-
-                if role_name == ROLE.ADMIN.value or role_name == ROLE.ROOT.value:
-                    managed += 1
-            except Exception:
-                # ignore binding errors and continue
-                continue
+        # Use centralized helper to compute container counts for this user
+        counts = usercontainer_repo.compute_user_container_counts(u.id)
+        container_ids = counts.get('container_ids', [])
+        total = counts.get('total', 0)
+        functional = counts.get('functional', 0)
+        managed = counts.get('managed', 0)
 
         # Optionally use containers_repo to validate container ids or fetch additional info
         result.append(user_bref_information(

@@ -7,7 +7,8 @@ from ..extensions import db
 from ..models.user import User
 from ..models.containers import Container
 from ..models.usercontainer import UserContainer
-from ..constant import ROLE
+from ..constant import ROLE, ContainerStatus
+from . import containers_repo
 
 # 使用底层 Table 以便 Core 风格操作
 uc = UserContainer.__table__
@@ -209,5 +210,57 @@ def update_binding(
     if commit:
         db.session.commit()
     return True
+
+# 加入这个方法主要是提供更好的界面统计数据
+def compute_user_container_counts(user_id: int) -> dict:
+    bindings = get_user_bindings(user_id) or []
+    container_ids = [b.get('container_id') for b in bindings]
+    total = len(container_ids)
+    functional = 0
+    managed = 0
+
+    for b in bindings:
+        try:
+            role_val = b.get('role')
+            cid = b.get('container_id')
+            if cid is None:
+                continue
+
+            # fetch container to check status
+            container = containers_repo.get_by_id(int(cid))
+            is_online = False
+            if container and getattr(container, 'container_status', None) is not None:
+                try:
+                    is_online = (
+                        container.container_status == ContainerStatus.ONLINE
+                        or getattr(container.container_status, 'value', None) == ContainerStatus.ONLINE.value
+                    )
+                except Exception:
+                    is_online = (str(container.container_status).lower() == ContainerStatus.ONLINE.value)
+
+            if is_online:
+                functional += 1
+
+            # 这里是有时候会检测不到 故做了这样的设计
+            # 这里因为枚举是str，所以做了一次统一转换
+            try:
+                if isinstance(role_val, ROLE):
+                    role_name = role_val.value
+                else:
+                    role_name = str(role_val)
+            except Exception:
+                role_name = str(role_val)
+
+            if role_name == ROLE.ADMIN.value or role_name == ROLE.ROOT.value:
+                managed += 1
+        except Exception:
+            continue
+
+    return {
+        'container_ids': container_ids,
+        'total': total,
+        'functional': functional,
+        'managed': managed,
+    }
 
 
