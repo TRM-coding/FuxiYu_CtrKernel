@@ -146,6 +146,25 @@ def login():
 
 @api_bp.get("/users/get_user_detail_information")
 def get_user_detail_information_api():
+	'''
+	通信数据格式：
+	发送格式：
+	{
+		"token",
+		"user_id"
+	}
+	返回格式：
+	{
+        "user_id",
+        "username",
+        "email",
+        "graduation_year"
+        "containers", # in IDs
+        "amount_of_container",
+        "amount_of_functional_container",
+        "amount_of_managed_container"
+    }
+	'''
 	# require valid token
 	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
 		return jsonify({"success": 0, "message": "invalid or missing token"}), 401
@@ -170,6 +189,28 @@ def get_user_detail_information_api():
 
 @api_bp.get("/users/list_all_user_bref_information")
 def list_all_user_bref_information_api():
+	'''
+	通信数据格式：
+	发送格式：
+	{
+		"token",
+		"page_number",
+		"page_size"
+	}
+	返回格式：
+	{[
+        "user_id",
+        "username",
+        "email",
+        "graduation_year",
+        "containers",
+        "amount_of_container",
+        "amount_of_functional_container",
+        "amount_of_managed_container"
+	], 
+	...
+	}
+	'''
 	# require valid token
 	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
 		return jsonify({"success": 0, "message": "invalid or missing token"}), 401
@@ -195,6 +236,21 @@ def list_all_user_bref_information_api():
 
 @api_bp.post("/users/change_password")
 def change_password_user():
+	'''
+	通讯数据格式：
+	发送格式：
+	{
+		"token",
+		"user_id",
+		"old_password",
+		"new_password"
+	}
+	返回格式：
+	{
+		"success": [0|1],
+		"message": "xxxx"
+	}
+	'''
 	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
 		return jsonify({"success": 0, "message": "invalid or missing token"}), 401
 
