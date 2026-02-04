@@ -117,8 +117,24 @@ def Change_password(user: User, old_password: str, new_password: str) -> bool:
 #####################################
 #注销用户
 def Delete_user(user_id: int) -> bool:
-    delete_user(user_id=user_id)
-    return True
+    # 先移除用户与所有容器的绑定关系
+    res = usercontainer_repo.remove_user_from_all_containers(user_id)
+
+    # 检查返回结果
+
+    if not res.get('ok', False):
+        wild = res.get('wild_containers')
+        if wild:
+            e = Exception("Wild container NOT allowed. Must remove all affected containers first.")
+            setattr(e, 'wild_containers', wild)
+            raise e
+        return False
+
+    # 最终删除用户
+    if delete_user(user_id=user_id):
+        return True
+    
+    return False
     
 #####################################
 

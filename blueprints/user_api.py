@@ -288,8 +288,13 @@ def delete_user_api():
 
 	try:
 		ok = user_tasks.Delete_user(int(user_id))
-	except Exception:
-		return jsonify({"success": 0, "message": "failed to delete user"}), 500
+	except Exception as e:
+		# 异常时，意味着存在无主容器阻止删除；返回特定错误信息并附加无主容器列表
+		payload = {"success": 0, "message": "Wild container NOT allowed. Must remove all affected containers first."}
+		wild = getattr(e, 'wild_containers', None)
+		if wild:
+			payload['wild_containers'] = wild
+		return jsonify(payload), 400
 
 	if ok:
 		return jsonify({"success": 1, "message": "user deleted"}), 200

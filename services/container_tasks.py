@@ -176,6 +176,10 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
     full_url = base_url+"/add_collaborator"
 
     user_name=get_name_by_id(user_id)
+    # Do not allow adding a collaborator as ROOT via this API/task
+    if role == ROLE.ROOT:
+        # Reject silently (caller/API will return failure)
+        return False
     data={
         "config":{
             "container_id":container_id,
@@ -221,6 +225,18 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
 
 def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
     full_url = base_url+"/remove_collaborator"
+
+    # prevent removing ROOT owners
+    try:
+        binding = get_binding(user_id, container_id)
+    except Exception:
+        binding = None
+    if binding:
+        role_val = binding.get('role')
+        # stored role is usually the enum value string
+        if role_val is not None and str(role_val).upper() == str(ROLE.ROOT.value).upper():
+            # 不可移除 ROOT 用户
+            return False
 
     user_name=get_name_by_id(user_id)
     data={

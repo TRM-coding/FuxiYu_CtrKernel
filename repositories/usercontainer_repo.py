@@ -264,3 +264,81 @@ def compute_user_container_counts(user_id: int) -> dict:
     }
 
 
+def remove_user_from_all_containers(user_id: int) -> dict:
+    """
+    业务如下：
+
+    对目标用户所对应的所有非root身份的容器，做container_task.remove_collaborator即可；
+    对是root且他是唯一用户的，返回false，使得APi返回success 0，并提示“Wild container NOT allowed. Must remove all affected containers first.”
+    对是root且不是唯一用户的：（1）对第一位是root的做update_role为root；（2）对目标需要删除的用户做update_role为collaborator；（3）对目标需要删除的用户做remove_collaborator。
+    直到相关联的容器全部删除，方可返回true。
+    """
+    bindings = get_user_bindings(user_id) or []
+    # local import to avoid circular import at module load
+    try:
+        from ..services import container_tasks
+    except Exception:
+        # unable to import service layer
+        return {"ok": False}
+
+    wild_containers = []
+
+    for b in bindings:
+        cid = b.get('container_id')
+        role_val = b.get('role')
+        try:
+            if isinstance(role_val, ROLE):
+                role_name = role_val.value
+            else:
+                role_name = str(role_val or '')
+        except Exception:
+            role_name = str(role_val or '')
+
+        if str(role_name).upper() != ROLE.ROOT.value.upper():
+            # non-root: simply remove collaborator
+            ok = container_tasks.remove_collaborator(container_id=cid, user_id=user_id)
+            if not ok:
+                return {"ok": False}
+            # continue to next binding
+            continue
+
+        # role is ROOT
+        container_bindings = get_container_bindings(cid) or []
+        if len(container_bindings) <= 1:
+            # this is a wild container (only root owner) — cannot proceed
+            wild_containers.append(cid)
+            # do not proceed with modifications for this container
+            continue
+
+        # find a candidate to promote (first user that is not the target)
+        candidate = None
+        for cb in container_bindings:
+            if cb.get('user_id') != user_id:
+                candidate = cb
+                break
+        if not candidate:
+            return {"ok": False}
+
+        new_root_uid = candidate.get('user_id')
+
+        # promote candidate to ROOT
+        ok = container_tasks.update_role(container_id=cid, user_id=new_root_uid, updated_role=ROLE.ROOT)
+        if not ok:
+            return {"ok": False}
+
+        # demote target to COLLABORATOR
+        ok = container_tasks.update_role(container_id=cid, user_id=user_id, updated_role=ROLE.COLLABORATOR)
+        if not ok:
+            return {"ok": False}
+
+        # finally remove the (now non-root) collaborator
+        ok = container_tasks.remove_collaborator(container_id=cid, user_id=user_id)
+        if not ok:
+            return {"ok": False}
+
+    if wild_containers:
+        return {"ok": False, "wild_containers": wild_containers}
+
+    return {"ok": True}
+
+
