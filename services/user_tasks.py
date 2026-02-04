@@ -29,6 +29,7 @@ class user_detail_information(BaseModel):
     email:str
     graduation_year:int
     containers:list[int]  # 容器id列表
+    permission: str = None
     amount_of_container: int = 0
     amount_of_functional_container: int = 0
     amount_of_managed_container: int = 0
@@ -62,7 +63,7 @@ def Login(username: str, password: str):
     # 登录成功，生成 token
     token = secrets.token_urlsafe(32)
     expires_at = datetime.utcnow() + timedelta(hours=24)
-    auth = authentications_repo.create_auth(token, expires_at)
+    auth = authentications_repo.create_auth(token, user.id, expires_at)
     
     return True, user, auth.token
 #####################################
@@ -94,14 +95,12 @@ def Register(username: str, email: str, password: str, graduation_year):
         return False, "email_exists", None
     
     # 创建新用户
-    new_user = User(
+    new_user = create_user( # 改用repository层的create_user函数
         username=username,
         email=email,
         password_hash=generate_password_hash(password),
         graduation_year=graduation_year
     )
-    db.session.add(new_user)
-    db.session.commit()
     return True, new_user, None
 #####################################
 
@@ -145,6 +144,7 @@ def Get_user_detail_information(user_id: int)->user_detail_information:
         username=user.username,
         email=user.email,
         graduation_year=user.graduation_year,
+        permission=user.permission.value, #这里用.value获取字符串形式
         containers=container_ids,
         amount_of_container=counts.get('total', 0),
         amount_of_functional_container=counts.get('functional', 0),

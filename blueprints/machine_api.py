@@ -1,8 +1,9 @@
 from flask import jsonify, request
 from . import api_bp
 from ..services import machine_tasks as machine_service
-from ..repositories import machine_repo, authentications_repo
+from ..repositories import user_repo, authentications_repo
 from ..schemas.user_schema import user_schema, users_schema
+from ..constant import PERMISSION
 from sqlalchemy.exc import IntegrityError
 
 
@@ -31,6 +32,8 @@ def add_machine_api():
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
         return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+    if (not user_repo.check_permission(request.headers.get("token", ""), required_permission=PERMISSION.OPERATOR)):
+        return jsonify({"success": 0, "message": "insufficient permissions"}), 403
     data = request.get_json() or {}
     machine_name = data.get("machine_name", "")
     machine_ip = data.get("machine_ip", "")
@@ -78,6 +81,9 @@ def remove_machine_api():
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
         return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+    if (not user_repo.check_permission(request.headers.get("token", ""), required_permission=PERMISSION.OPERATOR)):
+        return jsonify({"success": 0, "message": "insufficient permissions"}), 403
+    data = request.get_json() or {}
     data = request.get_json() or {}
     machine_ids = data.get("machine_ids", [])
     success = machine_service.Remove_machine(machine_id=machine_ids)
@@ -115,7 +121,10 @@ def update_machine_api():
 	}
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-        return jsonify({"error": "invalid or missing token"}), 401
+        return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+    if (not user_repo.check_permission(request.headers.get("token", ""), required_permission=PERMISSION.OPERATOR)):
+        return jsonify({"success": 0, "message": "insufficient permissions"}), 403
+    data = request.get_json() or {}
     data = request.get_json() or {}
     machine_id = data.get("machine_id", 0)
     fields = data.get("fields", {})
@@ -142,7 +151,7 @@ def get_detail_information_api():
 	}
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-        return jsonify({"error": "invalid or missing token"}), 401
+        return jsonify({"success": 0, "message": "invalid or missing token"}), 401
     data = request.get_json() or {}
     machine_id = data.get("machine_id", 0)
     machine_info = machine_service.Get_detail_information(machine_id=machine_id)
@@ -160,7 +169,7 @@ def get_detail_information_api():
             "containers": machine_info.containers
         }), 200
     else:
-        return jsonify({"error": "Machine not found"}), 404
+        return jsonify({"success": 0, "message": "Machine not found"}), 404
     
 @api_bp.post("/machines/list_all_machine_bref_information")
 def list_all_machine_bref_information_api():
@@ -179,7 +188,7 @@ def list_all_machine_bref_information_api():
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-        return jsonify({"error": "invalid or missing token"}), 401
+        return jsonify({"success": 0, "message": "invalid or missing token"}), 401
     data = request.get_json(silent=True) or {}
     page_number = int(data.get("page_number", 0))
     page_size = int(data.get("page_size", 10))

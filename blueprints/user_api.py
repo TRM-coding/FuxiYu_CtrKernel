@@ -27,7 +27,7 @@ def register():
 		"message": "xxxx",
 		"user_id": xxxx,
 		"username": "xxxx",
-		"email": "xxxx"
+		"email": "xxxx",
 	}
 	'''
 	"""用户注册 API"""
@@ -88,11 +88,11 @@ def login():
 		"user_id": xxxx,
 		"username": "xxxx",
 		"email": "xxxx",
+		"permission": "[user|operator]",
 		"token": "xxxx"
 	}
 	'''
 	"""用户登录 API"""
-	print("Login Called")
 	recived_data = request.get_json(silent=True)
 	if not recived_data:
 		return jsonify({"success": 0, "message": "invalid json"}), 400
@@ -115,6 +115,7 @@ def login():
 			"user_id": user_or_reason.id,
 			"username": user_or_reason.username,
 			"email": user_or_reason.email,
+			"permission": user_or_reason.permission.value,
 			"token": token,
 		}), 200)
 		
@@ -158,7 +159,8 @@ def get_user_detail_information_api():
         "user_id",
         "username",
         "email",
-        "graduation_year"
+        "graduation_year",
+		"permission": "[user|operator]",
         "containers", # in IDs
         "amount_of_container",
         "amount_of_functional_container",

@@ -20,3 +20,7 @@ class ROLE(Enum):
     ADMIN="ADMIN"
     COLLABORATOR="COLLABORATOR"
     ROOT="ROOT"
+
+class PERMISSION(Enum):
+    USER="user"
+    OPERATOR="operator"

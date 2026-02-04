@@ -20,21 +20,37 @@ def get_by_token(token: str) -> Optional[Authentication]:
     """
     return Authentication.query.filter_by(token=token).first()
 
+def get_user_id_by_token(token: str) -> Optional[int]:
+    """根据 token 查询关联的用户 ID
+    
+    Args:
+        token: 认证 token 字符串
+        
+    Returns:
+        关联的用户 ID 或 None
+    """
+    auth = get_by_token(token)
+    if auth:
+        return auth.user_id
+    return None
 
-def create_auth(token: str, expires_at: datetime, *, commit: bool = True) -> Authentication:
+def create_auth(token: str, user_id: int, expires_at: datetime, *, commit: bool = True) -> Authentication:
     """创建新的认证记录
     
     Args:
         token: 认证 token 字符串
+        user_id: 关联的用户 ID
         expires_at: 过期时间
         commit: 是否立即提交事务
         
     Returns:
         创建的 Authentication 对象
     """
+    cleanup_expired_tokens(commit=False)
     auth = Authentication(
         token=token,
-        expires_at=expires_at
+        expires_at=expires_at,
+        user_id=user_id
     )
     db.session.add(auth)
     if commit:
@@ -85,9 +101,15 @@ def cleanup_expired_tokens(*, commit: bool = True) -> int:
     Returns:
         清理的记录数量
     """
-    count = Authentication.query.filter(
-        Authentication.expires_at <= datetime.utcnow()
-    ).delete()
-    if commit:
+    expired_tokens = (
+        Authentication.query.with_entities(Authentication.token)
+        .filter(Authentication.expires_at <= datetime.utcnow())
+        .all()
+    )
+    count = 0
+    for (token,) in expired_tokens:
+        if delete_auth(token, commit=False):
+            count += 1
+    if commit and count:
         db.session.commit()
     return count
