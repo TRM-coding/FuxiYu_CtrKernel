@@ -278,6 +278,20 @@ def change_password_user():
 
 @api_bp.post("/users/delete_user")
 def delete_user_api():
+	'''
+	通讯数据格式：
+	发送格式：
+	{
+		"token",
+		"user_id"
+	}
+	返回格式：
+	{
+		"success": [0|1],
+		"message": "xxxx"
+		"wild_containers": [...]  # 可选字段，仅在存在无主容器阻止删除时返回
+	}
+	'''
 	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
 		return jsonify({"success": 0, "message": "invalid or missing token"}), 401
 
@@ -298,5 +312,75 @@ def delete_user_api():
 
 	if ok:
 		return jsonify({"success": 1, "message": "user deleted"}), 200
+	else:
+		return jsonify({"success": 0, "message": "user not found"}), 404
+
+@api_bp.post("/users/update_user")
+def update_user_api():
+	'''
+	通讯数据格式：
+	发送格式：
+	{
+		"token",
+		"user_id",
+		"fields": {
+			"username": "newname",
+			"email": "newemail",
+			"graduation_year": 2026
+		}
+	}
+	返回格式：
+	{
+		"success": [0|1],
+		"message": "xxxx",
+		"user": { ... updated user data ... }
+	}
+	'''
+	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+		return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+
+	data = request.get_json(silent=True) or {}
+	
+	user_id = data.get("user_id") or request.args.get("user_id")
+	fields = data.get("fields", {})
+
+	if not user_id or not fields:
+		return jsonify({"success": 0, "message": "user_id and fields required"}), 400
+
+	user = user_tasks.Update_user(int(user_id), **fields)
+	if user:
+		return jsonify({"success": 1, "message": "user updated", "user": user.username}), 200
+	else:
+		return jsonify({"success": 0, "message": "user not found"}), 404
+
+@api_bp.post("/users/reset_password")
+def reset_password_api():
+	'''
+	通讯数据格式：
+	发送格式：
+	{
+		"token",
+		"user_id"
+	}
+	返回格式：
+	{
+		"success": [0|1],
+		"message": "xxxx",
+		"new_password": "xxxx"
+	}
+	'''
+	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+		return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+
+	data = request.get_json(silent=True) or {}
+	
+	user_id = data.get("user_id") or request.args.get("user_id")
+
+	if not user_id:
+		return jsonify({"success": 0, "message": "user_id required"}), 400
+
+	new_password = user_tasks.Reset_password(int(user_id))
+	if new_password:
+		return jsonify({"success": 1, "message": "password reset", "new_password": new_password}), 200
 	else:
 		return jsonify({"success": 0, "message": "user not found"}), 404

@@ -133,7 +133,7 @@ def Delete_user(user_id: int) -> bool:
     # 最终删除用户
     if delete_user(user_id=user_id):
         return True
-    
+
     return False
     
 #####################################
@@ -206,7 +206,28 @@ def List_all_user_bref_information(page_number:int, page_size:int)->list[user_br
 #####################################
 
 #####################################
+def Update_user(user_id:int,**fields)->User|None:
+    # 此方法不能修改 permission、password_hash
+
+    if 'permission' in fields:
+        del fields['permission']
+    if 'password_hash' in fields:
+        del fields['password_hash']
+
+    user=update_user(user_id,**fields)
+    return user
+#####################################
+
+#####################################
 #忘记密码
 #TODO:实现邮件发送功能
+# 暂时默认重置为 "[graduation_year][username]
+def Reset_password(user_id:int)->str|None:
+    user=get_by_id(user_id)
+    if not user:
+        return None
+    new_password=f"{user.graduation_year}{user.username}"
+    update_user(user_id,password_hash=generate_password_hash(new_password))
+    return new_password
 #####################################
 
