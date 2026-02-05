@@ -56,7 +56,7 @@ def add_machine_api():
                                             disk_size=disk_size)
     except IntegrityError as ie:
         # likely duplicate unique constraint (e.g. machine_name)
-        return jsonify({"success": 0, "message": f"Integrity error: {str(ie.orig) if hasattr(ie, 'orig') else str(ie)}"}), 400
+        return jsonify({"success": 0, "message": f"Duplicate entry: {str(ie.orig) if hasattr(ie, 'orig') else str(ie)}"}), 409
     except Exception as e:
         return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
 

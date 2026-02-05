@@ -1,3 +1,4 @@
+from sqlalchemy.exc import IntegrityError
 from flask import jsonify, request
 from . import api_bp
 from ..services import container_tasks as container_service
@@ -69,12 +70,18 @@ def create_container_api():
 
     except Exception as e:
         return jsonify({"success": 0, "message": f"Invalid container payload: {str(e)}"}), 400
-
-    if not container_service.Create_container(user_name=user_name,
-                     machine_id=machine_id,
-                     container=container_obj,
-                     public_key=public_key):
-        return jsonify({"success": 0, "message": "Failed to create container"}), 500
+    try:
+        if not container_service.Create_container(user_name=user_name,
+                        machine_id=machine_id,
+                        container=container_obj,
+                        public_key=public_key):
+            return jsonify({"success": 0, "message": "Failed to create container"}), 500
+    except IntegrityError as e:
+        return jsonify({"success": 0, "message": f"Duplicate entry: {str(e.orig) if hasattr(e, 'orig') else str(e)}"}), 409
+    
+    # TODO 为后面处置系统与宿主机通讯失败的情况预留接口 目前先假设一定成功
+    # except Exception as e: 
+    #     return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
     return jsonify({"success": 1, "message": "Container created successfully"}), 201
     
     

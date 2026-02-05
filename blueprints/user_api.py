@@ -65,11 +65,15 @@ def register():
 		}
 		message = error_messages.get(error_reason, "Registration failed")
 		
-		return jsonify({
-			"success": 0,
-			"message": message,
-			"error_reason": error_reason
-		}), 400
+		if error_reason in ["username_exists", "email_exists"]:
+			status_code = 409  # Conflict
+		else:
+			status_code = 400  # Bad Request
+			return jsonify({
+				"success": 0,
+				"message": message,
+				"error_reason": error_reason
+			}), status_code
 
 
 @api_bp.post("/login")
