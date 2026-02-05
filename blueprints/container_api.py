@@ -29,10 +29,11 @@ def create_container_api():
     {
         "success": [0|1],
         "message": "xxxx",
+        ["error_reason": "xxxx"]
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-           return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+        return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json() or {}
     user_name = data.get("user_name", "")
     machine_id = data.get("machine_id", None)
@@ -69,15 +70,15 @@ def create_container_api():
             machine_id = str(machine_id)
 
     except Exception as e:
-        return jsonify({"success": 0, "message": f"Invalid container payload: {str(e)}"}), 400
+        return jsonify({"success": 0, "message": f"Invalid container payload: {str(e)}", "error_reason": "invalid_payload"}), 400
     try:
         if not container_service.Create_container(user_name=user_name,
                         machine_id=machine_id,
                         container=container_obj,
                         public_key=public_key):
-            return jsonify({"success": 0, "message": "Failed to create container"}), 500
+            return jsonify({"success": 0, "message": "Failed to create container", "error_reason": "create_failed"}), 500
     except IntegrityError as e:
-        return jsonify({"success": 0, "message": f"Duplicate entry: {str(e.orig) if hasattr(e, 'orig') else str(e)}"}), 409
+        return jsonify({"success": 0, "message": f"Duplicate entry: {str(e.orig) if hasattr(e, 'orig') else str(e)}", "error_reason": "duplicate_entry"}), 409
     
     # TODO 为后面处置系统与宿主机通讯失败的情况预留接口 目前先假设一定成功
     # except Exception as e: 
@@ -98,14 +99,15 @@ def delete_container_api():
     {
         "success": [0|1],
         "message": "xxxx",
+        ["error_reason": "xxxx"]
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-           return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+        return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json() or {}
     container_id = data.get("container_id", 0)
     if not container_service.remove_container(container_id=container_id):
-        return jsonify({"success": 0, "message": "Failed to delete container"}), 500
+        return jsonify({"success": 0, "message": "Failed to delete container", "error_reason": "delete_failed"}), 500
     return jsonify({"success": 1, "message": "Container deleted successfully"}), 200
 
 @api_bp.post("/containers/add_collaborator")
@@ -123,10 +125,11 @@ def add_collaborator_api():
     {
         "success": [0|1],
         "message": "xxxx",
+        ["error_reason": "xxxx"]
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
-           return jsonify({"success":0,"message":"invalid or missing token"}),401
+        return jsonify({"success":0,"message":"invalid or missing token", "error_reason": "invalid_token"}),401
     data=request.get_json() or {}
     user_id=data.get("user_id","")
     container_id=data.get("container_id",0)
@@ -136,7 +139,7 @@ def add_collaborator_api():
     if not container_service.add_collaborator(container_id=container_id,
                      user_id=user_id,
                      role=ROLE(role)):
-        return jsonify({"success":0,"message":"Failed to add collaborator"}),500
+        return jsonify({"success":0,"message":"Failed to add collaborator", "error_reason": "add_collaborator_failed"}),500
     return jsonify({"success":1,"message":"Collaborator added successfully"}),201
 
 @api_bp.post("/containers/remove_collaborator")
@@ -153,17 +156,18 @@ def remove_collaborator_api():
     {
         "success": [0|1],
         "message": "xxxx",
+        ["error_reason": "xxxx"]
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
-           return jsonify({"success":0,"message":"invalid or missing token"}),401
+        return jsonify({"success":0,"message":"invalid or missing token", "error_reason": "invalid_token"}),401
     data=request.get_json() or {}
     container_id=data.get("container_id",0)
     user_id=data.get("user_id","")
 
     if not container_service.remove_collaborator(container_id=container_id,
                                                  user_id=user_id):
-        return jsonify({"success":0,"message":"Failed to remove collaborator"}),500
+        return jsonify({"success":0,"message":"Failed to remove collaborator", "error_reason": "remove_collaborator_failed"}),500
     return jsonify({"success":1,"message":"Collaborator removed successfully"}),200
 
 @api_bp.post("/containers/update_role")
@@ -181,10 +185,11 @@ def update_role_api():
     {
         "success": [0|1],
         "message": "xxxx",
+        ["error_reason": "xxxx"]
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
-           return jsonify({"success":0,"message":"invalid or missing token"}),401
+        return jsonify({"success":0,"message":"invalid or missing token", "error_reason": "invalid_token"}),401
     data=request.get_json() or {}
     container_id=data.get("container_id",0)
     user_id=data.get("user_id","")
@@ -192,7 +197,7 @@ def update_role_api():
     if not container_service.update_role(container_id=container_id,
                 user_id=user_id,
                 updated_role=ROLE(updated_role)):
-        return jsonify({"success":0,"message":"Failed to update role"}),500
+        return jsonify({"success":0,"message":"Failed to update role", "error_reason": "update_role_failed"}),500
     return jsonify({"success":1,"message":"Role updated successfully"}),200
 
 @api_bp.post("/containers/get_container_detail_information")
@@ -207,6 +212,8 @@ def get_container_detail_information_api():
     返回格式：
     {
         "success": [0|1],
+        "message": "xxxx",
+        ["error_reason": "xxxx"],
         "container_info": {
             "container_id",
             "container_name",
@@ -220,13 +227,13 @@ def get_container_detail_information_api():
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
-           return jsonify({"success":0,"message":"invalid or missing token"}),401
+        return jsonify({"success":0,"message":"invalid or missing token", "error_reason": "invalid_token"}),401
     data=request.get_json() or {}
     container_id=data.get("container_id",0)
     try:
         container_info=container_service.get_container_detail_information(container_id=container_id)
     except Exception as e:
-        return jsonify({"success":0,"message":"Failed to get container detail information"}),500
+        return jsonify({"success":0,"message":"Failed to get container detail information", "error_reason": "get_detail_failed"}),500
     return jsonify({"success":1,"container_info":container_info}),200
 
 @api_bp.post("/containers/list_all_container_bref_information")
@@ -243,6 +250,8 @@ def list_all_containers_bref_information_api():
     返回格式：
     {
         "success": [0|1],
+        "message": "xxxx",
+        ["error_reason": "xxxx"],
         "containers_info": [{
             "container_id",
             "container_name",
@@ -253,7 +262,7 @@ def list_all_containers_bref_information_api():
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
-           return jsonify({"success":0,"message":"invalid or missing token"}),401
+        return jsonify({"success":0,"message":"invalid or missing token", "error_reason": "invalid_token"}),401
     data=request.get_json() or {}
     machine_id=data.get("machine_id","")
     user_id=data.get("user_id","")
@@ -284,7 +293,7 @@ def list_all_containers_bref_information_api():
         containers_info = result.get('containers', [])
         total_page = result.get('total_page', 1)
     except Exception as e:
-        return jsonify({"success":0,"message":"Failed to list containers"}),500
+        return jsonify({"success":0,"message":"Failed to list containers", "error_reason": "list_failed"}),500
 
     # convert pydantic models to plain dicts so jsonify can serialize
     out = []

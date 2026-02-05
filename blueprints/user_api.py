@@ -5,11 +5,6 @@ from ..repositories import user_repo, authentications_repo
 from ..schemas.user_schema import user_schema, users_schema
 
 
-@api_bp.get("/users/list_users")
-def list_users():
-	pass
-
-
 @api_bp.post("/register")
 def register():
 	'''
@@ -24,6 +19,7 @@ def register():
 	返回格式：
 	{
 		"success": [0|1],
+		["error_reason": "xxxx"],
 		"message": "xxxx",
 		"user_id": xxxx,
 		"username": "xxxx",
@@ -46,8 +42,10 @@ def register():
 		return jsonify({"success": 0, "message": "username, email and password required"}), 400
 	
 	# 调用 service 层注册用户
-	success, user_or_reason, _ = user_tasks.Register(username, email, password, graduation_year)
-	
+	try:
+		success, user_or_reason, _ = user_tasks.Register(username, email, password, graduation_year)
+	except Exception as e:
+		return jsonify({"success": 0, "message": "registration failed due to server error"}), 500
 	if success:
 		return jsonify({
 			"success": 1,
@@ -64,16 +62,17 @@ def register():
 			"email_exists": "Email already exists"
 		}
 		message = error_messages.get(error_reason, "Registration failed")
-		
+
 		if error_reason in ["username_exists", "email_exists"]:
 			status_code = 409  # Conflict
 		else:
 			status_code = 400  # Bad Request
-			return jsonify({
-				"success": 0,
-				"message": message,
-				"error_reason": error_reason
-			}), status_code
+
+		return jsonify({
+			"success": 0,
+			"message": message,
+			"error_reason": error_reason
+		}), status_code
 
 
 @api_bp.post("/login")
@@ -89,6 +88,7 @@ def login():
 	{
 		"success": [0|1],
 		"message": "xxxx",
+		["error_reason": "xxxx"],
 		"user_id": xxxx,
 		"username": "xxxx",
 		"email": "xxxx",
@@ -142,12 +142,16 @@ def login():
 			"password_incorrect": "Password is incorrect"
 		}
 		message = error_messages.get(error_reason, "Login failed")
-		
+		if error_reason == "user_not_found":
+			error_code = 404
+		elif error_reason == "password_incorrect":
+			error_code = 400
+
 		return jsonify({
 			"success": 0,
 			"message": message,
 			"error_reason": error_reason
-		}), 401
+		}), error_code
 
 @api_bp.get("/users/get_user_detail_information")
 def get_user_detail_information_api():
@@ -160,6 +164,9 @@ def get_user_detail_information_api():
 	}
 	返回格式：
 	{
+		"success": [0|1],
+		"message": "xxxx",
+		["error_reason": "xxxx"],
         "user_id",
         "username",
         "email",
@@ -173,17 +180,17 @@ def get_user_detail_information_api():
 	'''
 	# require valid token
 	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-		return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+		return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
 
 	data = request.get_json(silent=True) or {}
 	# support both JSON body and querystring
 	user_id = data.get("user_id") or request.args.get("user_id")
 	if not user_id:
-		return jsonify({"success": 0, "message": "user_id required"}), 400
+		return jsonify({"success": 0, "message": "user_id required", "error_reason": "missing_user_id"}), 400
 
 	info = user_tasks.Get_user_detail_information(user_id)
 	if not info:
-		return jsonify({"success": 0, "message": "user not found"}), 404
+		return jsonify({"success": 0, "message": "user not found", "error_reason": "user_not_found"}), 404
 
 	# if pydantic model, convert to dict
 	try:
@@ -219,7 +226,7 @@ def list_all_user_bref_information_api():
 	'''
 	# require valid token
 	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-		return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+		return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
 
 	data = request.get_json(silent=True) or {}
 	page_number = data.get("page_number") or request.args.get("page_number") or 1
@@ -228,7 +235,7 @@ def list_all_user_bref_information_api():
 	try:
 		users = user_tasks.List_all_user_bref_information(page_number=int(page_number), page_size=int(page_size))
 	except Exception as e:
-		return jsonify({"success": 0, "message": "failed to list users"}), 500
+		return jsonify({"success": 0, "message": "failed to list users", "error_reason": "list_failed"}), 500
 
 	# convert pydantic models to dicts if necessary
 	out = []
@@ -254,11 +261,12 @@ def change_password_user():
 	返回格式：
 	{
 		"success": [0|1],
-		"message": "xxxx"
+		"message": "xxxx",
+		["error_reason": "xxxx"]
 	}
 	'''
 	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-		return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+		return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
 
 	data = request.get_json(silent=True) or {}
 	
@@ -267,18 +275,18 @@ def change_password_user():
 	new_password = data.get("new_password")
 
 	if not user_id or not old_password or not new_password:
-		return jsonify({"success": 0, "message": "user_id, old_password and new_password required"}), 400
+		return jsonify({"success": 0, "message": "user_id, old_password and new_password required", "error_reason": "missing_fields"}), 400
 
 	# fetch user object
 	user = user_repo.get_by_id(int(user_id))
 	if not user:
-		return jsonify({"success": 0, "message": "user not found"}), 404
+		return jsonify({"success": 0, "message": "user not found", "error_reason": "user_not_found"}), 404
 
 	ok = user_tasks.Change_password(user, old_password, new_password)
 	if ok:
 		return jsonify({"success": 1, "message": "password changed"}), 200
 	else:
-		return jsonify({"success": 0, "message": "old password incorrect"}), 400
+		return jsonify({"success": 0, "message": "old password incorrect", "error_reason": "old_password_incorrect"}), 400
 
 @api_bp.post("/users/delete_user")
 def delete_user_api():
@@ -292,23 +300,24 @@ def delete_user_api():
 	返回格式：
 	{
 		"success": [0|1],
-		"message": "xxxx"
+		"message": "xxxx",
+		["error_reason": "xxxx"],
 		"wild_containers": [...]  # 可选字段，仅在存在无主容器阻止删除时返回
 	}
 	'''
 	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-		return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+		return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
 
 	data = request.get_json(silent=True) or {}
 	user_id = data.get("user_id") or request.args.get("user_id")
 	if not user_id:
-		return jsonify({"success": 0, "message": "user_id required"}), 400
+		return jsonify({"success": 0, "message": "user_id required", "error_reason": "missing_user_id"}), 400
 
 	try:
 		ok = user_tasks.Delete_user(int(user_id))
 	except Exception as e:
 		# 异常时，意味着存在无主容器阻止删除；返回特定错误信息并附加无主容器列表
-		payload = {"success": 0, "message": "Wild container NOT allowed. Must remove all affected containers first."}
+		payload = {"success": 0, "message": "Wild container NOT allowed. Must remove all affected containers first.", "error_reason": "wild_container"}
 		wild = getattr(e, 'wild_containers', None)
 		if wild:
 			payload['wild_containers'] = wild
@@ -317,7 +326,7 @@ def delete_user_api():
 	if ok:
 		return jsonify({"success": 1, "message": "user deleted"}), 200
 	else:
-		return jsonify({"success": 0, "message": "user not found"}), 404
+		return jsonify({"success": 0, "message": "user not found", "error_reason": "user_not_found"}), 404
 
 @api_bp.post("/users/update_user")
 def update_user_api():
@@ -337,11 +346,12 @@ def update_user_api():
 	{
 		"success": [0|1],
 		"message": "xxxx",
+		["error_reason": "xxxx"],
 		"user": { ... updated user data ... }
 	}
 	'''
 	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-		return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+		return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
 
 	data = request.get_json(silent=True) or {}
 	
@@ -349,13 +359,13 @@ def update_user_api():
 	fields = data.get("fields", {})
 
 	if not user_id or not fields:
-		return jsonify({"success": 0, "message": "user_id and fields required"}), 400
+		return jsonify({"success": 0, "message": "user_id and fields required", "error_reason": "missing_fields"}), 400
 
 	user = user_tasks.Update_user(int(user_id), **fields)
 	if user:
 		return jsonify({"success": 1, "message": "user updated", "user": user.username}), 200
 	else:
-		return jsonify({"success": 0, "message": "user not found"}), 404
+		return jsonify({"success": 0, "message": "user not found", "error_reason": "user_not_found"}), 404
 
 @api_bp.post("/users/reset_password")
 def reset_password_api():
@@ -370,21 +380,22 @@ def reset_password_api():
 	{
 		"success": [0|1],
 		"message": "xxxx",
+		["error_reason": "xxxx"],
 		"new_password": "xxxx"
 	}
 	'''
 	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-		return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+		return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
 
 	data = request.get_json(silent=True) or {}
 	
 	user_id = data.get("user_id") or request.args.get("user_id")
 
 	if not user_id:
-		return jsonify({"success": 0, "message": "user_id required"}), 400
+		return jsonify({"success": 0, "message": "user_id required", "error_reason": "missing_user_id"}), 400
 
 	new_password = user_tasks.Reset_password(int(user_id))
 	if new_password:
 		return jsonify({"success": 1, "message": "password reset", "new_password": new_password}), 200
 	else:
-		return jsonify({"success": 0, "message": "user not found"}), 404
+		return jsonify({"success": 0, "message": "user not found", "error_reason": "user_not_found"}), 404

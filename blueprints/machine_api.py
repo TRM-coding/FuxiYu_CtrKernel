@@ -28,12 +28,13 @@ def add_machine_api():
 	{
 		"success": [0|1],
 		"message": "xxxx",
+        ["error_reason": "xxxx"]
 	}
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-        return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+        return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     if (not user_repo.check_permission(request.headers.get("token", ""), required_permission=PERMISSION.OPERATOR)):
-        return jsonify({"success": 0, "message": "insufficient permissions"}), 403
+        return jsonify({"success": 0, "message": "insufficient permissions", "error_reason": "insufficient_permission"}), 403
     data = request.get_json() or {}
     machine_name = data.get("machine_name", "")
     machine_ip = data.get("machine_ip", "")
@@ -56,14 +57,14 @@ def add_machine_api():
                                             disk_size=disk_size)
     except IntegrityError as ie:
         # likely duplicate unique constraint (e.g. machine_name)
-        return jsonify({"success": 0, "message": f"Duplicate entry: {str(ie.orig) if hasattr(ie, 'orig') else str(ie)}"}), 409
+        return jsonify({"success": 0, "message": f"Duplicate entry: {str(ie.orig) if hasattr(ie, 'orig') else str(ie)}", "error_reason": "duplicate_entry"}), 409
     except Exception as e:
-        return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
+        return jsonify({"success": 0, "message": f"Internal error: {str(e)}", "error_reason": "internal_error"}), 500
 
     if success:
         return jsonify({"success": 1, "message": "Container created successfully"}), 201
     else:
-        return jsonify({"success": 0, "message": "Failed to create container"}), 500
+        return jsonify({"success": 0, "message": "Failed to create container", "error_reason": "create_failed"}), 500
     
 @api_bp.post("/machines/remove_machine")
 def remove_machine_api():
@@ -77,12 +78,13 @@ def remove_machine_api():
     {
         "success": [0|1],
         "message": "xxxx",
+        ["error_reason": "xxxx"]
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-        return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+        return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     if (not user_repo.check_permission(request.headers.get("token", ""), required_permission=PERMISSION.OPERATOR)):
-        return jsonify({"success": 0, "message": "insufficient permissions"}), 403
+        return jsonify({"success": 0, "message": "insufficient permissions", "error_reason": "insufficient_permission"}), 403
     data = request.get_json() or {}
     data = request.get_json() or {}
     machine_ids = data.get("machine_ids", [])
@@ -90,7 +92,7 @@ def remove_machine_api():
     if success:
         return jsonify({"success": 1, "message": "Machine(s) removed successfully"}), 200
     else:
-        return jsonify({"success": 0, "message": "Failed to remove machine(s)"}), 500
+        return jsonify({"success": 0, "message": "Failed to remove machine(s)", "error_reason": "remove_failed"}), 500
     
 @api_bp.post("/machines/update_machine")
 def update_machine_api():
@@ -118,12 +120,13 @@ def update_machine_api():
 	{
 		"success": [0|1],
 		"message": "xxxx",
+        ["error_reason": "xxxx"]
 	}
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-        return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+        return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     if (not user_repo.check_permission(request.headers.get("token", ""), required_permission=PERMISSION.OPERATOR)):
-        return jsonify({"success": 0, "message": "insufficient permissions"}), 403
+        return jsonify({"success": 0, "message": "insufficient permissions", "error_reason": "insufficient_permission"}), 403
     data = request.get_json() or {}
     data = request.get_json() or {}
     machine_id = data.get("machine_id", 0)
@@ -132,7 +135,7 @@ def update_machine_api():
     if success:
         return jsonify({"success": 1, "message": "Machine updated successfully"}), 200
     else:
-        return jsonify({"success": 0, "message": "Failed to update machine"}), 500
+        return jsonify({"success": 0, "message": "Failed to update machine", "error_reason": "update_failed"}), 500
             
 
 @api_bp.post("/machines/get_detail_information")
@@ -148,10 +151,11 @@ def get_detail_information_api():
 	{
 		"success": [0|1],
 		"message": "xxxx",
+        ["error_reason": "xxxx"]
 	}
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-        return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+        return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json() or {}
     machine_id = data.get("machine_id", 0)
     machine_info = machine_service.Get_detail_information(machine_id=machine_id)
@@ -169,7 +173,7 @@ def get_detail_information_api():
             "containers": machine_info.containers
         }), 200
     else:
-        return jsonify({"success": 0, "message": "Machine not found"}), 404
+        return jsonify({"success": 0, "message": "Machine not found", "error_reason": "machine_not_found"}), 404
     
 @api_bp.post("/machines/list_all_machine_bref_information")
 def list_all_machine_bref_information_api():
@@ -185,10 +189,11 @@ def list_all_machine_bref_information_api():
     {
         "success": [0|1],
         "message": "xxxx",
+        ["error_reason": "xxxx"]
     }
     '''
     if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
-        return jsonify({"success": 0, "message": "invalid or missing token"}), 401
+        return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json(silent=True) or {}
     page_number = int(data.get("page_number", 0))
     page_size = int(data.get("page_size", 10))
