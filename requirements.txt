@@ -7,3 +7,5 @@ marshmallow>=3.19.0
 pymysql
 pydantic
 Flask-Cors>=3.0.10
+requests
+cryptography

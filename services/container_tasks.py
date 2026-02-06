@@ -23,13 +23,13 @@ import math
 ####################################################
 #发送指令到集群实体机
 
-base_url = CommsConfig.BASE_URL
 
 def send(ciphertext:bytes,signature:bytes,mechine_ip:str, timeout:float=5.0)->dict:
     """
     发送 POST 并返回解析后的响应（优先 JSON），出现错误时返回包含 error 字段的 dict。
     """
     try:
+        print(f"DEBUG: Sending request to {mechine_ip} with ciphertext={ciphertext} and signature={signature}")
         resp = requests.post(mechine_ip, json={
             "message": base64.b64encode(ciphertext).decode('utf-8'),
             "signature": base64.b64encode(signature).decode('utf-8')
@@ -46,7 +46,11 @@ def send(ciphertext:bytes,signature:bytes,mechine_ip:str, timeout:float=5.0)->di
 
     except requests.RequestException as e:
         # 网络/超时/连接等错误
+        print(f"Request error: {e}")
         return {"error": str(e)}
+
+def get_full_url(machine_ip:str, endpoint:str)->str:
+    return f"http://{machine_ip}{CommsConfig.NODE_URL_MIDDLE}{endpoint}"
 
 ####################################################
 
@@ -77,7 +81,10 @@ class container_detail_information(BaseModel):
 
 # 将user_id作为admin，创建新容器
 def Create_container(user_name:str,machine_id:str,container:Container_info,public_key=None, debug=False)->bool:
-    full_url = base_url+"/create_container"
+    machine_ip=get_machine_ip_by_id(machine_id)
+    full_url = get_full_url(machine_ip, "/create_container")
+
+
     free_port = get_the_first_free_port(machine_id=machine_id)
     container.set_port(free_port)
     container_info=dict()
@@ -131,7 +138,9 @@ def Create_container(user_name:str,machine_id:str,container:Container_info,publi
 
 #删除容器并删除其所有者记录
 def remove_container(container_id:int, debug=False)->bool:
-    full_url = base_url+"/remove_container"
+    machine_id = get_machine_id_by_container_id(container_id)
+    machine_ip=get_machine_ip_by_id(machine_id)
+    full_url = get_full_url(machine_ip, "/remove_container")
 
     data={
         "config":{
@@ -173,7 +182,9 @@ def remove_container(container_id:int, debug=False)->bool:
 #将container_id对应的容器新增user_id作为collaborator,其权限为role
 
 def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
-    full_url = base_url+"/add_collaborator"
+    machine_id = get_machine_id_by_container_id(container_id)
+    machine_ip=get_machine_ip_by_id(machine_id)
+    full_url = get_full_url(machine_ip, "/add_collaborator")
 
     user_name=get_name_by_id(user_id)
     # Do not allow adding a collaborator as ROOT via this API/task
@@ -224,7 +235,9 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
 #从container_id中移除user_id对应的用户访问权
 
 def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
-    full_url = base_url+"/remove_collaborator"
+    machine_id = get_machine_id_by_container_id(container_id)
+    machine_ip=get_machine_ip_by_id(machine_id)
+    full_url = get_full_url(machine_ip, "/remove_collaborator")
 
     # prevent removing ROOT owners
     try:
@@ -276,10 +289,11 @@ def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
     return False
 
 #修改user_id对container_id的访问权
-##TODO:修改machine_ip为machine_id
 
 def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->bool:
-    full_url = base_url+"/update_role"
+    machine_id = get_machine_id_by_container_id(container_id)
+    machine_ip=get_machine_ip_by_id(machine_id)
+    full_url = get_full_url(machine_ip, "/update_role")
 
     user_name=get_name_by_id(user_id)
     # 远侧处理ROOT相关的角色变更 可能需单独考察

@@ -12,6 +12,12 @@ def get_id_by_ip(machine_ip:str):
     machine = Machine.query.filter_by(machine_ip=machine_ip).first()
     return machine.id if machine else None
 
+def get_machine_ip_by_id(machine_id:int)->str:
+    machine = get_by_id(machine_id)
+    if not machine:
+        raise ValueError(f"Machine with ID {machine_id} not found.")
+    return machine.machine_ip
+
 def get_the_first_free_port(machine_id:int)->int:
     # 查询该机器上所有容器已使用的端口
     used_ports = set(
