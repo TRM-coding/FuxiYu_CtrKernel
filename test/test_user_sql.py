@@ -12,7 +12,7 @@ def app():
     app.config.update(TESTING=True)
     with app.app_context():
         # 确保模型已导入，再建表
-        from ..models import user, machine, containers, usercontainer  # noqa: F401
+        from ..models import user, machine, containers, usercontainer, authentications  # noqa: F401
         db.create_all()
         yield app
         # 为避免误删开发库数据，这里不 drop_all，如需隔离可单独建测试库
@@ -38,26 +38,28 @@ def test_Register():
     graduation_year = str(random.randint(2020, 2030))
 
     # 2) 调用 Register 执行
-    new_user = Register(username, email, password, graduation_year)
+    success, user_or_reason, _ = Register(username, email, password, graduation_year)
 
-    # 若因极小概率的唯一性冲突返回 None，跳过本用例
-    if new_user is None:
+    # 若因极小概率的唯一性冲突返回失败，跳过本用例
+    if not success:
         pytest.skip("随机生成的用户名或邮箱冲突，跳过测试")
 
-    target = None
+    user = user_or_reason
     try:
         # 3) 访问数据库，验证结果
         u = User.query.filter_by(username=username).first()
-        target = u or new_user
         assert u is not None, "注册后应能在数据库中查询到用户"
         assert u.email == email
         assert u.graduation_year == graduation_year
         # 登录应成功
-        assert Login(username, password) is True
+        login_success, login_user, token = Login(username, password)
+        assert login_success is True
+        assert isinstance(login_user, User)
+        assert token is not None
     finally:
         # 4) 删除测试数据
-        if target:
-            db.session.delete(target)
+        if user:
+            db.session.delete(user)
             db.session.commit()
 ##################################
 
@@ -76,16 +78,21 @@ def test_Login():
     graduation_year = str(random.randint(2020, 2030))
 
     # 注册用户（不验证注册结果）
-    u = Register(username, email, password, graduation_year)
-    if u is None:
+    reg_success, user_or_reason, _ = Register(username, email, password, graduation_year)
+    if not reg_success:
         pytest.skip("随机用户名或邮箱冲突，跳过测试")
+    
+    user = user_or_reason
 
     try:
         # 直接调用 login 验证是否能正常登录
-        assert Login(username, password) is True
+        success, login_user, token = Login(username, password)
+        assert success is True
+        assert isinstance(login_user, User)
+        assert token is not None
     finally:
         # 清理测试数据
-        db.session.delete(u)
+        db.session.delete(user)
         db.session.commit()
 
 ##################################
@@ -105,27 +112,30 @@ def test_Change_password():
     graduation_year = str(random.randint(2020, 2030))
 
     # 注册用户
-    user = Register(username, email, old_password, graduation_year)
-    if user is None:
+    reg_success, user_or_reason, _ = Register(username, email, old_password, graduation_year)
+    if not reg_success:
         pytest.skip("随机用户名或邮箱冲突，跳过测试")
+    
+    user = user_or_reason
 
     try:
         # 测试1: 正确旧密码修改成功
         result = Change_password(user, old_password, new_password)
         assert result is True, "正确旧密码应该修改成功"
-        
-        # 验证新密码可以登录
-        assert Login(username, new_password) is True, "新密码应该可以登录"
+        new_login_success, _, _ = Login(username, new_password)
+        assert new_login_success is True, "新密码应该可以登录"
         
         # 验证旧密码不能登录
-        assert Login(username, old_password) is False, "旧密码应该不能登录"
+        old_login_success, _, _ = Login(username, old_password)
+        assert old_login_success is False, "旧密码应该不能登录"
         
         # 测试2: 错误旧密码修改失败
         result_fail = Change_password(user, "wrong_old_password", "another_new_password")
         assert result_fail is False, "错误旧密码应该修改失败"
         
         # 验证密码仍然是之前设置的新密码
-        assert Login(username, new_password) is True, "密码修改失败后应该保持原密码"
+        check_login_success, _, _ = Login(username, new_password)
+        assert check_login_success is True, "密码修改失败后应该保持原密码"
         
         # 测试3: 空新密码（边界情况）
         #result_empty = Change_password(user, new_password, "")
@@ -136,16 +146,16 @@ def test_Change_password():
         
         # 测试4: 新旧密码相同 - 重构测试逻辑
         # 先确认当前状态
-        current_login_before = Login(username, new_password)
+        same_login_before, _, _ = Login(username, new_password)
         
         # 尝试修改为相同密码
         result_same = Change_password(user, new_password, new_password)
         
         # 修改后再次尝试登录
-        current_login_after = Login(username, new_password)
+        current_login_after, _, _ = Login(username, new_password)
         
         # 核心断言：无论修改操作结果如何，原密码必须始终有效
-        assert current_login_before is True, "修改前原密码必须可以登录"
+        assert same_login_before is True, "修改前原密码必须可以登录"
         assert current_login_after is True, "修改后原密码必须仍然可以登录"
         
         # 根据实际业务逻辑调整断言
@@ -179,9 +189,11 @@ def test_Delete_user():
     graduation_year = str(random.randint(2020, 2030))
 
     # 注册用户
-    user = Register(username, email, password, graduation_year)
-    if user is None:
+    success, user_or_reason, _ = Register(username, email, password, graduation_year)
+    if not success:
         pytest.skip("随机用户名或邮箱冲突，跳过测试")
+    
+    user = user_or_reason
 
     try:
         # 获取用户ID
@@ -203,8 +215,8 @@ def test_Delete_user():
         assert user_after is None, "注销后用户应该从数据库中删除"
         
         # 验证用户无法再登录
-        login_result = Login(username, password)
-        assert login_result is False, "注销后用户应该无法登录"
+        deleted_login_result, _, _ = Login(username, password)
+        assert deleted_login_result is False, "注销后用户应该无法登录"
         
     except Exception as e:
         # 如果测试过程中出现异常，确保清理

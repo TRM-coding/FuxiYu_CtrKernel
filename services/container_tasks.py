@@ -16,18 +16,20 @@ from ..utils.CheckKeys import *
 from ..utils.Container import Container_info
 from ..repositories.containers_repo import *
 from ..repositories.usercontainer_repo import *
+from ..models.containers import Container
+import math
 
 
 ####################################################
 #发送指令到集群实体机
 
-base_url = CommsConfig.BASE_URL
 
 def send(ciphertext:bytes,signature:bytes,mechine_ip:str, timeout:float=5.0)->dict:
     """
     发送 POST 并返回解析后的响应（优先 JSON），出现错误时返回包含 error 字段的 dict。
     """
     try:
+        print(f"DEBUG: Sending request to {mechine_ip} with ciphertext={ciphertext} and signature={signature}")
         resp = requests.post(mechine_ip, json={
             "message": base64.b64encode(ciphertext).decode('utf-8'),
             "signature": base64.b64encode(signature).decode('utf-8')
@@ -44,19 +46,25 @@ def send(ciphertext:bytes,signature:bytes,mechine_ip:str, timeout:float=5.0)->di
 
     except requests.RequestException as e:
         # 网络/超时/连接等错误
+        print(f"Request error: {e}")
         return {"error": str(e)}
+
+def get_full_url(machine_ip:str, endpoint:str)->str:
+    return f"http://{machine_ip}{CommsConfig.NODE_URL_MIDDLE}{endpoint}"
 
 ####################################################
 
 #API Definition
 ####################################################
 class container_bref_information(BaseModel):
+    container_id: int # 加入这个 只是为了方便调取详细信息
     container_name:str
     machine_id:int
     port:int
     container_status:str
 
 class container_detail_information(BaseModel):
+    container_id: int # 与上方结构对称
     container_name:str
     container_image:str
     machine_ip:str
@@ -73,7 +81,10 @@ class container_detail_information(BaseModel):
 
 # 将user_id作为admin，创建新容器
 def Create_container(user_name:str,machine_id:str,container:Container_info,public_key=None, debug=False)->bool:
-    full_url = base_url+"/create_container"
+    machine_ip=get_machine_ip_by_id(machine_id)
+    full_url = get_full_url(machine_ip, "/create_container")
+
+
     free_port = get_the_first_free_port(machine_id=machine_id)
     container.set_port(free_port)
     container_info=dict()
@@ -118,8 +129,8 @@ def Create_container(user_name:str,machine_id:str,container:Container_info,publi
     add_binding(user_id=user.id,
                 container_id=container_id,
                 public_key=public_key,
-                username=user_name,
-                role=ROLE.ADMIN)
+                username='root', # 强制使用 root 作为用户名
+                role=ROLE.ROOT) # 这里在创建时，自动变成 ROOT
     
     if Key:
         return True
@@ -127,7 +138,9 @@ def Create_container(user_name:str,machine_id:str,container:Container_info,publi
 
 #删除容器并删除其所有者记录
 def remove_container(container_id:int, debug=False)->bool:
-    full_url = base_url+"/remove_container"
+    machine_id = get_machine_id_by_container_id(container_id)
+    machine_ip=get_machine_ip_by_id(machine_id)
+    full_url = get_full_url(machine_ip, "/remove_container")
 
     data={
         "config":{
@@ -169,9 +182,15 @@ def remove_container(container_id:int, debug=False)->bool:
 #将container_id对应的容器新增user_id作为collaborator,其权限为role
 
 def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
-    full_url = base_url+"/add_collaborator"
+    machine_id = get_machine_id_by_container_id(container_id)
+    machine_ip=get_machine_ip_by_id(machine_id)
+    full_url = get_full_url(machine_ip, "/add_collaborator")
 
     user_name=get_name_by_id(user_id)
+    # Do not allow adding a collaborator as ROOT via this API/task
+    if role == ROLE.ROOT:
+        # Reject silently (caller/API will return failure)
+        return False
     data={
         "config":{
             "container_id":container_id,
@@ -216,7 +235,21 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
 #从container_id中移除user_id对应的用户访问权
 
 def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
-    full_url = base_url+"/remove_collaborator"
+    machine_id = get_machine_id_by_container_id(container_id)
+    machine_ip=get_machine_ip_by_id(machine_id)
+    full_url = get_full_url(machine_ip, "/remove_collaborator")
+
+    # prevent removing ROOT owners
+    try:
+        binding = get_binding(user_id, container_id)
+    except Exception:
+        binding = None
+    if binding:
+        role_val = binding.get('role')
+        # stored role is usually the enum value string
+        if role_val is not None and str(role_val).upper() == str(ROLE.ROOT.value).upper():
+            # 不可移除 ROOT 用户
+            return False
 
     user_name=get_name_by_id(user_id)
     data={
@@ -256,12 +289,14 @@ def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
     return False
 
 #修改user_id对container_id的访问权
-##TODO:修改machine_ip为machine_id
 
 def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->bool:
-    full_url = base_url+"/update_role"
+    machine_id = get_machine_id_by_container_id(container_id)
+    machine_ip=get_machine_ip_by_id(machine_id)
+    full_url = get_full_url(machine_ip, "/update_role")
 
     user_name=get_name_by_id(user_id)
+    # 远侧处理ROOT相关的角色变更 可能需单独考察
     data={
         "config":{
             "container_id":container_id,
@@ -293,7 +328,14 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->boo
         #######
     else:
         Key=True
-    update_binding(user_id,container_id,role=updated_role)
+    if updated_role == ROLE.ROOT:
+        # 强制使用 root 作为用户名
+        username = 'root'
+    else:
+        username = user_name
+
+    # 更新绑定时同时传入 username 和 role，确保数据库中的 username 在变更为 ROOT 时被设置为 'root'
+    update_binding(user_id, container_id, username=username, role=updated_role)
     
     if Key:
         return True
@@ -305,31 +347,48 @@ def get_container_detail_information(container_id:int)->container_detail_informa
     if not container:
         raise ValueError("Container not found")
     owener_bindings= get_container_bindings(container_id)
-    res={
-        "container_name":container.name,
-        "container_image":container.image,
-        "machine_id":container.machine_id,
-        "container_status":container.container_status.value,
-        "port":container.port,
-        "owners":[get_name_by_id(binding['user_id']) for binding in owener_bindings],
-        "accounts":[(binding['username'],ROLE(binding['role'])) for binding in owener_bindings],
+    res={ 
+        "container_id": container.id,
+        "container_name": container.name,
+        "container_image": container.image,
+        "machine_id": container.machine_id,
+        "container_status": container.container_status.value,
+        "port": container.port,
+        # 备忘：owners才是系统对应的用户名列表
+        "owners": [get_name_by_id(binding['user_id']) for binding in owener_bindings],
+        # 这里的变动是为了
+        # 1. 语句写法 - 防止报错（针对API提取时的格式问题）
+        # 2. username -> user_id 使得在页面层对应性更强，并避免可能存在的 user_name与username不同
+        "accounts": [
+            {"user_id": binding.get('user_id'), "username": binding.get("username"), "role": (ROLE(binding.get('role')).value if binding.get('role') is not None else None)}
+            for binding in owener_bindings
+        ],
     }
     return res
 
 
 
 #返回一页容器的概要信息
-def list_all_container_bref_information(machine_id:int, page_number:int, page_size:int)->list[container_bref_information]:
-    containers = list_containers(machine_id=machine_id, limit=page_size, offset=page_number*page_size)
+def list_all_container_bref_information(machine_id:int, user_id:int, page_number:int, page_size:int)->dict:
+    containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=user_id)
     res = []
     for container in containers:
         info = container_bref_information(
+            container_id=container.id,
             container_name=container.name,
             machine_id=container.machine_id,
             port=container.port,
             container_status=container.container_status.value
         )
         res.append(info)
-    return res
+
+    # 这里计算总页数
+    try: # 理论不会报错 但是被建议保留
+        total_count = count_containers(machine_id=machine_id)
+        total_page = max(1, math.ceil(total_count / page_size))
+    except Exception:
+        total_page = 1
+
+    return {"containers": res, "total_page": total_page}
 
 ####################################################

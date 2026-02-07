@@ -18,7 +18,11 @@ class KeyConfig:
     PUBLIC_KEY_NODE='public_node.pem'
 
 class CommsConfig:
-    BASE_URL='http://172.17.0.4:5000/api'
+    NODE_URL_MIDDLE=':5001/api'
+
+class CORSHeaderConfig:
+    # Allow both localhost and 127.0.0.1 origins used in development
+    ALLOW_ORIGINS='http://localhost:5173,http://127.0.0.1:5173'
 
 # 新增：统一的 AppConfig 和 get_config
 class AppConfig(SqlConfig, KeyConfig):

@@ -12,6 +12,12 @@ def get_id_by_ip(machine_ip:str):
     machine = Machine.query.filter_by(machine_ip=machine_ip).first()
     return machine.id if machine else None
 
+def get_machine_ip_by_id(machine_id:int)->str:
+    machine = get_by_id(machine_id)
+    if not machine:
+        raise ValueError(f"Machine with ID {machine_id} not found.")
+    return machine.machine_ip
+
 def get_the_first_free_port(machine_id:int)->int:
     # 查询该机器上所有容器已使用的端口
     used_ports = set(
@@ -37,6 +43,10 @@ def get_by_name(machine_name:str):
 
 def list_machines(limit: int = 50, offset: int = 0) -> Sequence[Machine]:
 	return Machine.query.order_by(Machine.id).offset(offset).limit(limit).all()
+
+def count_machines() -> int: # 增加的额外方法 只辅助用于计算总数
+    """Return total number of machines in DB."""
+    return Machine.query.count()
 
 def create_machine(machinename:str,
                    machine_ip:str,
