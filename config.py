@@ -22,7 +22,7 @@ class CommsConfig:
 
 class CORSHeaderConfig:
     # Allow both localhost and 127.0.0.1 origins used in development
-    ALLOW_ORIGINS='http://localhost:5173,http://127.0.0.1:5173'
+    ALLOW_ORIGINS='http://localhost:5173,http://127.0.0.1:5173,http://192.168.5.230:5173'
 
 # 新增：统一的 AppConfig 和 get_config
 class AppConfig(SqlConfig, KeyConfig):
