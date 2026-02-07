@@ -16,6 +16,7 @@ from ..utils.CheckKeys import *
 from ..utils.Container import Container_info
 from ..repositories.containers_repo import *
 from ..repositories.usercontainer_repo import *
+from ..utils.heartbeat import container_starting_status_heartbeat
 from ..models.containers import Container
 import math
 
@@ -80,7 +81,7 @@ class container_detail_information(BaseModel):
 ####################################################
 
 # 将user_id作为admin，创建新容器
-def Create_container(user_name:str,machine_id:str,container:Container_info,public_key=None, debug=False)->bool:
+def Create_container(owner_name:str,machine_id:str,container:Container_info,public_key=None, debug=False)->bool:
     machine_ip=get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/create_container")
 
@@ -88,6 +89,7 @@ def Create_container(user_name:str,machine_id:str,container:Container_info,publi
     free_port = get_the_first_free_port(machine_id=machine_id)
     container.set_port(free_port)
     container_info=dict()
+    container_info['owner_name']=owner_name
     container_info['config']=container.get_config()
     container_info=json.dumps(container_info)
     signatured_message=signature(container_info)
@@ -113,25 +115,34 @@ def Create_container(user_name:str,machine_id:str,container:Container_info,publi
         # DEBUG PURPOSE
         #######
     else:
+        if 'error' in res:
+            raise Exception(f"远程调用失败: {res['error']}")
         Key=True
-
-
-    # 写入容器记录
+    
+    
+    # 写入容器记录 
     create_container(name=container.NAME,
                      image=container.image,
                      machine_id=machine_id,
-                     status=ContainerStatus.ONLINE,
+                     status=ContainerStatus.CREATING,
                      port=free_port)
 
     # 建立用户绑定（包含必须的 role/username/public_key）
     container_id=get_id_by_name_machine(container_name=container.NAME, machine_id=machine_id)
-    user = get_by_name(user_name)
+    user = get_by_name(owner_name)
     add_binding(user_id=user.id,
                 container_id=container_id,
                 public_key=public_key,
                 username='root', # 强制使用 root 作为用户名
                 role=ROLE.ROOT) # 这里在创建时，自动变成 ROOT
     
+    # start heartbeat in background (non-blocking)
+    try:
+        container_starting_status_heartbeat(machine_ip, container.NAME, container_id=container_id,
+                                         timeout=180, interval=3)
+    except Exception:
+        pass
+
     if Key:
         return True
     return False

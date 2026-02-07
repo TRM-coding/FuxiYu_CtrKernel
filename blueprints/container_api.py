@@ -35,7 +35,7 @@ def create_container_api():
     if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json() or {}
-    user_name = data.get("user_name", "")
+    owner_name = data.get("user_name", "")
     machine_id = data.get("machine_id", None)
 
     # 似乎是一些结构问题
@@ -72,7 +72,7 @@ def create_container_api():
     except Exception as e:
         return jsonify({"success": 0, "message": f"Invalid container payload: {str(e)}", "error_reason": "invalid_payload"}), 400
     try:
-        if not container_service.Create_container(user_name=user_name,
+        if not container_service.Create_container(owner_name=owner_name,
                         machine_id=machine_id,
                         container=container_obj,
                         public_key=public_key):

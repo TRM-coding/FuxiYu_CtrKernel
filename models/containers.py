@@ -18,7 +18,7 @@ class Container(db.Model):
     container_status: MachineStatus = db.Column(
         db.Enum(ContainerStatus, values_callable=lambda obj: [e.value for e in obj]),
         nullable=False,
-        default=ContainerStatus.MAINTENANCE
+        default=ContainerStatus.CREATING
     )
     port: int = db.Column(db.Integer, nullable=False, index=True)
 

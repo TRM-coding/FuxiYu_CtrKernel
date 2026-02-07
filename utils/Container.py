@@ -5,7 +5,7 @@ class Container_info:
         gpu_list:list
         cpu_number:int
         memory:int
-        user_name:str
+        name:str
         port:int
         image:str
     #gpu_list:显卡编号，cpu_number:需要用到的cpu核数，memory:申请的内存大小（GB）
