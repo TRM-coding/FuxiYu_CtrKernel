@@ -55,6 +55,47 @@ def send(ciphertext:bytes,signature:bytes,mechine_ip:str, timeout:float=5.0)->di
 def get_full_url(machine_ip:str, endpoint:str)->str:
     return f"http://{machine_ip}{CommsConfig.NODE_URL_MIDDLE}{endpoint}"
 
+
+def get_container_status(machine_ip: str, container_name: str, timeout: float = 5.0) -> dict:
+    """
+    这个方法主要是为了在服务端调用 Node 的 /container_status API 来验证容器状态的。但是这个方法不被heartbeat使用。
+    """
+    url = get_full_url(machine_ip, "/container_status")
+    payload = json.dumps({"config": {"container_name": container_name}})
+    sig = signature(payload)
+    enc = encryption(payload)
+
+    last_exc = None
+    for attempt in range(2):
+        try:
+            resp = requests.post(url, json={
+                "message": base64.b64encode(enc).decode('utf-8'),
+                "signature": base64.b64encode(sig).decode('utf-8')
+            }, timeout=timeout)
+            # Do not raise_for_status() here; inspect status code
+            try:
+                if resp.status_code == 200:
+                    try:
+                        return resp.json()
+                    except ValueError:
+                        return {"status_code": resp.status_code, "text": resp.text}
+                elif resp.status_code == 404:
+                    return {"status_code": 404, "error": "not found", "text": resp.text}
+                else:
+                    return {"status_code": resp.status_code, "text": resp.text}
+            except Exception as e:
+                return {"error": str(e)}
+        except requests.RequestException as e:
+            last_exc = e
+            print(f"get_container_status request error (attempt {attempt+1}): {e}")
+            # short backoff before retrying
+            if attempt == 0:
+                time.sleep(0.5)
+            continue
+
+    # both attempts failed due to network/request errors
+    return {"error": str(last_exc) if last_exc is not None else "unknown error"}
+
 ####################################################
 
 #API Definition
@@ -404,6 +445,28 @@ def get_container_detail_information(container_id:int)->container_detail_informa
     container=get_by_id(container_id)
     if not container:
         raise ValueError("Container not found")
+    # 这个状态查询主要是为了验证容器是否真的存在于 Node 上，如果 Node 返回 404 则说明容器实际上已经不存在了，这时本地也应该删除记录并返回 not found 错误
+    # 这个方法不处理从未放入数据库的容器（因为它们不应该有 container_id），也不处理网络/其他错误（因为它们不应该阻止返回数据库中的信息）。
+    try:
+        machine_ip = get_machine_ip_by_id(container.machine_id)
+        st = get_container_status(machine_ip, container.name)
+        if isinstance(st, dict) and st.get('status_code') == 404:
+            # remote not found -> remove local DB record and bindings
+            try:
+                remove_binding(0, container_id, all=True)
+            except Exception as e:
+                print(f"Warning: failed to remove bindings for {container_id}: {e}")
+            try:
+                delete_container(container_id)
+            except Exception as e:
+                print(f"Warning: failed to delete container {container_id} from DB: {e}")
+            raise ValueError("Container not found")
+    except Exception as e:
+        # ignore network/other errors and proceed with DB content
+        if isinstance(e, ValueError):
+            raise
+        print(f"get_container_detail_information: ignored remote check error: {e}")
+
     owener_bindings= get_container_bindings(container_id)
     res={ 
         "container_id": container.id,
@@ -431,6 +494,29 @@ def list_all_container_bref_information(machine_id:int, user_id:int, page_number
     containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=user_id)
     res = []
     for container in containers:
+        # 类似地，这里对每个容器进行一次远程状态验证，来确保 DB 中的记录是准确的。如果远程返回 404 则说明容器实际上已经不存在了，这时本地也应该删除记录并跳过这个容器。
+        try:
+            try:
+                machine_ip = get_machine_ip_by_id(container.machine_id)
+            except Exception:
+                machine_ip = None
+            if machine_ip:
+                st = get_container_status(machine_ip, container.name)
+                if isinstance(st, dict) and st.get('status_code') == 404:
+                    try:
+                        remove_binding(0, container.id, all=True)
+                    except Exception as e:
+                        print(f"Warning: failed to remove bindings for {container.id}: {e}")
+                    try:
+                        delete_container(container.id)
+                    except Exception as e:
+                        print(f"Warning: failed to delete container {container.id} from DB: {e}")
+                    # skip adding this container to result
+                    continue
+        except Exception as e:
+            # ignore network/other errors and continue including DB entry
+            print(f"list_all_container_bref_information: ignored remote check error for {container.name}: {e}")
+
         info = container_bref_information(
             container_id=container.id,
             container_name=container.name,
