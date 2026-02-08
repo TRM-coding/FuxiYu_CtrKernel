@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from ..config import CommsConfig
 from ..constant import *
+from sqlalchemy.exc import IntegrityError
 from ..repositories import containers_repo, machine_repo
 from ..repositories.machine_repo import *
 from ..repositories.user_repo import *
@@ -81,7 +82,7 @@ class container_detail_information(BaseModel):
 ####################################################
 
 # 将user_id作为admin，创建新容器
-def Create_container(owner_name:str,machine_id:str,container:Container_info,public_key=None, debug=False)->bool:
+def Create_container(owner_name:str,machine_id:int,container:Container_info,public_key=None, debug=False)->bool:
     machine_ip=get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/create_container")
 
@@ -91,9 +92,26 @@ def Create_container(owner_name:str,machine_id:str,container:Container_info,publ
     container_info=dict()
     container_info['owner_name']=owner_name
     container_info['config']=container.get_config()
+    if public_key:
+        container_info['public_key']=public_key
     container_info=json.dumps(container_info)
+    # check duplicate container name on this machine before sending to Node
+    try:
+        existing_id = get_id_by_name_machine(container_name=container.NAME, machine_id=machine_id)
+        if existing_id:
+            # raise IntegrityError so callers can handle duplicate-name consistently
+            orig_msg = f"container name '{container.NAME}' already exists on machine {machine_id} (id={existing_id})"
+            raise IntegrityError(orig_msg, params=None, orig=orig_msg)
+    except IntegrityError:
+        # re-raise IntegrityError to propagate
+        raise
+    except Exception as e:
+        # If the check fails unexpectedly, log and continue to avoid blocking creation due to DB issues
+        print(f"Warning: failed to check existing container name: {e}")
     signatured_message=signature(container_info)
     
+    # TODO 提前做重名检查
+
     encryptioned_message=encryption(container_info)
     res=send(encryptioned_message,signatured_message,full_url)
     print(res)
@@ -141,7 +159,8 @@ def Create_container(owner_name:str,machine_id:str,container:Container_info,publ
         container_starting_status_heartbeat(machine_ip, container.NAME, container_id=container_id,
                                          timeout=180, interval=3)
     except Exception:
-        pass
+        print(f"Warning: Heartbeat for container {container_id} failed to start or encountered an error. Container may be stuck in CREATING status.")
+        return False
 
     if Key:
         return True

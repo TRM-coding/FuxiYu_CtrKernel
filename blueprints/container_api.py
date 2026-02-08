@@ -36,7 +36,7 @@ def create_container_api():
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json() or {}
     owner_name = data.get("user_name", "")
-    machine_id = data.get("machine_id", None)
+    machine_id = data.get("machine_id", 0)
 
     # 似乎是一些结构问题
     container_raw = data.get("container") or {}
@@ -50,8 +50,9 @@ def create_container_api():
             "image": data.get("image", ""),
         }
 
-    public_key = data.get("public_key", "")
-
+    public_key = data.get("public_key", None)
+    if public_key is '':  # treat empty string as None
+        public_key = None
     # 这里纯粹只是为了增加报错信息的友好性
     try:
         gpu_list = container_raw.get("GPU_LIST") or container_raw.get("gpu_list") or []
@@ -62,12 +63,6 @@ def create_container_api():
 
         # construct Container_info instance expected by service layer
         container_obj = Container_info(gpu_list=gpu_list, cpu_number=cpu_number, memory=memory, name=name, image=image)
-
-        # normalize machine_id to string (service expects str in many places)
-        if machine_id is None or machine_id == "":
-            machine_id = None
-        else:
-            machine_id = str(machine_id)
 
     except Exception as e:
         return jsonify({"success": 0, "message": f"Invalid container payload: {str(e)}", "error_reason": "invalid_payload"}), 400
@@ -82,7 +77,7 @@ def create_container_api():
     
     except Exception as e: 
         return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
-    return jsonify({"success": 1, "message": "Container created successfully"}), 201
+    return jsonify({"success": 1, "message": "Create container request sent"}), 200
     
     
 @api_bp.post("/containers/delete_container")
@@ -246,6 +241,47 @@ def get_container_detail_information_api():
     except ValueError as e:
         return jsonify({"success":0,"message":"Container not found", "error_reason": "container_not_found"}),404
     return jsonify({"success":1,"container_info":container_info}),200
+
+
+@api_bp.post("/containers/container_status")
+def container_status_api():
+    '''
+    通信数据格式：
+    发送格式：
+    { 
+        "token",
+        "machine_id": <id>, 
+        "container_name": "name" 
+    }
+    返回格式：
+    { 
+        "container_status": "CREATING"|"ONLINE"|... 
+    }
+    '''
+    if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
+        return jsonify({"success":0, "message":"invalid or missing token", "error_reason": "invalid_token"}), 401
+    data = request.get_json() or {}
+    container_name = data.get('container_name', '')
+    machine_id = data.get('machine_id', None)
+
+    if not container_name or machine_id is None or machine_id == '':
+        return jsonify({"container_status": None}), 200
+
+    try:
+        try:
+            machine_id = int(machine_id)
+        except Exception:
+            return jsonify({"container_status": None}), 200
+
+        cid = containers_repo.get_id_by_name_machine(container_name=container_name, machine_id=machine_id)
+        if not cid:
+            return jsonify({"container_status": None}), 200
+        container = containers_repo.get_by_id(cid)
+        if not container:
+            return jsonify({"container_status": None}), 200
+        return jsonify({"container_status": container.container_status.value}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @api_bp.post("/containers/list_all_container_bref_information")
 def list_all_containers_bref_information_api():

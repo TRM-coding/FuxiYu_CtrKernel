@@ -52,7 +52,7 @@ def container_starting_status_heartbeat(machine_ip: str, container_name: str, co
             if isinstance(res, dict) and 'container_status' in res:
                 st = res.get('container_status')
                 print(f"Received container_status: {st}")
-                if isinstance(st, str) and st.upper() == 'RUNNING':
+                if isinstance(st, str) and st.lower() == 'online':
                     if container_id is not None:
                         try:
                             if app is not None:
