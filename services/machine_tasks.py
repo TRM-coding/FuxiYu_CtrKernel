@@ -1,9 +1,12 @@
 #TODO:完善异常处理机制
 from ..repositories.machine_repo import *
 from pydantic import BaseModel
+from typing import Optional
 #######################################
 #API Definition
 class machine_bref_information(BaseModel):
+    id: int  #没想到更好的解决办法。主要作为各种操作的映射。
+    machine_name:str
     machine_ip:str
     machine_type:str
     machine_status:str
@@ -15,7 +18,7 @@ class machine_detail_information(BaseModel):
     machine_status:str
     cpu_core_number:int
     gpu_number:int
-    gpu_type:str
+    gpu_type: Optional[str] # 部分sql数据会出现此字段是NULL的情况，因此暂时用这个方法解决
     memory_size_gb:int
     disk_size_gb:int
     machine_description:str
@@ -91,17 +94,22 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
 
 #######################################
 # 获取一批机器的概要信息
-def List_all_machine_bref_information(page_number:int, page_size:int)->list[machine_bref_information]:
+def List_all_machine_bref_information(page_number:int, page_size:int)->tuple[list[machine_bref_information], int]:
     machines = list_machines(limit=page_size, offset=page_number*page_size)
     res = []
     for machine in machines:
         info = machine_bref_information(
+            id=machine.id,
+            machine_name=machine.machine_name,
             machine_ip=machine.machine_ip,
             machine_type=machine.machine_type.value,
             machine_status=machine.machine_status.value
         )
         res.append(info)
-    return res
+    # 这里增加了总数字段 方便分页器判断显示多少
+    total_count = count_machines()
+    total_pages = (total_count + page_size - 1) // page_size if page_size > 0 else 0
+    return res, total_pages
 #######################################
 
 #######################################

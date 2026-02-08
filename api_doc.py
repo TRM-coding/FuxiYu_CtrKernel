@@ -41,20 +41,20 @@ api_bp = Blueprint("api", __name__, url_prefix="/api")
 def Create_container():
 	recived_data = request.get_json(silent=True)
 	if not recived_data:
-		return jsonify({"error":"invalid json"}), 400
+		return jsonify({"success": 0, "message": "invalid json"}), 400
 	
 	# 使用 get_verified_msg 函数解密并验证
 	verified_msg = get_verified_msg(recived_data)
 	
 	if not verified_msg:
-		return jsonify({"error": "invalid_signature or decryption failed"}), 401
+		return jsonify({"success": 0, "message": "invalid_signature or decryption failed"}), 401
 	
 	# 提取消息类型和配置
 	msg_type = verified_msg.get("type")
 	config = verified_msg.get("config")
 	
 	if msg_type != "create" or not config:
-		return jsonify({"error": "invalid message type or config"}), 400
+		return jsonify({"success": 0, "message": "invalid message type or config"}), 400
 	
 	container_id, container_name = create_container(**config)
 	
@@ -86,20 +86,20 @@ def Create_container():
 def Remove_container():
 	recived_data = request.get_json(silent=True)
 	if not recived_data:
-		return jsonify({"error":"invalid json"}), 400
+		return jsonify({"success": 0, "message": "invalid json"}), 400
 	
 	# 使用 get_verified_msg 函数解密并验证
 	verified_msg = get_verified_msg(recived_data)
 	
 	if not verified_msg:
-		return jsonify({"error": "invalid_signature or decryption failed"}), 401
+		return jsonify({"success": 0, "message": "invalid_signature or decryption failed"}), 401
 	
 	# 提取消息类型和配置
 	msg_type = verified_msg.get("type")
 	config = verified_msg.get("config")
 	
 	if msg_type != "remove" or not config:
-		return jsonify({"error": "invalid message type or config"}), 400
+		return jsonify({"success": 0, "message": "invalid message type or config"}), 400
 	
 	success = remove_container(**config)
 	
@@ -131,20 +131,20 @@ def Remove_container():
 def Add_collaborator():
 	recived_data = request.get_json(silent=True)
 	if not recived_data:
-		return jsonify({"error":"invalid json"}), 400
+		return jsonify({"success": 0, "message": "invalid json"}), 400
 	
 	# 使用 get_verified_msg 函数解密并验证
 	verified_msg = get_verified_msg(recived_data)
 	
 	if not verified_msg:
-		return jsonify({"error": "invalid_signature or decryption failed"}), 401
+		return jsonify({"success": 0, "message": "invalid_signature or decryption failed"}), 401
 	
 	# 提取消息类型和配置
 	msg_type = verified_msg.get("type")
 	config = verified_msg.get("config")
 	
 	if msg_type != "update" or not config:
-		return jsonify({"error": "invalid message type or config"}), 400
+		return jsonify({"success": 0, "message": "invalid message type or config"}), 400
 	
 	success = add_collaborator(**config)
 	
@@ -176,20 +176,20 @@ def Add_collaborator():
 def Remove_collaborator():
 	recived_data = request.get_json(silent=True)
 	if not recived_data:
-		return jsonify({"error":"invalid json"}), 400
+		return jsonify({"success": 0, "message": "invalid json"}), 400
 	
 	# 使用 get_verified_msg 函数解密并验证
 	verified_msg = get_verified_msg(recived_data)
 	
 	if not verified_msg:
-		return jsonify({"error": "invalid_signature or decryption failed"}), 401
+		return jsonify({"success": 0, "message": "invalid_signature or decryption failed"}), 401
 	
 	# 提取消息类型和配置
 	msg_type = verified_msg.get("type")
 	config = verified_msg.get("config")
 	
 	if msg_type != "update" or not config:
-		return jsonify({"error": "invalid message type or config"}), 400
+		return jsonify({"success": 0, "message": "invalid message type or config"}), 400
 	
 	success = remove_collaborator(**config)
 	
@@ -222,20 +222,20 @@ def Remove_collaborator():
 def Update_role():
 	recived_data = request.get_json(silent=True)
 	if not recived_data:
-		return jsonify({"error":"invalid json"}), 400
+		return jsonify({"success": 0, "message": "invalid json"}), 400
 	
 	# 使用 get_verified_msg 函数解密并验证
 	verified_msg = get_verified_msg(recived_data)
 	
 	if not verified_msg:
-		return jsonify({"error": "invalid_signature or decryption failed"}), 401
+		return jsonify({"success": 0, "message": "invalid_signature or decryption failed"}), 401
 	
 	# 提取消息类型和配置
 	msg_type = verified_msg.get("type")
 	config = verified_msg.get("config")
 	
 	if msg_type != "update" or not config:
-		return jsonify({"error": "invalid message type or config"}), 400
+		return jsonify({"success": 0, "message": "invalid message type or config"}), 400
 	
 	success = update_role(**config)
 	
