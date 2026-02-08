@@ -119,7 +119,14 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
 
     encryptioned_message=encryption(container_info)
     res=send(encryptioned_message,signatured_message,full_url)
-    print(res)
+    print(f"Create_container: remote response: {res}")
+
+    # verify remote accepted the create request
+    if 'error' in res:
+        raise Exception(f"remote create failed: {res['error']}")
+    if res.get('success') != 1:
+        # unexpected response from Node; abort to avoid DB inconsistency
+        raise Exception(f"remote create returned failure or unexpected response: {res}")
 
     if debug:
         #######
@@ -177,9 +184,10 @@ def remove_container(container_id:int, debug=False)->bool:
     machine_ip=get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/remove_container")
 
+    container_name = get_by_id(container_id).name
     data={
         "config":{
-            "container_id":container_id
+            "container_name":container_name
         }
     }        
     
@@ -187,6 +195,19 @@ def remove_container(container_id:int, debug=False)->bool:
     signatured_message=signature(container_info)
     encryptioned_message=encryption(container_info)
     res=send(encryptioned_message,signatured_message,full_url)
+    print(f"remove_container: remote response: {res}")
+
+    # check remote delete result before mutating local DB
+    if 'error' in res:
+        raise Exception(f"remote remove failed: {res['error']}")
+    # Node remove_container currently returns numeric code in 'success': 0=SUCCESS,1=NOTFOUND,2=FAILED
+    remote_code = res.get('success')
+    if remote_code is None:
+        raise Exception(f"remote remove returned unexpected response: {res}")
+    if remote_code == 2:
+        # FAILED
+        raise Exception(f"remote remove reported failure: {res}")
+    # treat 0 (SUCCESS) and 1 (NOTFOUND) as acceptable success for local cleanup
 
     if debug:
         #######
@@ -205,6 +226,8 @@ def remove_container(container_id:int, debug=False)->bool:
         # DEBUG PURPOSE
         #######
     else:
+        if 'error' in res:
+            raise Exception(f"远程调用失败: {res['error']}")
         Key=True
     
     # 移除所有绑定并删除容器
