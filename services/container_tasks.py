@@ -285,6 +285,8 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
     machine_ip=get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/add_collaborator")
 
+    container_name = get_by_id(container_id).name
+
     user_name=get_name_by_id(user_id)
     # Do not allow adding a collaborator as ROOT via this API/task
     if role == ROLE.ROOT:
@@ -292,7 +294,7 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
         return False
     data={
         "config":{
-            "container_id":container_id,
+            "container_name":container_name,
             "user_name":user_name,
             "role":role.value
         }
@@ -338,6 +340,9 @@ def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
     machine_ip=get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/remove_collaborator")
 
+    container_name = get_by_id(container_id).name
+    user_name = get_name_by_id(user_id)
+
     # prevent removing ROOT owners
     try:
         binding = get_binding(user_id, container_id)
@@ -353,7 +358,7 @@ def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
     user_name=get_name_by_id(user_id)
     data={
         "config":{
-            "container_id":container_id,
+            "container_name":container_name,
             "user_name":user_name
         }
     }
@@ -379,6 +384,8 @@ def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
         # DEBUG PURPOSE
         #######
     else:
+        if 'error' in res:
+            raise Exception(f"远程调用失败: {res['error']}")
         Key=True
     # 仅删除绑定
     remove_binding(user_id,container_id)
