@@ -20,6 +20,7 @@ from ..repositories.usercontainer_repo import *
 from ..utils.heartbeat import container_starting_status_heartbeat
 from ..models.containers import Container
 import math
+import re
 
 
 ####################################################
@@ -95,6 +96,10 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
     if public_key:
         container_info['public_key']=public_key
     container_info=json.dumps(container_info)
+    # validate container name: only letters, digits and underscore allowed
+    if not re.fullmatch(r'[A-Za-z0-9_]+', container.NAME):
+        raise ValueError(f"invalid container name: '{container.NAME}'. Allowed characters: A-Z a-z 0-9 _")
+
     # check duplicate container name on this machine before sending to Node
     try:
         existing_id = get_id_by_name_machine(container_name=container.NAME, machine_id=machine_id)
