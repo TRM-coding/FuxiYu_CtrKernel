@@ -187,6 +187,7 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
         #######
     else:
         if 'error' in res:
+            print(f"远程调用失败: {res['error']}")
             raise Exception(f"远程调用失败: {res['error']}")
         Key=True
     
@@ -268,6 +269,7 @@ def remove_container(container_id:int, debug=False)->bool:
         #######
     else:
         if 'error' in res:
+            print(f"远程调用失败: {res['error']}")
             raise Exception(f"远程调用失败: {res['error']}")
         Key=True
     
@@ -322,6 +324,9 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
         # DEBUG PURPOSE
         #######
     else:
+        if 'error' in res:
+            print(f"远程调用失败: {res['error']}")
+            raise Exception(f"远程调用失败: {res['error']}")
         Key=True
     # 直接通过绑定表建立关联
     add_binding(user_id=user_id,
@@ -385,6 +390,7 @@ def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
         #######
     else:
         if 'error' in res:
+            print(f"远程调用失败: {res['error']}")
             raise Exception(f"远程调用失败: {res['error']}")
         Key=True
     # 仅删除绑定
@@ -401,11 +407,13 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->boo
     machine_ip=get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/update_role")
 
+    container_name = get_by_id(container_id).name
+
     user_name=get_name_by_id(user_id)
     # 远侧处理ROOT相关的角色变更 可能需单独考察
     data={
         "config":{
-            "container_id":container_id,
+            "container_name":container_name,
             "user_name":user_name,
             "updated_role":updated_role.value
         }
@@ -433,6 +441,10 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->boo
         # DEBUG PURPOSE
         #######
     else:
+        if 'error' in res:
+            print(f"远程调用失败: {res['error']}")
+            raise Exception(f"远程调用失败: {res['error']}")
+
         Key=True
     if updated_role == ROLE.ROOT:
         # 强制使用 root 作为用户名
