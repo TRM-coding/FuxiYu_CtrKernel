@@ -66,6 +66,18 @@ def create_container_api():
 
     except Exception as e:
         return jsonify({"success": 0, "message": f"Invalid container payload: {str(e)}", "error_reason": "invalid_payload"}), 400
+    # 这里：error_reason的补映射表。原则上服务层应该尽量提供明确的error_reason以便前端处理，但这里也做一个兜底，以防万一
+    reason_map = {
+        "container_exists": 409,
+        "invalid_payload": 400,
+        "invalid_signature": 401,
+        "invalid_json": 400,
+        "invalid_config": 400,
+        "docker_init_failed": 502,
+        "docker_check_failed": 502,
+        "unexpected_response": 502,
+    }
+
     try:
         if not container_service.Create_container(owner_name=owner_name,
                         machine_id=machine_id,
@@ -74,7 +86,9 @@ def create_container_api():
             return jsonify({"success": 0, "message": "Failed to create container", "error_reason": "create_failed"}), 500
     except IntegrityError as e:
         return jsonify({"success": 0, "message": f"Duplicate entry: {str(e.orig) if hasattr(e, 'orig') else str(e)}", "error_reason": "duplicate_entry"}), 409
-    
+    except container_service.NodeServiceError as e:
+        status = reason_map.get(getattr(e, 'reason', None), 500)
+        return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), status
     except Exception as e: 
         return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
     return jsonify({"success": 1, "message": "Create container request sent"}), 200
@@ -103,6 +117,10 @@ def delete_container_api():
     try:
         if not container_service.remove_container(container_id=container_id):
             return jsonify({"success": 0, "message": "Failed to delete container", "error_reason": "delete_failed"}), 500
+    except container_service.NodeServiceError as e:
+        # prefer remote's reason when available
+        status = 404 if getattr(e, 'reason', None) == 'not_found' else 500
+        return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), status
     except Exception as e:
         return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
     return jsonify({"success": 1, "message": "Container deleted successfully"}), 200
@@ -138,6 +156,8 @@ def add_collaborator_api():
                      user_id=user_id,
                      role=ROLE(role)):
             return jsonify({"success":0,"message":"Failed to add collaborator", "error_reason": "add_collaborator_failed"}),500
+    except container_service.NodeServiceError as e:
+        return jsonify({"success":0,"message": str(e), "error_reason": getattr(e, 'reason', None)}), 500
     except Exception as e:
         return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
     return jsonify({"success":1,"message":"Collaborator added successfully"}),201
@@ -169,6 +189,8 @@ def remove_collaborator_api():
         if not container_service.remove_collaborator(container_id=container_id,
                                                  user_id=user_id):
             return jsonify({"success":0,"message":"Failed to remove collaborator", "error_reason": "remove_collaborator_failed"}),500
+    except container_service.NodeServiceError as e:
+        return jsonify({"success":0,"message": str(e), "error_reason": getattr(e, 'reason', None)}), 500
     except Exception as e:
         return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
     return jsonify({"success":1,"message":"Collaborator removed successfully"}),200
@@ -202,6 +224,8 @@ def update_role_api():
                 user_id=user_id,
                 updated_role=ROLE(updated_role)):
             return jsonify({"success":0,"message":"Failed to update role", "error_reason": "update_role_failed"}),500
+    except container_service.NodeServiceError as e:
+        return jsonify({"success":0,"message": str(e), "error_reason": getattr(e, 'reason', None)}), 500
     except Exception as e:
         return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
     return jsonify({"success":1,"message":"Role updated successfully"}),200

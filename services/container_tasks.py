@@ -1,6 +1,7 @@
 #TODO:完善异常处理
 import json
 import requests
+import time
 import base64
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -32,18 +33,17 @@ def send(ciphertext:bytes,signature:bytes,mechine_ip:str, timeout:float=5.0)->di
     发送 POST 并返回解析后的响应（优先 JSON），出现错误时返回包含 error 字段的 dict。
     """
     try:
-        print(f"DEBUG: Sending request to {mechine_ip} with ciphertext={ciphertext} and signature={signature}")
         resp = requests.post(mechine_ip, json={
             "message": base64.b64encode(ciphertext).decode('utf-8'),
             "signature": base64.b64encode(signature).decode('utf-8')
         }, timeout=timeout)
 
-        # 抛出 HTTP 错误（4xx/5xx）
-        resp.raise_for_status()
-
-        # 尝试解析为 JSON，否则返回原始文本
+        # 尝试解析为 JSON（即使是 4xx/5xx，也优先解析 body 中的 JSON，以保留 Node 返回的 error_reason）
         try:
-            return resp.json()
+            j = resp.json()
+            if isinstance(j, dict):
+                j.setdefault('status_code', resp.status_code)
+            return j
         except ValueError:
             return {"status_code": resp.status_code, "text": resp.text}
 
@@ -51,6 +51,34 @@ def send(ciphertext:bytes,signature:bytes,mechine_ip:str, timeout:float=5.0)->di
         # 网络/超时/连接等错误
         print(f"Request error: {e}")
         return {"error": str(e)}
+
+#这个纯粹是为了方便统一异常处置流程
+def _raise_on_node_error(res: dict, action: str):
+    '''
+    检查远端（Node）提供的响应的具体内容
+    
+    '''
+    
+    if not isinstance(res, dict):
+        raise NodeServiceError(f"NODE {action} unexpected response: {res}", reason="unexpected_response")
+    # network-level error
+    if 'error' in res:
+        err = res.get('error')
+        err_reason = res.get('error_reason')
+        raise NodeServiceError(f"NODE {action} failed: {err}", reason=err_reason or "NODE_error")
+    # Node may include error_reason even without 'error'
+    if 'error_reason' in res and res.get('success') != 1:
+        raise NodeServiceError(f"NODE {action} failed: reason={res.get('error_reason')}", reason=res.get('error_reason'))
+
+
+class NodeServiceError(Exception):
+    '''
+    提高一些Node侧错误上下文。只是为了z增加可读性
+    '''
+    
+    def __init__(self, message: str, reason: str | None = None):
+        super().__init__(message)
+        self.reason = reason
 
 def get_full_url(machine_ip:str, endpoint:str)->str:
     return f"http://{machine_ip}{CommsConfig.NODE_URL_MIDDLE}{endpoint}"
@@ -156,18 +184,15 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
         print(f"Warning: failed to check existing container name: {e}")
     signatured_message=signature(container_info)
     
-    # TODO 提前做重名检查
 
     encryptioned_message=encryption(container_info)
     res=send(encryptioned_message,signatured_message,full_url)
-    print(f"Create_container: remote response: {res}")
-
-    # verify remote accepted the create request
-    if 'error' in res:
-        raise Exception(f"remote create failed: {res['error']}")
+    print(f"Create_container: NODE response: {res}")
+    # 检查Node是否返回错误，如果有则抛出异常；如果没有则继续后续流程（写DB记录、建立绑定、启动心跳等）
+    _raise_on_node_error(res, 'create')
     if res.get('success') != 1:
         # unexpected response from Node; abort to avoid DB inconsistency
-        raise Exception(f"remote create returned failure or unexpected response: {res}")
+        raise NodeServiceError(f"NODE create returned failure or unexpected response: {res}", reason=res.get('error_reason') or "unexpected_response")
 
     if debug:
         #######
@@ -186,9 +211,6 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
         # DEBUG PURPOSE
         #######
     else:
-        if 'error' in res:
-            print(f"远程调用失败: {res['error']}")
-            raise Exception(f"远程调用失败: {res['error']}")
         Key=True
     
     
@@ -237,18 +259,16 @@ def remove_container(container_id:int, debug=False)->bool:
     signatured_message=signature(container_info)
     encryptioned_message=encryption(container_info)
     res=send(encryptioned_message,signatured_message,full_url)
-    print(f"remove_container: remote response: {res}")
-
-    # check remote delete result before mutating local DB
-    if 'error' in res:
-        raise Exception(f"remote remove failed: {res['error']}")
+    print(f"remove_container: NODE response: {res}")
+    # 先看看远程调用层面是否有错误（网络/请求/远程处理错误等），如果有则抛出异常；如果没有则根据 Node 的返回内容来决定是否继续本地删除（Node 返回 NOTFOUND 则本地也删除，Node 返回 FAILED 则不删除并抛出异常）
+    _raise_on_node_error(res, 'remove')
     # Node remove_container currently returns numeric code in 'success': 0=SUCCESS,1=NOTFOUND,2=FAILED
-    remote_code = res.get('success')
-    if remote_code is None:
-        raise Exception(f"remote remove returned unexpected response: {res}")
-    if remote_code == 2:
+    NODE_code = res.get('success')
+    if NODE_code is None:
+        raise Exception(f"NODE remove returned unexpected response: {res}")
+    if NODE_code == 2:
         # FAILED
-        raise Exception(f"remote remove reported failure: {res}")
+        raise NodeServiceError(f"NODE remove reported failure: {res}", reason=res.get('error_reason') or 'remove_failed')
     # treat 0 (SUCCESS) and 1 (NOTFOUND) as acceptable success for local cleanup
 
     if debug:
@@ -324,9 +344,9 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
         # DEBUG PURPOSE
         #######
     else:
-        if 'error' in res:
-            print(f"远程调用失败: {res['error']}")
-            raise Exception(f"远程调用失败: {res['error']}")
+        _raise_on_node_error(res, 'add_collaborator')
+        if res.get('success') not in (1, True):
+            raise NodeServiceError(f"NODE add_collaborator returned failure: {res}", reason=res.get('error_reason') or 'add_failed')
         Key=True
     # 直接通过绑定表建立关联
     add_binding(user_id=user_id,
@@ -389,9 +409,9 @@ def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
         # DEBUG PURPOSE
         #######
     else:
-        if 'error' in res:
-            print(f"远程调用失败: {res['error']}")
-            raise Exception(f"远程调用失败: {res['error']}")
+        _raise_on_node_error(res, 'remove_collaborator')
+        if res.get('success') not in (1, True):
+            raise NodeServiceError(f"NODE remove_collaborator returned failure: {res}", reason=res.get('error_reason') or 'remove_failed')
         Key=True
     # 仅删除绑定
     remove_binding(user_id,container_id)
@@ -441,10 +461,9 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->boo
         # DEBUG PURPOSE
         #######
     else:
-        if 'error' in res:
-            print(f"远程调用失败: {res['error']}")
-            raise Exception(f"远程调用失败: {res['error']}")
-
+        _raise_on_node_error(res, 'update_role')
+        if res.get('success') not in (1, True):
+            raise NodeServiceError(f"NODE update_role returned failure: {res}", reason=res.get('error_reason') or 'update_failed')
         Key=True
     if updated_role == ROLE.ROOT:
         # 强制使用 root 作为用户名
@@ -470,7 +489,7 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         machine_ip = get_machine_ip_by_id(container.machine_id)
         st = get_container_status(machine_ip, container.name)
         if isinstance(st, dict) and st.get('status_code') == 404:
-            # remote not found -> remove local DB record and bindings
+            # Node端没有找到容器，说明容器实际上已经不存在了，这时本地也应该删除记录并返回 not found 错误
             try:
                 remove_binding(0, container_id, all=True)
             except Exception as e:
@@ -484,7 +503,7 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         # ignore network/other errors and proceed with DB content
         if isinstance(e, ValueError):
             raise
-        print(f"get_container_detail_information: ignored remote check error: {e}")
+        print(f"get_container_detail_information: ignored NODE check error: {e}")
 
     owener_bindings= get_container_bindings(container_id)
     res={ 
@@ -534,7 +553,7 @@ def list_all_container_bref_information(machine_id:int, user_id:int, page_number
                     continue
         except Exception as e:
             # ignore network/other errors and continue including DB entry
-            print(f"list_all_container_bref_information: ignored remote check error for {container.name}: {e}")
+            print(f"list_all_container_bref_information: ignored NODE check error for {container.name}: {e}")
 
         info = container_bref_information(
             container_id=container.id,

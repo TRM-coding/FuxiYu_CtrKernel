@@ -52,6 +52,18 @@ def container_starting_status_heartbeat(machine_ip: str, container_name: str, co
             if isinstance(res, dict) and 'container_status' in res:
                 st = res.get('container_status')
                 print(f"Received container_status: {st}")
+                # 检查是否有失败的状态或错误信息
+                if res.get('container_status') == 'failed' or res.get('error_reason'):
+                    try:
+                        if container_id is not None:
+                            if app is not None:
+                                with app.app_context():
+                                    update_container(container_id, container_status=ContainerStatus.FAILED)
+                            else:
+                                update_container(container_id, container_status=ContainerStatus.FAILED)
+                    except Exception as e:
+                        print(f"Error updating container status to FAILED: {e}")
+                    return
                 if isinstance(st, str) and st.lower() == 'online':
                     if container_id is not None:
                         try:

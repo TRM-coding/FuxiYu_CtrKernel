@@ -16,6 +16,7 @@ class ContainerStatus(Enum):
     CREATING = "creating"
     STARTING = "starting"
     STOPPING = "stopping"
+    FAILED = "failed"
 
 
 
