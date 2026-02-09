@@ -488,6 +488,7 @@ def get_container_detail_information(container_id:int)->container_detail_informa
     try:
         machine_ip = get_machine_ip_by_id(container.machine_id)
         st = get_container_status(machine_ip, container.name)
+        # If Node explicitly reports 404 -> remove local DB record (existing behavior)
         if isinstance(st, dict) and st.get('status_code') == 404:
             # Node端没有找到容器，说明容器实际上已经不存在了，这时本地也应该删除记录并返回 not found 错误
             try:
@@ -504,6 +505,27 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         if isinstance(e, ValueError):
             raise
         print(f"get_container_detail_information: ignored NODE check error: {e}")
+
+    # If Node returned a status payload, and it's not a 404, try to persist container_status to DB
+    try:
+        if isinstance(st, dict) and st.get('status_code') != 404:
+            status_str = st.get('container_status')
+            if status_str:
+                try:
+                    new_status = ContainerStatus(status_str)
+                except Exception:
+                    # try case-insensitive match of enum values
+                    try:
+                        new_status = next(s for s in ContainerStatus if s.value.lower() == str(status_str).lower())
+                    except StopIteration:
+                        new_status = None
+                if new_status:
+                    try:
+                        update_container(container.id, container_status=new_status)
+                    except Exception as e:
+                        print(f"Warning: failed to update container status for {container.id}: {e}")
+    except Exception as e:
+        print(f"Warning: error while attempting to persist Node status for {container.id if 'container' in locals() and container else '?'}: {e}")
 
     owener_bindings= get_container_bindings(container_id)
     res={ 
@@ -540,6 +562,7 @@ def list_all_container_bref_information(machine_id:int, user_id:int, page_number
                 machine_ip = None
             if machine_ip:
                 st = get_container_status(machine_ip, container.name)
+                # If Node reports 404, delete local record (existing behavior)
                 if isinstance(st, dict) and st.get('status_code') == 404:
                     try:
                         remove_binding(0, container.id, all=True)
@@ -551,6 +574,26 @@ def list_all_container_bref_information(machine_id:int, user_id:int, page_number
                         print(f"Warning: failed to delete container {container.id} from DB: {e}")
                     # skip adding this container to result
                     continue
+                else:
+                    # If Node returned a status payload (not 404), persist container_status to DB when possible
+                    try:
+                        if isinstance(st, dict) and st.get('status_code') is None or st.get('status_code') != 404:
+                            status_str = st.get('container_status')
+                            if status_str:
+                                try:
+                                    new_status = ContainerStatus(status_str)
+                                except Exception:
+                                    try:
+                                        new_status = next(s for s in ContainerStatus if s.value.lower() == str(status_str).lower())
+                                    except StopIteration:
+                                        new_status = None
+                                if new_status:
+                                    try:
+                                        update_container(container.id, container_status=new_status)
+                                    except Exception as e:
+                                        print(f"Warning: failed to update container status for {container.id}: {e}")
+                    except Exception as e:
+                        print(f"list_all_container_bref_information: ignored error while persisting status for {container.name}: {e}")
         except Exception as e:
             # ignore network/other errors and continue including DB entry
             print(f"list_all_container_bref_information: ignored NODE check error for {container.name}: {e}")
