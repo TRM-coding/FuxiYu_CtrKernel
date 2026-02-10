@@ -308,6 +308,12 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
     full_url = get_full_url(machine_ip, "/add_collaborator")
 
     container_name = get_by_id(container_id).name
+    # Ensure container is online before attempting collaborator changes
+    container_obj = get_by_id(container_id)
+    if not container_obj:
+        raise ValueError("Container not found")
+    if container_obj.container_status != ContainerStatus.ONLINE:
+        raise NodeServiceError(f"Container {container_id} is not online", reason="container_offline")
 
     user_name=get_name_by_id(user_id)
     # Do not allow adding a collaborator as ROOT via this API/task
@@ -366,6 +372,12 @@ def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
     full_url = get_full_url(machine_ip, "/remove_collaborator")
 
     container_name = get_by_id(container_id).name
+    # Ensure container is online before attempting collaborator changes
+    container_obj = get_by_id(container_id)
+    if not container_obj:
+        raise ValueError("Container not found")
+    if container_obj.container_status != ContainerStatus.ONLINE:
+        raise NodeServiceError(f"Container {container_id} is not online", reason="container_offline")
     user_name = get_name_by_id(user_id)
 
     # prevent removing ROOT owners
@@ -428,6 +440,13 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->boo
     full_url = get_full_url(machine_ip, "/update_role")
 
     container_name = get_by_id(container_id).name
+
+    # Ensure container is online before attempting role updates
+    container_obj = get_by_id(container_id)
+    if not container_obj:
+        raise ValueError("Container not found")
+    if container_obj.container_status != ContainerStatus.ONLINE:
+        raise NodeServiceError(f"Container {container_id} is not online", reason="container_offline")
 
     user_name=get_name_by_id(user_id)
     # 远侧处理ROOT相关的角色变更 可能需单独考察

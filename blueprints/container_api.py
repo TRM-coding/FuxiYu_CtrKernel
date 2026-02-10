@@ -156,7 +156,9 @@ def add_collaborator_api():
                      user_id=user_id,
                      role=ROLE(role)):
             return jsonify({"success":0,"message":"Failed to add collaborator", "error_reason": "add_collaborator_failed"}),500
-    except container_service.NodeServiceError as e:
+    except container_service.NodeServiceError as e:    
+        if getattr(e, 'reason', None) == 'container_offline':
+            return jsonify({"success":0,"message": str(e), "error_reason": getattr(e, 'reason', None)}), 400
         return jsonify({"success":0,"message": str(e), "error_reason": getattr(e, 'reason', None)}), 500
     except Exception as e:
         return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
@@ -190,6 +192,8 @@ def remove_collaborator_api():
                                                  user_id=user_id):
             return jsonify({"success":0,"message":"Failed to remove collaborator", "error_reason": "remove_collaborator_failed"}),500
     except container_service.NodeServiceError as e:
+        if getattr(e, 'reason', None) == 'container_offline':
+            return jsonify({"success":0,"message": str(e), "error_reason": getattr(e, 'reason', None)}), 400
         return jsonify({"success":0,"message": str(e), "error_reason": getattr(e, 'reason', None)}), 500
     except Exception as e:
         return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
@@ -225,6 +229,8 @@ def update_role_api():
                 updated_role=ROLE(updated_role)):
             return jsonify({"success":0,"message":"Failed to update role", "error_reason": "update_role_failed"}),500
     except container_service.NodeServiceError as e:
+        if getattr(e, 'reason', None) == 'container_offline':
+            return jsonify({"success":0,"message": str(e), "error_reason": getattr(e, 'reason', None)}), 400
         return jsonify({"success":0,"message": str(e), "error_reason": getattr(e, 'reason', None)}), 500
     except Exception as e:
         return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
