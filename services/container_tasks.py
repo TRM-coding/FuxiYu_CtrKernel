@@ -22,6 +22,7 @@ from ..utils.heartbeat import container_starting_status_heartbeat
 from ..models.containers import Container
 import math
 import re
+from ..utils import sanitizer as _sanitizer
 
 
 ####################################################
@@ -316,6 +317,11 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
         raise NodeServiceError(f"Container {container_id} is not online", reason="container_offline")
 
     user_name=get_name_by_id(user_id)
+    # validate inputs to avoid passing unsafe values to Node
+    try:
+        _sanitizer.validate_username(user_name)
+    except Exception as e:
+        raise ValueError(f"unsafe user_name: {e}")
     # Do not allow adding a collaborator as ROOT via this API/task
     if role == ROLE.ROOT:
         # Reject silently (caller/API will return failure)
@@ -379,6 +385,10 @@ def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
     if container_obj.container_status != ContainerStatus.ONLINE:
         raise NodeServiceError(f"Container {container_id} is not online", reason="container_offline")
     user_name = get_name_by_id(user_id)
+    try:
+        _sanitizer.validate_username(user_name)
+    except Exception as e:
+        raise ValueError(f"unsafe user_name: {e}")
 
     # prevent removing ROOT owners
     try:
@@ -449,6 +459,10 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->boo
         raise NodeServiceError(f"Container {container_id} is not online", reason="container_offline")
 
     user_name=get_name_by_id(user_id)
+    try:
+        _sanitizer.validate_username(user_name)
+    except Exception as e:
+        raise ValueError(f"unsafe user_name: {e}")
     # 远侧处理ROOT相关的角色变更 可能需单独考察
     data={
         "config":{
