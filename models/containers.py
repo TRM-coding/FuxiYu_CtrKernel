@@ -15,7 +15,8 @@ class Container(db.Model):
     # 关系：指向 Machine
     machine = db.relationship("Machine", back_populates="containers")
 
-    container_status: MachineStatus = db.Column(
+    #只是修复了注释性错误，之前写成了 "MachineStatus" 而不是 "ContainerStatus"
+    container_status: ContainerStatus = db.Column(
         db.Enum(ContainerStatus, values_callable=lambda obj: [e.value for e in obj]),
         nullable=False,
         default=ContainerStatus.CREATING
