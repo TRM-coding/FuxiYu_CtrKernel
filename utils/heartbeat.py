@@ -33,8 +33,8 @@ def _send_encrypted(machine_ip: str, endpoint: str, payload: dict, timeout: floa
 def container_starting_status_heartbeat(machine_ip: str, container_name: str, container_id: int | None = None,
                                      timeout: int = 180, interval: int = 3):
     """
-    Start a background thread polling Node's /container_status for the given container_name.
-    When status becomes RUNNING, update the DB container record (if container_id provided) and stop.
+    以background thread的方式定期向远程机器发送请求查询容器状态，直到收到容器在线或失败的状态，或者超时。
+    当状态变为RUNNING时，更新数据库中的容器记录（如果提供了container_id）并停止。
     """
     # capture Flask app if available so background thread can use its app_context
     app = None

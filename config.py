@@ -22,7 +22,8 @@ class CommsConfig:
 
 class CORSHeaderConfig:
     # Allow both localhost and 127.0.0.1 origins used in development
-    ALLOW_ORIGINS='http://localhost:5173,http://127.0.0.1:5173,http://192.168.5.230:5173'
+    # 这里列出允许的前端地址，前端开发时可能会用 localhost 或230
+    ALLOW_ORIGINS='http://localhost:5173,http://127.0.0.1:5173, http://192.168.5.230:5173,https://localhost:5173,https://127.0.0.1:5173,https://192.168.5.230:5173'
 
 # 新增：统一的 AppConfig 和 get_config
 class AppConfig(SqlConfig, KeyConfig):
@@ -38,6 +39,12 @@ class AppConfig(SqlConfig, KeyConfig):
     SQLALCHEMY_DATABASE_URI = f"mysql+pymysql://{SQLUSER}@{SQLURL}:{SQLPORT}/{SQLNAME}?charset=utf8mb4"
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SECRET_KEY = os.getenv("SECRET_KEY", "dev")
+    # SSL / HTTPS (development toggle)
+    # Set ENABLE_SSL=false to disable HTTPS in development. 默认开了启，除非明确设置为 'false'（字符串）。--- IGNORE ---
+    SSL_ENABLED = os.getenv("ENABLE_SSL", "true").lower() == "true"
+    # P这些都是相对于web根目录存的/certs/localhost.pem。与现有架构有出入 可调整
+    SSL_CERT_PATH = os.getenv("SSL_CERT_PATH", "certs/localhost.pem")
+    SSL_KEY_PATH = os.getenv("SSL_KEY_PATH", "certs/localhost-key.pem")
 
 def get_config(env: str | None = None):
     """
