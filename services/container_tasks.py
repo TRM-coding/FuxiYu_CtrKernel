@@ -18,7 +18,11 @@ from ..utils.CheckKeys import *
 from ..utils.Container import Container_info
 from ..repositories.containers_repo import *
 from ..repositories.usercontainer_repo import *
-from ..utils.heartbeat import container_starting_status_heartbeat
+from ..utils.heartbeat import (
+    container_starting_status_heartbeat,
+    container_stopping_status_heartbeat,
+    container_restart_status_heartbeat,
+)
 from ..models.containers import Container
 import math
 import re
@@ -510,6 +514,92 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->boo
     if Key:
         return True
     return False
+
+
+def start_container(container_id:int, debug=False)->bool:
+    """发送start到对应容器所在node,TODO启动后心跳机制监控状态，直到状态变为ONLINE或失败"""
+    machine_id = get_machine_id_by_container_id(container_id)
+    machine_ip = get_machine_ip_by_id(machine_id)
+    full_url = get_full_url(machine_ip, "/start_container")
+
+    container_name = get_by_id(container_id).name
+    data = {"config": {"container_name": container_name}}
+    container_info = json.dumps(data)
+    signatured_message = signature(container_info)
+    encryptioned_message = encryption(container_info)
+
+    res = send(encryptioned_message, signatured_message, full_url)
+    print(f"start_container: NODE response: {res}")
+
+    # Check node-level errors
+    _raise_on_node_error(res, 'start')
+    # Expect success truthy
+    if res.get('success') in (1, True):
+        # start controller-side heartbeat to watch for ONLINE
+        try:
+            container_starting_status_heartbeat(machine_ip, container_name, container_id=container_id)
+        except Exception as e:
+            print(f"Failed to start start-heartbeat: {e}")
+        return True
+    # Treat other responses as failure
+    raise NodeServiceError(f"NODE start returned failure: {res}", reason=res.get('error_reason') or 'start_failed')
+
+
+def stop_container(container_id:int, debug=False)->bool:
+    """发送stop到对应容器所在node,TODO停止后心跳机制监控状态，直到状态变为OFFLINE或失败"""
+    machine_id = get_machine_id_by_container_id(container_id)
+    machine_ip = get_machine_ip_by_id(machine_id)
+    full_url = get_full_url(machine_ip, "/stop_container")
+
+    container_name = get_by_id(container_id).name
+    data = {"config": {"container_name": container_name}}
+    container_info = json.dumps(data)
+    signatured_message = signature(container_info)
+    encryptioned_message = encryption(container_info)
+
+    res = send(encryptioned_message, signatured_message, full_url)
+    print(f"stop_container: NODE response: {res}")
+
+    _raise_on_node_error(res, 'stop')
+    if res.get('success') in (1, True):
+        # start controller-side heartbeat to watch for OFFLINE
+        try:
+            container_stopping_status_heartbeat(machine_ip, container_name, container_id=container_id)
+        except Exception as e:
+            print(f"Failed to start stop-heartbeat: {e}")
+        return True
+    raise NodeServiceError(f"NODE stop returned failure: {res}", reason=res.get('error_reason') or 'stop_failed')
+
+
+def restart_container(container_id:int, debug=False)->bool:
+    """发送restart到对应容器所在node,TODO重启后心跳机制监控状态，直到状态变为ONLINE或失败"""
+    machine_id = get_machine_id_by_container_id(container_id)
+    machine_ip = get_machine_ip_by_id(machine_id)
+    full_url = get_full_url(machine_ip, "/restart_container")
+
+    container_name = get_by_id(container_id).name
+    data = {"config": {"container_name": container_name}}
+    container_info = json.dumps(data)
+    signatured_message = signature(container_info)
+    encryptioned_message = encryption(container_info)
+
+    res = send(encryptioned_message, signatured_message, full_url)
+    print(f"restart_container: NODE response: {res}")
+
+    _raise_on_node_error(res, 'restart')
+    if res.get('success') in (1, True):
+        #先t finished
+        try:
+            update_container(container_id, container_status=ContainerStatus.OFFLINE)
+        except Exception as e:
+            print(f"Warning: failed to mark container {container_id} as OFFLINE before restart-heartbeat: {e}")
+        # start controller-side heartbeat to watch for ONLINE after restart
+        try:
+            container_restart_status_heartbeat(machine_ip, container_name, container_id=container_id)
+        except Exception as e:
+            print(f"Failed to start restart-heartbeat: {e}")
+        return True
+    raise NodeServiceError(f"NODE restart returned failure: {res}", reason=res.get('error_reason') or 'restart_failed')
 
 #返回容器的细节信息
 def get_container_detail_information(container_id:int)->container_detail_information:

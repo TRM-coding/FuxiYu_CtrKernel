@@ -80,3 +80,101 @@ def container_starting_status_heartbeat(machine_ip: str, container_name: str, co
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
     return t
+
+
+def container_stopping_status_heartbeat(machine_ip: str, container_name: str, container_id: int | None = None,
+                                      timeout: int = 180, interval: int = 3):
+    """
+    Heartbeat for stop action: initial state 'stoping', terminal state 'offline'.
+    """
+    app = None
+    try:
+        app = current_app._get_current_object()
+    except RuntimeError:
+        app = None
+
+    def _worker():
+        start = time.time()
+        while time.time() - start < timeout:
+            print(f"Stop-heartbeat check for '{container_name}' at {machine_ip}...")
+            payload = {"config": {"container_name": container_name}}
+            res = _send_encrypted(machine_ip, "/container_status", payload, timeout=5.0)
+            if isinstance(res, dict) and 'container_status' in res:
+                st = res.get('container_status')
+                print(f"Received container_status (stop): {st}")
+                if res.get('container_status') == 'failed' or res.get('error_reason'):
+                    try:
+                        if container_id is not None:
+                            if app is not None:
+                                with app.app_context():
+                                    update_container(container_id, container_status=ContainerStatus.FAILED)
+                            else:
+                                update_container(container_id, container_status=ContainerStatus.FAILED)
+                    except Exception as e:
+                        print(f"Error updating container status to FAILED: {e}")
+                    return
+                if isinstance(st, str) and st.lower() == 'offline':
+                    if container_id is not None:
+                        try:
+                            if app is not None:
+                                with app.app_context():
+                                    update_container(container_id, container_status=ContainerStatus.OFFLINE)
+                            else:
+                                update_container(container_id, container_status=ContainerStatus.OFFLINE)
+                        except Exception as e:
+                            print(f"Error updating container status: {e}")
+                    return
+            time.sleep(interval)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    return t
+
+
+def container_restart_status_heartbeat(machine_ip: str, container_name: str, container_id: int | None = None,
+                                       timeout: int = 180, interval: int = 3):
+    """
+    Heartbeat for restart action: initial 'stoping' then terminal 'online'.
+    """
+    app = None
+    try:
+        app = current_app._get_current_object()
+    except RuntimeError:
+        app = None
+
+    def _worker():
+        start = time.time()
+        while time.time() - start < timeout:
+            print(f"Restart-heartbeat check for '{container_name}' at {machine_ip}...")
+            payload = {"config": {"container_name": container_name}}
+            res = _send_encrypted(machine_ip, "/container_status", payload, timeout=5.0)
+            if isinstance(res, dict) and 'container_status' in res:
+                st = res.get('container_status')
+                print(f"Received container_status (restart): {st}")
+                if res.get('container_status') == 'failed' or res.get('error_reason'):
+                    try:
+                        if container_id is not None:
+                            if app is not None:
+                                with app.app_context():
+                                    update_container(container_id, container_status=ContainerStatus.FAILED)
+                            else:
+                                update_container(container_id, container_status=ContainerStatus.FAILED)
+                    except Exception as e:
+                        print(f"Error updating container status to FAILED: {e}")
+                    return
+                if isinstance(st, str) and st.lower() == 'online':
+                    if container_id is not None:
+                        try:
+                            if app is not None:
+                                with app.app_context():
+                                    update_container(container_id, container_status=ContainerStatus.ONLINE)
+                            else:
+                                update_container(container_id, container_status=ContainerStatus.ONLINE)
+                        except Exception as e:
+                            print(f"Error updating container status: {e}")
+                    return
+            time.sleep(interval)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    return t

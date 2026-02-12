@@ -125,6 +125,67 @@ def delete_container_api():
         return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
     return jsonify({"success": 1, "message": "Container deleted successfully"}), 200
 
+
+@api_bp.post("/containers/start_container")
+def start_container_api():
+    '''
+    请求格式：
+    { "token", "container_id" }
+    '''
+    if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+        return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
+    data = request.get_json() or {}
+    container_id = data.get("container_id", 0)
+    try:
+        if not container_service.start_container(container_id=container_id):
+            return jsonify({"success": 0, "message": "Failed to start container", "error_reason": "start_failed"}), 500
+    except container_service.NodeServiceError as e:
+        # propagate known node errors
+        return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), 500
+    except Exception as e:
+        return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
+    return jsonify({"success": 1, "message": "Container start request sent"}), 200
+
+
+@api_bp.post("/containers/stop_container")
+def stop_container_api():
+    '''
+    请求格式：
+    { "token", "container_id" }
+    '''
+    if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+        return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
+    data = request.get_json() or {}
+    container_id = data.get("container_id", 0)
+    try:
+        if not container_service.stop_container(container_id=container_id):
+            return jsonify({"success": 0, "message": "Failed to stop container", "error_reason": "stop_failed"}), 500
+    except container_service.NodeServiceError as e:
+        return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), 500
+    except Exception as e:
+        return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
+    return jsonify({"success": 1, "message": "Container stop request sent"}), 200
+
+
+@api_bp.post("/containers/restart_container")
+def restart_container_api():
+    '''
+    请求格式：
+    { "token", "container_id" }
+    '''
+    if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+        return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
+    data = request.get_json() or {}
+    container_id = data.get("container_id", 0)
+    try:
+        if not container_service.restart_container(container_id=container_id):
+            return jsonify({"success": 0, "message": "Failed to restart container", "error_reason": "restart_failed"}), 500
+    except container_service.NodeServiceError as e:
+        return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), 500
+    except Exception as e:
+        return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
+    return jsonify({"success": 1, "message": "Container restart request sent"}), 200
+
 @api_bp.post("/containers/add_collaborator")
 def add_collaborator_api():
     '''
