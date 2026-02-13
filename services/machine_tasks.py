@@ -37,6 +37,14 @@ def Add_machine(machine_name:str,
                    gpu_type:str,
                    memory_size:int,
                    disk_size:int)->bool:
+    # 防御性检查：限制字段长度，防止过长输入导致数据库异常
+    if machine_name and len(machine_name) > 115:
+        raise ValueError(f"machine_name too long (max 115): length={len(machine_name)}")
+    if gpu_type and len(str(gpu_type)) > 115:
+        raise ValueError(f"gpu_type too long (max 115): length={len(str(gpu_type))}")
+    if machine_type and len(str(machine_type)) > 255:
+        raise ValueError(f"machine_type too long (max 255): length={len(str(machine_type))}")
+
     create_machine(
          machinename=machine_name,
          machine_ip=machine_ip,

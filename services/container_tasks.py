@@ -170,7 +170,14 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
     if public_key:
         container_info['public_key']=public_key
     container_info=json.dumps(container_info)
-    # validate container name: only letters, digits and underscore allowed
+    # 防御性检查：限制字段长度，防止过长输入导致数据库异常或远程调用异常
+    if container.NAME and len(container.NAME) > 115:
+        raise ValueError(f"container name too long (max 115): length={len(container.NAME)}")
+    if container.image and len(container.image) > 195:
+        raise ValueError(f"container image name too long (max 195): length={len(container.image)}")
+    if public_key and len(public_key) > 495:
+        raise ValueError(f"public_key too long (max 495): length={len(public_key)}")
+    # 只允许字母数字下划线
     if not re.fullmatch(r'[A-Za-z0-9_]+', container.NAME):
         raise ValueError(f"invalid container name: '{container.NAME}'. Allowed characters: A-Z a-z 0-9 _")
 

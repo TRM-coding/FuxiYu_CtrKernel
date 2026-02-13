@@ -86,6 +86,12 @@ def Register(username: str, email: str, password: str, graduation_year):
                - 邮箱已存在: (False, "email_exists", None)
                - 注册成功: (True, User对象, None)
     """
+    # enforce length limits
+    if username and len(username) > 75:
+        return False, "username_too_long", None
+    if email and len(email) > 115:
+        return False, "email_too_long", None
+
     # 检查用户名是否已存在
     if User.query.filter_by(username=username).first():
         return False, "username_exists", None
@@ -213,6 +219,12 @@ def Update_user(user_id:int,**fields)->User|None:
         del fields['permission']
     if 'password_hash' in fields:
         del fields['password_hash']
+
+    # 防御性检查：限制字段长度，防止过长输入导致数据库异常
+    if 'username' in fields and fields['username'] and len(fields['username']) > 75:
+        raise ValueError(f"username too long (max 75): length={len(fields['username'])}")
+    if 'email' in fields and fields['email'] and len(fields['email']) > 115:
+        raise ValueError(f"email too long (max 115): length={len(fields['email'])}")
 
     user=update_user(user_id,**fields)
     return user
