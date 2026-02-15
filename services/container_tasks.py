@@ -1,4 +1,3 @@
-#TODO:完善异常处理
 import json
 import requests
 import time
@@ -524,7 +523,7 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->boo
 
 
 def start_container(container_id:int, debug=False)->bool:
-    """发送start到对应容器所在node,TODO启动后心跳机制监控状态，直到状态变为ONLINE或失败"""
+    """发送start到对应容器所在node,启动后心跳机制监控状态，直到状态变为ONLINE或失败"""
     machine_id = get_machine_id_by_container_id(container_id)
     machine_ip = get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/start_container")
@@ -553,7 +552,7 @@ def start_container(container_id:int, debug=False)->bool:
 
 
 def stop_container(container_id:int, debug=False)->bool:
-    """发送stop到对应容器所在node,TODO停止后心跳机制监控状态，直到状态变为OFFLINE或失败"""
+    """发送stop到对应容器所在node,停止后心跳机制监控状态，直到状态变为OFFLINE或失败"""
     machine_id = get_machine_id_by_container_id(container_id)
     machine_ip = get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/stop_container")
@@ -579,7 +578,7 @@ def stop_container(container_id:int, debug=False)->bool:
 
 
 def restart_container(container_id:int, debug=False)->bool:
-    """发送restart到对应容器所在node,TODO重启后心跳机制监控状态，直到状态变为ONLINE或失败"""
+    """发送restart到对应容器所在node,重启后心跳机制监控状态，直到状态变为ONLINE或失败"""
     machine_id = get_machine_id_by_container_id(container_id)
     machine_ip = get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/restart_container")
