@@ -11,6 +11,7 @@ from ..config import CommsConfig
 from ..constant import *
 from sqlalchemy.exc import IntegrityError
 from ..repositories import containers_repo, machine_repo
+from .machine_tasks import is_machine_online_remote
 from ..repositories.machine_repo import *
 from ..repositories.user_repo import *
 from ..utils.CheckKeys import *
@@ -26,6 +27,28 @@ from ..models.containers import Container
 import math
 import re
 from ..utils import sanitizer as _sanitizer
+
+####################################################
+# 辅助工具
+def _ensure_machine_online_for_operation(machine_id: int, operation: str = ''):
+    """
+    这里检查机器在线状态的主要目的是为了在执行诸如创建/删除/修改容器等操作之前，先验证目标机器是否在线，以避免不必要的远程调用和更快地反馈给用户。虽然最终的远程调用也会有类似的检查，但这个预检查可以节省资源并提供更即时的错误响应。
+    """
+    try:
+        m = machine_repo.get_by_id(machine_id)
+    except Exception:
+        m = None
+    if not m:
+        raise NodeServiceError(f"MACHINE {operation} failed: machine {machine_id} not found", reason="machine_not_found")
+    try:
+        machine_status = m.machine_status.value.lower() if hasattr(m.machine_status, 'value') else str(m.machine_status).lower()
+    except Exception:
+        machine_status = str(getattr(m, 'machine_status', '')).lower()
+    if machine_status == 'maintenance':
+        raise NodeServiceError(f"MACHINE {operation} aborted: machine is maintenance", reason="machine_maintenance")
+    ok = is_machine_online_remote(machine_id)
+    if not ok:
+        raise NodeServiceError(f"MACHINE {operation} aborted: remote node not reachable or not online", reason="machine_offline")
 
 
 ####################################################
@@ -155,8 +178,11 @@ class container_detail_information(BaseModel):
 #Function Implementation
 ####################################################
 
+
 # 将user_id作为admin，创建新容器
 def Create_container(owner_name:str,machine_id:int,container:Container_info,public_key=None, debug=False)->bool:
+    # ensure machine is online before attempting creation
+    _ensure_machine_online_for_operation(machine_id, 'create')
     machine_ip=get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/create_container")
 
@@ -256,6 +282,10 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
 #删除容器并删除其所有者记录
 def remove_container(container_id:int, debug=False)->bool:
     machine_id = get_machine_id_by_container_id(container_id)
+    if not machine_id:
+        raise ValueError("Container not found or not associated with any machine")
+    # 使得只在机器在线时执行
+    _ensure_machine_online_for_operation(machine_id, 'remove')
     machine_ip=get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/remove_container")
 
@@ -315,10 +345,14 @@ def remove_container(container_id:int, debug=False)->bool:
 
 def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
     machine_id = get_machine_id_by_container_id(container_id)
+    if not machine_id:
+        raise ValueError("Container not found or not associated with any machine")
     machine_ip=get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/add_collaborator")
 
     container_name = get_by_id(container_id).name
+    # operation guard: machine must be online
+    _ensure_machine_online_for_operation(machine_id, 'add_collaborator')
     # Ensure container is online before attempting collaborator changes
     container_obj = get_by_id(container_id)
     if not container_obj:
@@ -384,10 +418,14 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
 
 def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
     machine_id = get_machine_id_by_container_id(container_id)
+    if not machine_id:
+        raise ValueError("Container not found or not associated with any machine")
     machine_ip=get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/remove_collaborator")
 
     container_name = get_by_id(container_id).name
+    # operation guard: machine must be online
+    _ensure_machine_online_for_operation(machine_id, 'remove_collaborator')
     # Ensure container is online before attempting collaborator changes
     container_obj = get_by_id(container_id)
     if not container_obj:
@@ -456,12 +494,16 @@ def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
 
 def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->bool:
     machine_id = get_machine_id_by_container_id(container_id)
+    if not machine_id:
+        raise ValueError("Container not found or not associated with any machine")
     machine_ip=get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/update_role")
 
     container_name = get_by_id(container_id).name
 
     # Ensure container is online before attempting role updates
+    # operation guard: machine must be online
+    _ensure_machine_online_for_operation(machine_id, 'update_role')
     container_obj = get_by_id(container_id)
     if not container_obj:
         raise ValueError("Container not found")
@@ -525,6 +567,9 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->boo
 def start_container(container_id:int, debug=False)->bool:
     """发送start到对应容器所在node,启动后心跳机制监控状态，直到状态变为ONLINE或失败"""
     machine_id = get_machine_id_by_container_id(container_id)
+    if not machine_id:
+        raise ValueError("Container not found or not associated with any machine")
+    _ensure_machine_online_for_operation(machine_id, 'start')
     machine_ip = get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/start_container")
 
@@ -554,6 +599,9 @@ def start_container(container_id:int, debug=False)->bool:
 def stop_container(container_id:int, debug=False)->bool:
     """发送stop到对应容器所在node,停止后心跳机制监控状态，直到状态变为OFFLINE或失败"""
     machine_id = get_machine_id_by_container_id(container_id)
+    if not machine_id:
+        raise ValueError("Container not found or not associated with any machine")
+    _ensure_machine_online_for_operation(machine_id, 'stop')
     machine_ip = get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/stop_container")
 
@@ -580,6 +628,9 @@ def stop_container(container_id:int, debug=False)->bool:
 def restart_container(container_id:int, debug=False)->bool:
     """发送restart到对应容器所在node,重启后心跳机制监控状态，直到状态变为ONLINE或失败"""
     machine_id = get_machine_id_by_container_id(container_id)
+    if not machine_id:
+        raise ValueError("Container not found or not associated with any machine")
+    _ensure_machine_online_for_operation(machine_id, 'restart')
     machine_ip = get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/restart_container")
 
@@ -614,30 +665,45 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         raise ValueError("Container not found")
     # 这个状态查询主要是为了验证容器是否真的存在于 Node 上，如果 Node 返回 404 则说明容器实际上已经不存在了，这时本地也应该删除记录并返回 not found 错误
     # 这个方法不处理从未放入数据库的容器（因为它们不应该有 container_id），也不处理网络/其他错误（因为它们不应该阻止返回数据库中的信息）。
+    # 这里先检查机器状态，如果机器离线或维护中，则跳过 Node 检查直接返回数据库内容；如果机器在线，则进行 Node 检查以验证容器状态并尝试更新数据库中的状态信息。无论如何，如果 Node 检查失败（网络错误、超时等），都应该忽略错误并继续返回数据库内容，而不是阻止整个请求失败。
     try:
-        machine_ip = get_machine_ip_by_id(container.machine_id)
-        st = get_container_status(machine_ip, container.name)
-        # If Node explicitly reports 404 -> remove local DB record (existing behavior)
-        if isinstance(st, dict) and st.get('status_code') == 404:
-            # Node端没有找到容器，说明容器实际上已经不存在了，这时本地也应该删除记录并返回 not found 错误
-            try:
-                remove_binding(0, container_id, all=True)
-            except Exception as e:
-                print(f"Warning: failed to remove bindings for {container_id}: {e}")
-            try:
-                delete_container(container_id)
-            except Exception as e:
-                print(f"Warning: failed to delete container {container_id} from DB: {e}")
-            raise ValueError("Container not found")
-    except Exception as e:
-        # ignore network/other errors and proceed with DB content
-        if isinstance(e, ValueError):
-            raise
-        print(f"get_container_detail_information: ignored NODE check error: {e}")
+        m = machine_repo.get_by_id(container.machine_id)
+    except Exception:
+        m = None
+    do_node_check = True
+    if m is not None:
+        try:
+            status_val = m.machine_status.value.lower() if hasattr(m.machine_status, 'value') else str(m.machine_status).lower()
+        except Exception:
+            status_val = str(getattr(m, 'machine_status', '')).lower()
+        if status_val in ('offline', 'maintenance'):
+            do_node_check = False
+
+    st = None
+    if do_node_check:
+        try:
+            machine_ip = get_machine_ip_by_id(container.machine_id)
+            st = get_container_status(machine_ip, container.name)
+            # 找不到容器（Node 返回 404）时，删除本地记录并返回 not found 错误；其他错误（网络错误、超时、解析错误等）则忽略并继续返回数据库内容
+            if isinstance(st, dict) and st.get('status_code') == 404:
+                try:
+                    remove_binding(0, container_id, all=True)
+                except Exception as e:
+                    print(f"Warning: failed to remove bindings for {container_id}: {e}")
+                try:
+                    delete_container(container_id)
+                except Exception as e:
+                    print(f"Warning: failed to delete container {container_id} from DB: {e}")
+                raise ValueError("Container not found")
+        except Exception as e:
+            # 如果是 ValueError（通常是因为 Node 返回 404 导致的），则需要抛出以终止并返回 not found；如果是其他类型的异常（网络错误、超时、解析错误等），则应该捕获并忽略，以继续返回数据库中的信息。
+            if isinstance(e, ValueError):
+                raise
+            print(f"get_container_detail_information: ignored NODE check error: {e}")
 
     # If Node returned a status payload, and it's not a 404, try to persist container_status to DB
     try:
-        if isinstance(st, dict) and st.get('status_code') != 404:
+        if st and isinstance(st, dict) and st.get('status_code') != 404:
             status_str = st.get('container_status')
             if status_str:
                 try:
@@ -683,8 +749,22 @@ def list_all_container_bref_information(machine_id:int, user_id:int, page_number
     containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=user_id)
     res = []
     for container in containers:
-        # 类似地，这里对每个容器进行一次远程状态验证，来确保 DB 中的记录是准确的。如果远程返回 404 则说明容器实际上已经不存在了，这时本地也应该删除记录并跳过这个容器。
+        # For information calls: if machine is offline or maintenance, skip node checks for containers on that machine
+        do_node_check = True
         try:
+            m = machine_repo.get_by_id(container.machine_id)
+        except Exception:
+            m = None
+        if m is not None:
+            try:
+                status_val = m.machine_status.value.lower() if hasattr(m.machine_status, 'value') else str(m.machine_status).lower()
+            except Exception:
+                status_val = str(getattr(m, 'machine_status', '')).lower()
+            if status_val in ('offline', 'maintenance'):
+                do_node_check = False
+
+        st = None
+        if do_node_check:
             try:
                 machine_ip = get_machine_ip_by_id(container.machine_id)
             except Exception:
@@ -706,7 +786,7 @@ def list_all_container_bref_information(machine_id:int, user_id:int, page_number
                 else:
                     # If Node returned a status payload (not 404), persist container_status to DB when possible
                     try:
-                        if isinstance(st, dict) and st.get('status_code') is None or st.get('status_code') != 404:
+                        if st and isinstance(st, dict) and st.get('status_code') is None or (isinstance(st, dict) and st.get('status_code') != 404):
                             status_str = st.get('container_status')
                             if status_str:
                                 try:
@@ -723,9 +803,6 @@ def list_all_container_bref_information(machine_id:int, user_id:int, page_number
                                         print(f"Warning: failed to update container status for {container.id}: {e}")
                     except Exception as e:
                         print(f"list_all_container_bref_information: ignored error while persisting status for {container.name}: {e}")
-        except Exception as e:
-            # ignore network/other errors and continue including DB entry
-            print(f"list_all_container_bref_information: ignored NODE check error for {container.name}: {e}")
 
         info = container_bref_information(
             container_id=container.id,

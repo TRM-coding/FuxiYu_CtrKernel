@@ -6,12 +6,13 @@ import requests
 
 from ..config import CommsConfig
 from ..utils.CheckKeys import signature, encryption
-from ..repositories.containers_repo import update_container
-from ..constant import ContainerStatus
+from ..repositories.containers_repo import update_container, list_containers as repo_list_containers
+from ..repositories.machine_repo import get_by_id as get_machine_by_id, update_machine
+from ..constant import ContainerStatus, MachineStatus
 from flask import current_app
 
 
-def _send_encrypted(machine_ip: str, endpoint: str, payload: dict, timeout: float = 5.0):
+def send(machine_ip: str, endpoint: str, payload: dict, timeout: float = 5.0):
     url = f"http://{machine_ip}{CommsConfig.NODE_URL_MIDDLE}{endpoint}"
     body = json.dumps(payload)
     sig = signature(body)
@@ -48,7 +49,7 @@ def container_starting_status_heartbeat(machine_ip: str, container_name: str, co
         while time.time() - start < timeout:
             print(f"Heartbeat check for container '{container_name}' at {machine_ip}...")
             payload = {"config": {"container_name": container_name}}
-            res = _send_encrypted(machine_ip, "/container_status", payload, timeout=5.0)
+            res = send(machine_ip, "/container_status", payload, timeout=5.0)
             if isinstance(res, dict) and 'container_status' in res:
                 st = res.get('container_status')
                 print(f"Received container_status: {st}")
@@ -98,7 +99,7 @@ def container_stopping_status_heartbeat(machine_ip: str, container_name: str, co
         while time.time() - start < timeout:
             print(f"Stop-heartbeat check for '{container_name}' at {machine_ip}...")
             payload = {"config": {"container_name": container_name}}
-            res = _send_encrypted(machine_ip, "/container_status", payload, timeout=5.0)
+            res = send(machine_ip, "/container_status", payload, timeout=5.0)
             if isinstance(res, dict) and 'container_status' in res:
                 st = res.get('container_status')
                 print(f"Received container_status (stop): {st}")
@@ -147,7 +148,7 @@ def container_restart_status_heartbeat(machine_ip: str, container_name: str, con
         while time.time() - start < timeout:
             print(f"Restart-heartbeat check for '{container_name}' at {machine_ip}...")
             payload = {"config": {"container_name": container_name}}
-            res = _send_encrypted(machine_ip, "/container_status", payload, timeout=5.0)
+            res = send(machine_ip, "/container_status", payload, timeout=5.0)
             if isinstance(res, dict) and 'container_status' in res:
                 st = res.get('container_status')
                 print(f"Received container_status (restart): {st}")
@@ -174,6 +175,132 @@ def container_restart_status_heartbeat(machine_ip: str, container_name: str, con
                             print(f"Error updating container status: {e}")
                     return
             time.sleep(interval)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    return t
+
+
+def start_machine_maintenance_transition_heartbeat(machine_id: int, timeout: int = 180, interval: int = 3):
+    """
+    Ctrl-side transition worker for ONLINE -> MAINTENANCE.
+    1) Send stop requests to containers on the machine.
+    2) Poll each container status and update DB until all OFFLINE (or FAILED).
+    3) Set machine status to MAINTENANCE when converged; if node unreachable, mark OFFLINE.
+    """
+    app = None
+    try:
+        app = current_app._get_current_object()
+    except RuntimeError:
+        app = None
+
+    def _db_update_machine(mid: int, status: MachineStatus):
+        try:
+            if app is not None:
+                with app.app_context():
+                    update_machine(mid, machine_status=status)
+            else:
+                update_machine(mid, machine_status=status)
+        except Exception:
+            pass
+
+    def _db_update_container(cid: int, status: ContainerStatus):
+        try:
+            if app is not None:
+                with app.app_context():
+                    update_container(cid, container_status=status)
+            else:
+                update_container(cid, container_status=status)
+        except Exception:
+            pass
+
+    def _worker():
+        start_ts = time.time()
+        while True:
+            if time.time() - start_ts > timeout:
+                break
+
+            try:
+                if app is not None:
+                    with app.app_context():
+                        m = get_machine_by_id(machine_id)
+                else:
+                    m = get_machine_by_id(machine_id)
+            except Exception:
+                m = None
+            if not m:
+                return
+
+            machine_ip = getattr(m, 'machine_ip', None)
+            if not machine_ip:
+                _db_update_machine(machine_id, MachineStatus.OFFLINE)
+                return
+
+            try:
+                if app is not None:
+                    with app.app_context():
+                        containers = repo_list_containers(limit=10000, offset=0, machine_id=machine_id)
+                else:
+                    containers = repo_list_containers(limit=10000, offset=0, machine_id=machine_id)
+            except Exception:
+                containers = []
+
+            if not containers:
+                _db_update_machine(machine_id, MachineStatus.MAINTENANCE)
+                return
+
+            # send stop command best-effort to non-offline containers
+            for c in containers:
+                c_status = c.container_status.value if hasattr(c.container_status, 'value') else str(c.container_status)
+                if str(c_status).lower() == ContainerStatus.OFFLINE.value:
+                    continue
+                send(machine_ip, "/stop_container", {"config": {"container_name": c.name}}, timeout=3.0)
+                _db_update_container(c.id, ContainerStatus.STOPPING)
+
+            # poll statuses
+            all_done = True
+            for c in containers:
+                res = send(machine_ip, "/container_status", {"config": {"container_name": c.name}}, timeout=3.0)
+                if isinstance(res, dict) and res.get('status_code') == 404:
+                    _db_update_container(c.id, ContainerStatus.OFFLINE)
+                    continue
+                if isinstance(res, dict) and res.get('error'):
+                    all_done = False
+                    continue
+                st = (res.get('container_status') if isinstance(res, dict) else None) or ''
+                st = str(st).lower()
+                if st == ContainerStatus.OFFLINE.value:
+                    _db_update_container(c.id, ContainerStatus.OFFLINE)
+                elif st == ContainerStatus.FAILED.value:
+                    _db_update_container(c.id, ContainerStatus.FAILED)
+                else:
+                    all_done = False
+
+            if all_done:
+                _db_update_machine(machine_id, MachineStatus.MAINTENANCE)
+                return
+
+            time.sleep(interval)
+
+        # timeout fallback
+        m2 = None
+        try:
+            if app is not None:
+                with app.app_context():
+                    m2 = get_machine_by_id(machine_id)
+            else:
+                m2 = get_machine_by_id(machine_id)
+        except Exception:
+            m2 = None
+
+        machine_ip = getattr(m2, 'machine_ip', None) if m2 else None
+        if not machine_ip:
+            _db_update_machine(machine_id, MachineStatus.OFFLINE)
+            return
+        check = send(machine_ip, "/machine_status", {"config": {}}, timeout=2.0)
+        ms = (check.get('machine_status') if isinstance(check, dict) else '') or ''
+        ok = isinstance(check, dict) and check.get('success') in (1, True) and str(ms).lower() == MachineStatus.ONLINE.value
+        _db_update_machine(machine_id, MachineStatus.MAINTENANCE if ok else MachineStatus.OFFLINE)
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
