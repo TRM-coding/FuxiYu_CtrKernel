@@ -22,6 +22,7 @@ def add_machine_api():
         "gpu_number",
         "gpu_type",
         "memory_size",
+        "max_swap_gb",
         "disk_size"
     }
     返回格式：
@@ -44,6 +45,7 @@ def add_machine_api():
     gpu_number = data.get("gpu_number", 0)
     gpu_type = data.get("gpu_type", "")
     memory_size = data.get("memory_size", 0)
+    swap_size = data.get("max_swap_gb", 2)  # 默认值为2GB
     disk_size = data.get("disk_size", 0)
     try: # 仅仅是防御性质的措施
         success = machine_service.Add_machine(machine_name=machine_name,
@@ -54,17 +56,21 @@ def add_machine_api():
                                             gpu_number=gpu_number,
                                             gpu_type=gpu_type,
                                             memory_size=memory_size,
+                                            swap_size=swap_size,
                                             disk_size=disk_size)
     except IntegrityError as ie:
         # likely duplicate unique constraint (e.g. machine_name)
         return jsonify({"success": 0, "message": f"Duplicate entry: {str(ie.orig) if hasattr(ie, 'orig') else str(ie)}", "error_reason": "duplicate_entry"}), 409
     except Exception as e:
+        err_reason = getattr(e, 'error_reason', None)
+        if err_reason:
+            return jsonify({"success": 0, "message": str(e), "error_reason": err_reason}), 422
         return jsonify({"success": 0, "message": f"Internal error: {str(e)}", "error_reason": "internal_error"}), 500
 
     if success:
-        return jsonify({"success": 1, "message": "Container created successfully"}), 201
+        return jsonify({"success": 1, "message": "Machine created successfully"}), 201
     else:
-        return jsonify({"success": 0, "message": "Failed to create container", "error_reason": "create_failed"}), 500
+        return jsonify({"success": 0, "message": "Failed to create machine", "error_reason": "create_failed"}), 500
     
 @api_bp.post("/machines/remove_machine")
 def remove_machine_api():
@@ -128,10 +134,16 @@ def update_machine_api():
     if (not user_repo.check_permission(request.headers.get("token", ""), required_permission=PERMISSION.OPERATOR)):
         return jsonify({"success": 0, "message": "insufficient permissions", "error_reason": "insufficient_permission"}), 403
     data = request.get_json() or {}
-    data = request.get_json() or {}
     machine_id = data.get("machine_id", 0)
     fields = data.get("fields", {})
-    success = machine_service.Update_machine(machine_id=machine_id, **fields)
+    try:
+        success = machine_service.Update_machine(machine_id=machine_id, **fields)
+    except Exception as e:
+        err_reason = getattr(e, 'error_reason', None)
+        if err_reason:
+            return jsonify({"success": 0, "message": str(e), "error_reason": err_reason}), 422
+        return jsonify({"success": 0, "message": f"Internal error: {str(e)}", "error_reason": "internal_error"}), 500
+
     if success:
         return jsonify({"success": 1, "message": "Machine updated successfully"}), 200
     else:
@@ -169,6 +181,7 @@ def get_detail_information_api():
             "gpu_number": machine_info.gpu_number,
             "gpu_type": machine_info.gpu_type,
             "memory_size_gb": machine_info.memory_size_gb,
+            "max_swap_gb": getattr(machine_info, 'max_swap_gb', None),
             "disk_size_gb": machine_info.disk_size_gb,
             "containers": machine_info.containers
         }), 200

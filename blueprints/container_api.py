@@ -51,18 +51,20 @@ def create_container_api():
         }
 
     public_key = data.get("public_key", None)
-    if public_key is '':  # treat empty string as None
+    if public_key == '':  # treat empty string as None
         public_key = None
     # 这里纯粹只是为了增加报错信息的友好性
     try:
         gpu_list = container_raw.get("GPU_LIST") or container_raw.get("gpu_list") or []
         cpu_number = int(container_raw.get("CPU_NUMBER") or container_raw.get("cpu_number") or 0)
         memory = int(container_raw.get("MEMORY") or container_raw.get("memory") or 0)
+        # support swap memory in GB: keys can be SWAP_MEM, swap_memory, or SWAP_MEMORY
+        swap_memory = int(container_raw.get("SWAP_MEM") or container_raw.get("swap_memory") or container_raw.get("SWAP_MEMORY") or 0)
         name = container_raw.get("NAME") or container_raw.get("name") or ""
         image = container_raw.get("image") or container_raw.get("IMAGE") or ""
 
         # construct Container_info instance expected by service layer
-        container_obj = Container_info(gpu_list=gpu_list, cpu_number=cpu_number, memory=memory, name=name, image=image)
+        container_obj = Container_info(gpu_list=gpu_list, cpu_number=cpu_number, memory=memory, name=name, image=image, swap_memory=swap_memory)
 
     except Exception as e:
         return jsonify({"success": 0, "message": f"Invalid container payload: {str(e)}", "error_reason": "invalid_payload"}), 400

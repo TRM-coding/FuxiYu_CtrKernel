@@ -11,6 +11,7 @@ from ..config import CommsConfig
 from ..constant import *
 from sqlalchemy.exc import IntegrityError
 from ..repositories import containers_repo, machine_repo
+from ..repositories import containers_repo as container_repo
 from .machine_tasks import is_machine_online_remote
 from ..repositories.machine_repo import *
 from ..repositories.user_repo import *
@@ -189,6 +190,31 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
 
     free_port = get_the_first_free_port(machine_id=machine_id)
     container.set_port(free_port)
+    
+
+    ### 参数检查 (delegated to repositories.container_repo helpers) ###
+    # 存在性检查
+    print(f"DEBUG: ensuring machine {machine_id} exists for container {container.NAME}")
+    machine = container_repo.ensure_machine_exists(machine_id)
+    # GPU 参数检查 
+    print(f"DEBUG: validating GPU request for machine {machine_id} and container {container.NAME}")
+    container_repo.validate_gpu_request(machine, container)
+    # swap 参数检查
+    print(f"DEBUG: validating swap request for machine {machine_id} and container {container.NAME}")
+    requested_swap = container_repo.validate_swap_request(machine, container)
+    # cpu 参数检查
+    print(f"DEBUG: validating CPU request for machine {machine_id} and container {container.NAME}")
+    requested_cpus = container_repo.validate_cpu_request(machine, container)
+    # memory 参数检查
+    print(f"DEBUG: validating memory request for machine {machine_id} and container {container.NAME}")
+    requested_memory = container_repo.validate_memory_request(machine, container)
+    # name/image/public_key length and format checks
+    container_repo.validate_names_and_lengths(container, public_key)
+    # duplicate name check (may raise IntegrityError)
+    container_repo.check_duplicate_container_name(container_name=container.NAME, machine_id=machine_id)
+
+    ### container构建 ###
+
     container_info=dict()
     container_info['owner_name']=owner_name
     container_info['config']=container.get_config()
