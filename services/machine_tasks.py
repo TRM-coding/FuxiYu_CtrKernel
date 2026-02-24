@@ -94,8 +94,58 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
 
 #######################################
 # 获取一批机器的概要信息
-def List_all_machine_bref_information(page_number:int, page_size:int)->tuple[list[machine_bref_information], int]:
-    machines = list_machines(limit=page_size, offset=page_number*page_size)
+def List_all_machine_bref_information(
+    page_number: int, 
+    page_size: int,
+    machine_name_prefix: str = None,  # 新增：按机器名称前缀过滤
+    sort_by: str = "id",              # 新增：排序字段
+    sort_order: str = "asc"           # 新增：排序方向（asc/desc）
+) -> tuple[list[machine_bref_information], int]:
+    """
+    获取机器概要信息列表，支持分页、过滤和排序
+    
+    Args:
+        page_number: 页码（从0开始）
+        page_size: 每页条数
+        machine_name_prefix: 机器名称前缀（用于过滤，如 "test_machine_"）
+        sort_by: 排序字段（默认 "id"，支持 "machine_name"、"machine_ip" 等）
+        sort_order: 排序方向（"asc" 升序，"desc" 降序）
+    
+    Returns:
+        tuple: (机器概要信息列表, 总页数)
+    """
+    # 1. 构建查询条件
+    query_filters = {}
+    if machine_name_prefix:
+        # 按名称前缀过滤（关键：解决测试数据和原有数据混合的问题）
+        machines_query = Machine.query.filter(Machine.machine_name.like(f"{machine_name_prefix}%"))
+    else:
+        machines_query = Machine.query
+    
+    # 2. 设置排序规则（关键：确保分页结果可预测）
+    if sort_by == "id":
+        if sort_order == "asc":
+            machines_query = machines_query.order_by(Machine.id.asc())
+        else:
+            machines_query = machines_query.order_by(Machine.id.desc())
+    elif sort_by == "machine_name":
+        if sort_order == "asc":
+            machines_query = machines_query.order_by(Machine.machine_name.asc())
+        else:
+            machines_query = machines_query.order_by(Machine.machine_name.desc())
+    elif sort_by == "machine_ip":
+        if sort_order == "asc":
+            machines_query = machines_query.order_by(Machine.machine_ip.asc())
+        else:
+            machines_query = machines_query.order_by(Machine.machine_ip.desc())
+    
+    # 3. 执行分页查询
+    # 先计算符合过滤条件的总数量（而非全量机器）
+    total_count = machines_query.count()
+    # 分页查询（offset从0开始）
+    machines = machines_query.limit(page_size).offset(page_number * page_size).all()
+    
+    # 4. 组装返回结果
     res = []
     for machine in machines:
         info = machine_bref_information(
@@ -106,9 +156,10 @@ def List_all_machine_bref_information(page_number:int, page_size:int)->tuple[lis
             machine_status=machine.machine_status.value
         )
         res.append(info)
-    # 这里增加了总数字段 方便分页器判断显示多少
-    total_count = count_machines()
+    
+    # 计算总页数（基于过滤后的数量）
     total_pages = (total_count + page_size - 1) // page_size if page_size > 0 else 0
+    
     return res, total_pages
 #######################################
 
