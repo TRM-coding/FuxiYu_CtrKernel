@@ -5,3 +5,4 @@
 certs/*.pem
 certs/*-key.pem
 certs/*.key
+output.log

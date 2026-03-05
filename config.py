@@ -18,7 +18,7 @@ class KeyConfig:
     PUBLIC_KEY_NODE='public_node.pem'
 
 class CommsConfig:
-    NODE_URL_MIDDLE=':5001/api'
+    NODE_URL_MIDDLE=':5789/api'
 
 class CORSHeaderConfig:
     # Allow both localhost and 127.0.0.1 origins used in development
