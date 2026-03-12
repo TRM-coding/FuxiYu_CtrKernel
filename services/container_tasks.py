@@ -199,25 +199,39 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
     
 
     ### 参数检查 (delegated to repositories.container_repo helpers) ###
-    # 存在性检查
-    print(f"DEBUG: ensuring machine {machine_id} exists for container {container.NAME}")
-    machine = container_repo.ensure_machine_exists(machine_id)
-    # GPU 参数检查 
-    print(f"DEBUG: validating GPU request for machine {machine_id} and container {container.NAME}")
-    container_repo.validate_gpu_request(machine, container)
-    # swap 参数检查
-    print(f"DEBUG: validating swap request for machine {machine_id} and container {container.NAME}")
-    requested_swap = container_repo.validate_swap_request(machine, container)
-    # cpu 参数检查
-    print(f"DEBUG: validating CPU request for machine {machine_id} and container {container.NAME}")
-    requested_cpus = container_repo.validate_cpu_request(machine, container)
-    # memory 参数检查
-    print(f"DEBUG: validating memory request for machine {machine_id} and container {container.NAME}")
-    requested_memory = container_repo.validate_memory_request(machine, container)
-    # name/image/public_key length and format checks
-    container_repo.validate_names_and_lengths(container, public_key)
-    # duplicate name check (may raise IntegrityError)
-    container_repo.check_duplicate_container_name(container_name=container.NAME, machine_id=machine_id)
+    try:
+        # 存在性检查
+        print(f"DEBUG: ensuring machine {machine_id} exists for container {container.NAME}")
+        machine = container_repo.ensure_machine_exists(machine_id)
+        # GPU 参数检查 
+        print(f"DEBUG: validating GPU request for machine {machine_id} and container {container.NAME}")
+        container_repo.validate_gpu_request(machine, container)
+        # swap 参数检查
+        print(f"DEBUG: validating swap request for machine {machine_id} and container {container.NAME}")
+        requested_swap = container_repo.validate_swap_request(machine, container)
+        # cpu 参数检查
+        print(f"DEBUG: validating CPU request for machine {machine_id} and container {container.NAME}")
+        requested_cpus = container_repo.validate_cpu_request(machine, container)
+        # memory 参数检查
+        print(f"DEBUG: validating memory request for machine {machine_id} and container {container.NAME}")
+        requested_memory = container_repo.validate_memory_request(machine, container)
+        # name/image/public_key length and format checks
+        container_repo.validate_names_and_lengths(container, public_key)
+        # duplicate name check (may raise IntegrityError)
+        container_repo.check_duplicate_container_name(container_name=container.NAME, machine_id=machine_id)
+    except IntegrityError:
+        # let DB integrity errors bubble up as-is so callers (blueprints) can handle duplicate entries
+        raise
+    except Exception as e:
+        # preserve any repository-provided error_reason if present
+        reason = getattr(e, 'error_reason', None)
+        if reason:
+            raise NodeServiceError(str(e), reason=reason)
+        # ValueError generally indicates invalid payload/params from client
+        if isinstance(e, ValueError):
+            raise NodeServiceError(str(e), reason='invalid_payload')
+        # fallback: treat as invalid_config if it's a validation-like issue, else unexpected_response
+        raise NodeServiceError(str(e), reason='invalid_config')
 
     ### container构建 ###
 

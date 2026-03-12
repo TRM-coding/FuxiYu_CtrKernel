@@ -40,7 +40,7 @@ def count_containers(machine_id: int | None = None) -> int:
 
 
 def create_container(name: str, image: str, machine_id: int, memory_gb: int, swap_gb: int, gpu_number: int, cpu_number: int, port:int,status=None) -> Container:
-	container = Container(name=name, image=image, machine_id=machine_id, port=port)
+	container = Container(name=name, image=image, machine_id=machine_id, memory_gb=memory_gb, swap_gb=swap_gb, gpu_number=gpu_number, cpu_number=cpu_number, port=port)
 	if status is not None:
 		container.container_status = status
 	db.session.add(container)

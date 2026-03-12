@@ -7,6 +7,25 @@ from ..constant import ROLE
 from ..repositories import containers_repo, authentications_repo
 from ..schemas.user_schema import user_schema, users_schema
 
+# map known error_reason strings to HTTP status codes so we can surface them to clients
+REASON_STATUS_MAP = {
+    'container_exists': 409,
+    'invalid_payload': 400,
+    'invalid_signature': 401,
+    'invalid_json': 400,
+    'invalid_config': 400,
+    'docker_init_failed': 502,
+    'docker_check_failed': 502,
+    'unexpected_response': 502,
+    'not_found': 404,
+    'duplicate_entry': 409,
+    'create_failed': 500,
+    'delete_failed': 500,
+    'start_failed': 500,
+    'stop_failed': 500,
+    'restart_failed': 500,
+    'container_offline': 400,
+}
 @api_bp.post("/containers/create_container")
 def create_container_api():
     '''
@@ -91,8 +110,14 @@ def create_container_api():
     except container_service.NodeServiceError as e:
         status = reason_map.get(getattr(e, 'reason', None), 500)
         return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), status
-    except Exception as e: 
-        return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
+    except Exception as e:
+        # try to preserve any error_reason set on lower-level exceptions
+        reason = getattr(e, 'reason', None) or getattr(e, 'error_reason', None)
+        status = REASON_STATUS_MAP.get(reason, 500)
+        payload = {"success": 0, "message": f"Internal error: {str(e)}"}
+        if reason:
+            payload['error_reason'] = reason
+        return jsonify(payload), status
     return jsonify({"success": 1, "message": "Create container request sent"}), 200
     
     
@@ -124,7 +149,12 @@ def delete_container_api():
         status = 404 if getattr(e, 'reason', None) == 'not_found' else 500
         return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), status
     except Exception as e:
-        return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
+        reason = getattr(e, 'reason', None) or getattr(e, 'error_reason', None)
+        status = REASON_STATUS_MAP.get(reason, 500)
+        payload = {"success": 0, "message": f"Internal error: {str(e)}"}
+        if reason:
+            payload['error_reason'] = reason
+        return jsonify(payload), status
     return jsonify({"success": 1, "message": "Container deleted successfully"}), 200
 
 
@@ -145,7 +175,12 @@ def start_container_api():
         # propagate known node errors
         return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), 500
     except Exception as e:
-        return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
+        reason = getattr(e, 'reason', None) or getattr(e, 'error_reason', None)
+        status = REASON_STATUS_MAP.get(reason, 500)
+        payload = {"success": 0, "message": f"Internal error: {str(e)}"}
+        if reason:
+            payload['error_reason'] = reason
+        return jsonify(payload), status
     return jsonify({"success": 1, "message": "Container start request sent"}), 200
 
 
@@ -165,7 +200,12 @@ def stop_container_api():
     except container_service.NodeServiceError as e:
         return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), 500
     except Exception as e:
-        return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
+        reason = getattr(e, 'reason', None) or getattr(e, 'error_reason', None)
+        status = REASON_STATUS_MAP.get(reason, 500)
+        payload = {"success": 0, "message": f"Internal error: {str(e)}"}
+        if reason:
+            payload['error_reason'] = reason
+        return jsonify(payload), status
     return jsonify({"success": 1, "message": "Container stop request sent"}), 200
 
 
@@ -185,7 +225,12 @@ def restart_container_api():
     except container_service.NodeServiceError as e:
         return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), 500
     except Exception as e:
-        return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
+        reason = getattr(e, 'reason', None) or getattr(e, 'error_reason', None)
+        status = REASON_STATUS_MAP.get(reason, 500)
+        payload = {"success": 0, "message": f"Internal error: {str(e)}"}
+        if reason:
+            payload['error_reason'] = reason
+        return jsonify(payload), status
     return jsonify({"success": 1, "message": "Container restart request sent"}), 200
 
 @api_bp.post("/containers/add_collaborator")
@@ -439,7 +484,10 @@ def list_all_containers_bref_information_api():
         containers_info = result.get('containers', [])
         total_page = result.get('total_page', 1)
     except Exception as e:
-        return jsonify({"success":0,"message":"Failed to list containers", "error_reason": "list_failed"}),500
+        reason = getattr(e, 'reason', None) or getattr(e, 'error_reason', None) or 'list_failed'
+        status = REASON_STATUS_MAP.get(reason, 500)
+        payload = {"success":0,"message":"Failed to list containers", "error_reason": reason}
+        return jsonify(payload), status
 
     # convert pydantic models to plain dicts so jsonify can serialize
     out = []
