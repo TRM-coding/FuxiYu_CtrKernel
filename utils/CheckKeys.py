@@ -4,7 +4,10 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from ..config import KeyConfig
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import json
+import base64
+import os
 # 加载公钥和私钥，返回公钥和私钥对象
 def load_keys(private_key_path:str,pub_key_path:str,pub_key_node_path)->tuple[RSAPrivateKey,RSAPublicKey,RSAPublicKey]:
     with open(private_key_path, "rb") as f:
@@ -48,16 +51,28 @@ def write_keys(path:str,key):
 
 #加密信息
 def encryption(message:str)->bytes:
-    _,_,PUBLIC_KEY_B=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH)
+    # Hybrid encryption: AES-GCM for message, RSA-OAEP to encrypt AES key
+    _,_,PUBLIC_KEY_B = load_keys(KeyConfig.PRIVATE_KEY_PATH, KeyConfig.PUBLIC_KEY_PATH, KeyConfig.PUBLIC_KEY_PATH)
     if isinstance(message, str):
         message = message.encode('utf-8')
-    ciphertext = PUBLIC_KEY_B.encrypt(
-        message,
+    # generate AES key
+    aes_key = AESGCM.generate_key(bit_length=128)
+    aesgcm = AESGCM(aes_key)
+    nonce = os.urandom(12)
+    ciphertext = aesgcm.encrypt(nonce, message, None)
+    # encrypt aes_key with RSA
+    enc_key = PUBLIC_KEY_B.encrypt(
+        aes_key,
         padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                    algorithm=hashes.SHA256(),
-                    label=None)
+                     algorithm=hashes.SHA256(),
+                     label=None)
     )
-    return ciphertext
+    payload = {
+        "enc_key": base64.b64encode(enc_key).decode('utf-8'),
+        "nonce": base64.b64encode(nonce).decode('utf-8'),
+        "ciphertext": base64.b64encode(ciphertext).decode('utf-8')
+    }
+    return json.dumps(payload).encode('utf-8')
 
 #签名信息
 def signature(message:str)->bytes:
@@ -75,13 +90,35 @@ def signature(message:str)->bytes:
 #解密信息
 def decryption(ciphertext:bytes)->bytes:
     PRIVATE_KEY_A,_,_=load_keys(KeyConfig.PRIVATE_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH,KeyConfig.PUBLIC_KEY_PATH)
-    plaintext = PRIVATE_KEY_A.decrypt(
-        ciphertext,
-        padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                    algorithm=hashes.SHA256(),
-                    label=None)
-    )
-    return plaintext
+    # Try hybrid format (JSON with enc_key/nonce/ciphertext)
+    try:
+        raw = ciphertext.decode('utf-8')
+        payload = json.loads(raw)
+        enc_key = base64.b64decode(payload.get('enc_key'))
+        nonce = base64.b64decode(payload.get('nonce'))
+        ct = base64.b64decode(payload.get('ciphertext'))
+        # decrypt AES key
+        aes_key = PRIVATE_KEY_A.decrypt(
+            enc_key,
+            padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                         algorithm=hashes.SHA256(),
+                         label=None)
+        )
+        aesgcm = AESGCM(aes_key)
+        plaintext = aesgcm.decrypt(nonce, ct, None)
+        return plaintext
+    except Exception:
+        # fallback: try legacy RSA decrypt (for backward compatibility)
+        try:
+            plaintext = PRIVATE_KEY_A.decrypt(
+                ciphertext,
+                padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                            algorithm=hashes.SHA256(),
+                            label=None)
+            )
+            return plaintext
+        except Exception as e:
+            raise
 
 #验证签名
 def verify_signature(message:bytes, signature:bytes)->bool:
