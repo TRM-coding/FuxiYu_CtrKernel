@@ -23,6 +23,11 @@ class Container(db.Model):
     )
     port: int = db.Column(db.Integer, nullable=False, index=True)
 
+    memory_gb: int = db.Column(db.Integer, nullable=False)
+    swap_gb: int = db.Column(db.Integer, nullable=False)
+    gpu_number: int = db.Column(db.Integer, nullable=False)
+    cpu_number: int = db.Column(db.Integer, nullable=False)
+
     users = db.relationship(
         "User",
         secondary="user_container",

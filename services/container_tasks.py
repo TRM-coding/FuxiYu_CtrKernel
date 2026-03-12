@@ -160,6 +160,7 @@ class container_bref_information(BaseModel):
     container_id: int # 加入这个 只是为了方便调取详细信息
     container_name:str
     machine_id:int
+    machine_ip:str
     port:int
     container_status:str
 
@@ -167,8 +168,13 @@ class container_detail_information(BaseModel):
     container_id: int # 与上方结构对称
     container_name:str
     container_image:str
+    machine_id:int
     machine_ip:str
     container_status:str
+    memory_gb:int
+    swap_gb:int
+    gpu_number:int
+    cpu_number:int
     port:int 
     owners:list[str]
     accounts:list[(str,ROLE)]
@@ -276,13 +282,19 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
     else:
         Key=True
     
-    
+    gpu_list = getattr(container, 'GPU_LIST', None)
+    gpu_count = len(gpu_list) if gpu_list else 0
     # 写入容器记录 
     create_container(name=container.NAME,
                      image=container.image,
                      machine_id=machine_id,
-                     status=ContainerStatus.CREATING,
-                     port=free_port)
+                     memory_gb=container.MEMORY,
+                     swap_gb=requested_swap,
+                     gpu_number=gpu_count,
+                     cpu_number=container.CPU_NUMBER,
+                     port=free_port,
+                     status=ContainerStatus.CREATING
+                     )
 
     # 建立用户绑定（包含必须的 role/username/public_key）
     container_id=get_id_by_name_machine(container_name=container.NAME, machine_id=machine_id)
@@ -691,7 +703,8 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         raise ValueError("Container not found")
     # 这个状态查询主要是为了验证容器是否真的存在于 Node 上，如果 Node 返回 404 则说明容器实际上已经不存在了，这时本地也应该删除记录并返回 not found 错误
     # 这个方法不处理从未放入数据库的容器（因为它们不应该有 container_id），也不处理网络/其他错误（因为它们不应该阻止返回数据库中的信息）。
-    # 这里先检查机器状态，如果机器离线或维护中，则跳过 Node 检查直接返回数据库内容；如果机器在线，则进行 Node 检查以验证容器状态并尝试更新数据库中的状态信息。无论如何，如果 Node 检查失败（网络错误、超时等），都应该忽略错误并继续返回数据库内容，而不是阻止整个请求失败。
+    # 这里先检查机器状态，如果机器离线或维护中，则跳过 Node 检查直接返回数据库内容；如果机器在线，则进行 Node 检查以验证容器状态并尝试更新数据库中的状态信息。
+    # 无论如何，如果 Node 检查失败（网络错误、超时等），都应该忽略错误并继续返回数据库内容，而不是阻止整个请求失败。
     try:
         m = machine_repo.get_by_id(container.machine_id)
     except Exception:
@@ -754,7 +767,12 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         "container_name": container.name,
         "container_image": container.image,
         "machine_id": container.machine_id,
+        "machine_ip": get_machine_ip_by_id(container.machine_id),
         "container_status": container.container_status.value,
+        "memory_gb": container.memory_gb,
+        "swap_gb": container.swap_gb,
+        "gpu_number": container.gpu_number,
+        "cpu_number": container.cpu_number,
         "port": container.port,
         # 备忘：owners才是系统对应的用户名列表
         "owners": [get_name_by_id(binding['user_id']) for binding in owener_bindings],
@@ -834,6 +852,7 @@ def list_all_container_bref_information(machine_id:int, user_id:int, page_number
             container_id=container.id,
             container_name=container.name,
             machine_id=container.machine_id,
+            machine_ip=machine_ip,
             port=container.port,
             container_status=container.container_status.value
         )

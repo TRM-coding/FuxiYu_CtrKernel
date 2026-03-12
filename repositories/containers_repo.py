@@ -39,7 +39,7 @@ def count_containers(machine_id: int | None = None) -> int:
     return q.count()
 
 
-def create_container(name: str, image: str, machine_id: int, port:int,status=None) -> Container:
+def create_container(name: str, image: str, machine_id: int, memory_gb: int, swap_gb: int, gpu_number: int, cpu_number: int, port:int,status=None) -> Container:
 	container = Container(name=name, image=image, machine_id=machine_id, port=port)
 	if status is not None:
 		container.container_status = status
