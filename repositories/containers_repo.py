@@ -112,7 +112,7 @@ def list_users_in_container(container_id: int) -> Sequence[User]:
 		return []
 	return list(container.users)
 
-
+############################################################
 # 用于检测各项指标 判定容器是否可以创建
 def ensure_machine_exists(machine_id: int) -> Any:
 	"""Return machine object or raise ValueError with error_reason."""
@@ -130,6 +130,7 @@ def ensure_machine_exists(machine_id: int) -> Any:
 def validate_gpu_request(machine: Machine, container: Container_info) -> None:
 	print(f"DEBUG: validating GPU request for machine {machine.id} and container {container.NAME}")
 	
+	# 从机器获得 max_gpu_number 字段，作为 GPU 数量的上限。
 	max_gpu = int(get_max_gpu_number(machine.id) or 0)
 	try:
 		gl = getattr(container, 'GPU_LIST', []) or []
@@ -171,6 +172,8 @@ def validate_swap_request(machine: Machine, container: Container_info) -> int:
 		err = ValueError(f"swap_memory must be an integer: {getattr(container, 'SWAP_MEMORY', None)}")
 		setattr(err, 'error_reason', 'invalid_config')
 		raise err
+	
+	# 从机器的配置里取 max_swap_gb 字段
 	machine_max_swap = int(get_max_swap_gb(machine.id) or 0)
 	if requested_swap < 0 or requested_swap > machine_max_swap:
 		err = ValueError(f"Requested swap_memory {requested_swap}GB out of allowed range (0-{machine_max_swap} GB)")
@@ -187,6 +190,7 @@ def validate_cpu_request(machine: Machine, container: Container_info) -> int:
 		setattr(err, 'error_reason', 'invalid_config')
 		raise err
 
+	# 从机器的配置里取 max_cpu_core_number 字段，如果没有就用 cpu_core_number 作为 fallback
 	machine_max_cpus = int(get_max_cpu_core_number(machine.id) or 0)
 
 	if requested_cpus <= 0:
@@ -208,6 +212,7 @@ def validate_memory_request(machine: Machine, container: Container_info) -> int:
 		setattr(err, 'error_reason', 'invalid_config')
 		raise err
 
+	# 从机器的配置里取 max_memory_gb 字段，如果没有就用 memory_size_gb 作为 fallback
 	machine_memory_gb = int(get_max_memory_gb(machine.id) or 0)
 
 	if requested_memory <= 0:
@@ -247,3 +252,4 @@ def check_duplicate_container_name(container_name: str, machine_id: int) -> None
 		# Log and ignore DB lookup errors at validation level
 		return
 
+###############################

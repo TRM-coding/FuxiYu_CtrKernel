@@ -20,6 +20,9 @@ class Machine(db.Model):
     max_swap_gb: int = db.Column(db.Integer, nullable=False, default=2)
     disk_size_gb: int = db.Column(db.Integer, nullable=True)
     machine_description: str = db.Column(db.String(500), nullable=True)
+    max_memory_gb: int = db.Column(db.Integer, nullable=True) 
+    max_gpu_number: int = db.Column(db.Integer, nullable=True)
+    max_cpu_core_number: int = db.Column(db.Integer, nullable=True)
     # 与 Container 的一对多关系（containers 表里有 machine_id 外键）
     containers = db.relationship(
         "Container", back_populates="machine", cascade="all, delete-orphan"

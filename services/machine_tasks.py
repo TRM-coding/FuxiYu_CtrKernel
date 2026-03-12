@@ -23,6 +23,9 @@ class machine_detail_information(BaseModel):
     gpu_type: Optional[str] # 部分sql数据会出现此字段是NULL的情况，因此暂时用这个方法解决
     memory_size_gb:int
     max_swap_gb:int
+    max_cpu_core_number:int
+    max_gpu_number:int
+    max_memory_gb:int
     disk_size_gb:int
     machine_description:str
     containers:list[int] #容器id
@@ -64,8 +67,11 @@ def Add_machine(machine_name:str,
                    gpu_number:int,
                    gpu_type:str,
                    memory_size:int,
-                   swap_size:int,
-                   disk_size:int)->bool:
+                   max_swap_size:int,
+                   disk_size:int,
+                   max_memory_gb:int,
+                   max_gpu_number:int,
+                   max_cpu_core_number:int)->bool:
     # 防御性检查：限制字段长度，防止过长输入导致数据库异常
     if machine_name and len(machine_name) > 115:
         raise ValueError(f"machine_name too long (max 115): length={len(machine_name)}")
@@ -74,12 +80,12 @@ def Add_machine(machine_name:str,
     if machine_type and len(str(machine_type)) > 255:
         raise ValueError(f"machine_type too long (max 255): length={len(str(machine_type))}")
 
-    # swap_size defensive check: must be non-negative integer and <= 8 (GB)
-    if swap_size is not None:
+    # max_swap_size defensive check: must be non-negative integer and <= 8 (GB)
+    if max_swap_size is not None:
         try:
-            ss = int(swap_size)
+            ss = int(max_swap_size)
         except Exception:
-            e = ValueError(f"swap_size must be an integer: {swap_size}")
+            e = ValueError(f"max_swap_size must be an integer: {max_swap_size}")
             setattr(e, 'error_reason', 'create_failed')
             raise e
         if ss < 0 or ss > 8:
@@ -96,8 +102,11 @@ def Add_machine(machine_name:str,
          gpu_number=gpu_number,
          gpu_type=gpu_type,
          memory_size=memory_size,
-         swap_size=swap_size,
-         disk_size=disk_size
+         max_swap_size=max_swap_size,
+         disk_size=disk_size,
+         max_memory_gb=max_memory_gb,
+         max_gpu_number=max_gpu_number,
+         max_cpu_core_number=max_cpu_core_number
     )
     return True
 
@@ -168,7 +177,10 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
         gpu_number=machine.gpu_number,
         gpu_type=machine.gpu_type,
         memory_size_gb=machine.memory_size_gb,
-        max_swap_gb=getattr(machine, 'max_swap_gb', getattr(machine, 'swap_size_gb', 2)),
+        max_swap_gb=machine.max_swap_gb,
+        max_cpu_core_number=machine.max_cpu_core_number,
+        max_gpu_number=machine.max_gpu_number,
+        max_memory_gb=machine.max_memory_gb,
         disk_size_gb=machine.disk_size_gb,
         machine_description=machine.machine_description,
         containers=[container.id for container in machine.containers]

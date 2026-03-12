@@ -23,6 +23,9 @@ def add_machine_api():
         "gpu_type",
         "memory_size",
         "max_swap_gb",
+        "max_memory_gb",
+        "max_gpu_number",
+        "max_cpu_core_number",
         "disk_size"
     }
     返回格式：
@@ -45,7 +48,10 @@ def add_machine_api():
     gpu_number = data.get("gpu_number", 0)
     gpu_type = data.get("gpu_type", "")
     memory_size = data.get("memory_size", 0)
-    swap_size = data.get("max_swap_gb", 2)  # 默认值为2GB
+    max_swap_size = data.get("max_swap_gb", 2)  # 默认值为2GB
+    max_memory_gb = data.get("max_memory_gb", 0)
+    max_gpu_number = data.get("max_gpu_number", 0)
+    max_cpu_core_number = data.get("max_cpu_core_number", 0)
     disk_size = data.get("disk_size", 0)
     try: # 仅仅是防御性质的措施
         success = machine_service.Add_machine(machine_name=machine_name,
@@ -56,8 +62,11 @@ def add_machine_api():
                                             gpu_number=gpu_number,
                                             gpu_type=gpu_type,
                                             memory_size=memory_size,
-                                            swap_size=swap_size,
-                                            disk_size=disk_size)
+                                            max_swap_size=max_swap_size,
+                                            disk_size=disk_size,
+                                            max_memory_gb=max_memory_gb,
+                                            max_gpu_number=max_gpu_number,
+                                            max_cpu_core_number=max_cpu_core_number)
     except IntegrityError as ie:
         # likely duplicate unique constraint (e.g. machine_name)
         return jsonify({"success": 0, "message": f"Duplicate entry: {str(ie.orig) if hasattr(ie, 'orig') else str(ie)}", "error_reason": "duplicate_entry"}), 409
@@ -104,7 +113,7 @@ def remove_machine_api():
 def update_machine_api():
     '''
     allowed = {"machine_name", "machine_ip", "machine_type", "machine_status", "cpu_core_number",
-               "memory_size", "gpu_number", "gpu_type", "disk_size", "machine_description"}
+               "memory_size", "gpu_number", "gpu_type", "disk_size", "machine_description", "max_swap_gb", "max_memory_gb", "max_gpu_number", "max_cpu_core_number"}
 
     通信数据格式：
 	发送格式：
@@ -120,6 +129,10 @@ def update_machine_api():
         "gpu_type",
         "memory_size",
         "disk_size",
+        "max_swap_gb",
+        "max_memory_gb",
+        "max_gpu_number",
+        "max_cpu_core_number",
         "machine_description"
     }
     返回格式：
@@ -181,7 +194,10 @@ def get_detail_information_api():
             "gpu_number": machine_info.gpu_number,
             "gpu_type": machine_info.gpu_type,
             "memory_size_gb": machine_info.memory_size_gb,
-            "max_swap_gb": getattr(machine_info, 'max_swap_gb', None),
+            "max_swap_gb": machine_info.max_swap_gb,
+            "max_memory_gb": machine_info.max_memory_gb,
+            "max_gpu_number": machine_info.max_gpu_number,
+            "max_cpu_core_number": machine_info.max_cpu_core_number,
             "disk_size_gb": machine_info.disk_size_gb,
             "containers": machine_info.containers
         }), 200

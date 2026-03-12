@@ -56,9 +56,12 @@ def create_machine(machinename:str,
                    cpu_core_number:int,
                    gpu_number:int,
                    gpu_type:str,
-                memory_size:int,
-                swap_size:int,
-                   disk_size:int)->bool:
+                   memory_size:int,
+                   max_swap_size:int,
+                   disk_size:int,
+                   max_cpu_core_number:int,
+                   max_gpu_number:int,
+                   max_memory_gb:int)->bool:
     machine=Machine(
          machine_name=machinename,
          machine_ip=machine_ip,
@@ -67,8 +70,11 @@ def create_machine(machinename:str,
          cpu_core_number=cpu_core_number,
          gpu_number=gpu_number,
          gpu_type=gpu_type,
-        memory_size_gb=memory_size,
-        max_swap_gb=swap_size,
+         memory_size_gb=memory_size,
+         max_swap_gb=max_swap_size,
+         max_cpu_core_number=max_cpu_core_number,
+         max_gpu_number=max_gpu_number,
+         max_memory_gb=max_memory_gb,
          disk_size_gb=disk_size
     )
     db.session.add(machine)
@@ -87,15 +93,16 @@ def update_machine(machine_id: int, *, commit: bool = True, **fields) -> bool:
     """
     部分更新用户字段。
     使用示例:
-        update_user(1, email="new@x.com", graduation_year=2026)
-        update_user(1, username="alice2", commit=False)  # 由调用方稍后统一提交
+        update_machine(1, machine_name="new_name", cpu_core_number=16)
+    allowed = {"machine_name", "machine_ip", "machine_type", "machine_status", "cpu_core_number", "memory_size", "gpu_number", "gpu_type", "disk_size", "machine_description", "max_swap_gb", "max_memory_gb", "max_gpu_number", "max_cpu_core_number"}
     """
     machine = get_by_id(machine_id)
     if not machine:
         return None
 
     allowed = {"machine_name", "machine_ip", "machine_type", "machine_status", "cpu_core_number",
-               "memory_size_gb", "gpu_number", "gpu_type", "disk_size_gb", "machine_description", "swap_size_gb", "max_swap_gb"}
+               "memory_size_gb", "gpu_number", "gpu_type", "disk_size_gb", "machine_description", "swap_size_gb", "max_swap_gb",
+               "max_memory_gb", "max_gpu_number", "max_cpu_core_number"}
     dirty = False
     for k, v in fields.items():
         if k not in allowed:
@@ -113,18 +120,20 @@ def update_machine(machine_id: int, *, commit: bool = True, **fields) -> bool:
 
 
 def get_max_cpu_core_number(machine_id:int) -> int:
-    """用于取数据库里的max_cpu_core_number字段。暂时 60."""
-    return 60
+    """用于取数据库里的max_cpu_core_number字段。"""
+    max_val = db.session.query(Machine.max_cpu_core_number).filter(Machine.id == machine_id).scalar()
+    return int(max_val) if max_val is not None else 0
 
 
 def get_max_gpu_number(machine_id:int) -> int:
-    """用于取数据库里的max_gpu_number字段。暂时 6."""
-    return 6
+    """用于取数据库里的max_gpu_number字段。"""
+    max_val = db.session.query(Machine.max_gpu_number).filter(Machine.id == machine_id).scalar()
+    return int(max_val) if max_val is not None else 0
 
 
 def get_max_memory_gb(machine_id:int) -> int:
-    """用于取数据库里的max_memory_gb字段。暂时取 memory_size_gb"""
-    max_val = db.session.query(Machine.memory_size_gb).filter(Machine.id == machine_id).scalar()
+    """用于取数据库里的max_memory_gb字段。"""
+    max_val = db.session.query(Machine.max_memory_gb).filter(Machine.id == machine_id).scalar()
     return int(max_val) if max_val is not None else 0
 
 
