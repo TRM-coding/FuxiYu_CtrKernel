@@ -16,5 +16,18 @@ except Exception:
 app = create_app()
 
 if __name__ == "__main__":
-	app.run(host="0.0.0.0", port=5000, debug=True)
+	# Use SSL when configured (development only). If cert/key files exist, use them;
+	# otherwise fall back to Flask's adhoc cert for quick local testing.
+	ssl_enabled = app.config.get("SSL_ENABLED", False)
+	if ssl_enabled:
+		cert_path = app.config.get("SSL_CERT_PATH")
+		key_path = app.config.get("SSL_KEY_PATH")
+		if cert_path and key_path and os.path.exists(cert_path) and os.path.exists(key_path):
+			ssl_ctx = (cert_path, key_path)
+		else:
+			# fallback to an auto-generated certificate (not for production)
+			ssl_ctx = 'adhoc'
+		app.run(host="0.0.0.0", port=5000, debug=True, ssl_context=ssl_ctx)
+	else:
+		app.run(host="0.0.0.0", port=5000, debug=True)
 
