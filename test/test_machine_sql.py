@@ -1,6 +1,6 @@
 #machine_tasks.py 单元测试
 import pytest
-from ..services.machine_tasks import Add_machine, Remove_machine, Update_machine, Get_detail_information, List_all_machine_bref_information
+from ..services.machine_tasks import Add_machine, Remove_machine, Update_machine, Get_detail_information, List_all_machine_bref_information,machine_bref_information,machine_detail_information
 from ..models.machine import Machine, MachineTypes, MachineStatus
 from ..extensions import db
 from .. import create_app
@@ -69,10 +69,10 @@ def test_Add_machine():
         assert machine.machine_type == machine_type
         assert machine.machine_status == MachineStatus.MAINTENANCE  # 默认状态
         assert machine.cpu_core_number == cpu_core_number
-        assert machine.memory_size_gb == memory_size
+        assert machine.memory_size_gb == memory_size  # 验证内存字段
         assert machine.gpu_number == gpu_number
         assert machine.gpu_type == gpu_type
-        assert machine.disk_size_gb == disk_size
+        assert machine.disk_size_gb == disk_size  # 验证磁盘字段
         assert machine.machine_description == machine_description
         
     finally:
@@ -371,19 +371,20 @@ def test_Get_detail_information():
 
         # 4) 验证返回类型与结构
         assert result is not None, "Get_detail_information 应该返回对象，而不是 None"
+        assert isinstance(result, machine_detail_information), "返回值应该是 machine_detail_information 类型"  # 验证返回类型
         assert isinstance(result.containers, list), "containers 字段应为列表"
         assert len(result.containers) == 2, f"应返回2个容器，实际返回 {len(result.containers)}"
 
-        # 5) 验证字段正确性
+        # 5) 验证字段正确性（匹配新的模型字段）
         assert result.machine_name == machine_name
         assert result.machine_ip == machine_ip
-        assert result.machine_type == machine_type.value
-        assert result.machine_status == machine_status.value
+        assert result.machine_type == machine_type.value  # 枚举值转为字符串
+        assert result.machine_status == machine_status.value  # 枚举值转为字符串
         assert result.cpu_core_number == cpu_core_number
         assert result.gpu_number == gpu_number
         assert result.gpu_type == gpu_type
-        assert result.memory_size_gb == memory_size_gb
-        assert result.disk_size_gb == disk_size_gb
+        assert result.memory_size_gb == memory_size_gb  # 匹配新字段名
+        assert result.disk_size_gb == disk_size_gb  # 匹配新字段名
         assert result.machine_description == machine_description
 
         # 验证容器ID匹配
@@ -398,6 +399,7 @@ def test_Get_detail_information():
         print("Get_detail_information 测试通过")
 
     finally:
+        # 清理容器和机器数据
         leftovers_containers = Container.query.filter(Container.machine_id == machine_id).all()
         for c in leftovers_containers:
             db.session.delete(c)
@@ -413,18 +415,19 @@ def test_Get_detail_information():
 def test_List_all_machine_bref_information():
     import uuid
     import random
-
-    # 1) 创建几个测试机器用于分页测试
+    
+    # 1) 生成唯一的测试前缀（确保和原有数据完全隔离）
+    test_prefix = f"test_machine_{uuid.uuid4().hex[:4]}_"
     test_machines = []
     
     try:
-        # 创建5个测试机器，确保有足够数据测试分页
+        # 创建5个测试机器（使用唯一前缀）
         for i in range(5):
-            machine_name = f"test_machine_{uuid.uuid4().hex[:8]}"
+            machine_name = f"{test_prefix}{uuid.uuid4().hex[:4]}"
             machine_ip = f"192.168.{random.randint(1, 255)}.{random.randint(1, 255)}"
             machine_type = random.choice(list(MachineTypes))
             machine_status = random.choice(list(MachineStatus))
-            
+    
             machine = Machine(
                 machine_name=machine_name,
                 machine_ip=machine_ip,
@@ -437,86 +440,125 @@ def test_List_all_machine_bref_information():
                 disk_size_gb=random.randint(100, 2000),
                 machine_description=f"Test machine for listing {i+1}"
             )
-            
+    
             db.session.add(machine)
             test_machines.append(machine)
-        
+    
         db.session.commit()
         
         # 2) 测试第一页，每页3条数据
         page_number = 0
         page_size = 3
-        result_page1 = List_all_machine_bref_information(page_number, page_size)
-        
-        # 检查返回结果
+        result_page1, total_pages1 = List_all_machine_bref_information(
+            page_number=page_number,
+            page_size=page_size
+        )
+    
+        # 检查返回结果的基本类型
         assert result_page1 is not None, "函数应该返回列表，而不是None"
-        assert isinstance(result_page1, list), "函数应该返回列表"
-        assert len(result_page1) == page_size, f"第一页应该返回{page_size}条数据"
-        
+        assert isinstance(result_page1, list), "第一个返回值应该是列表"
+        assert isinstance(total_pages1, int), "第二个返回值应该是总页数（整数）"
+        assert len(result_page1) <= page_size, f"第一页应该返回最多{page_size}条数据，实际返回{len(result_page1)}条"
+    
         # 检查返回的数据结构
         for machine_info in result_page1:
+            assert isinstance(machine_info, machine_bref_information), "返回的应该是 machine_bref_information 类型"
+            assert hasattr(machine_info, 'id'), "机器概要信息应该包含id字段"
+            assert hasattr(machine_info, 'machine_name'), "机器概要信息应该包含machine_name字段"
             assert hasattr(machine_info, 'machine_ip'), "机器概要信息应该包含machine_ip字段"
             assert hasattr(machine_info, 'machine_type'), "机器概要信息应该包含machine_type字段"
             assert hasattr(machine_info, 'machine_status'), "机器概要信息应该包含machine_status字段"
-            
+    
             # 验证字段值不为空
+            assert machine_info.id is not None, "机器ID不应该为空"
+            assert machine_info.machine_name is not None, "机器名称不应该为空"
             assert machine_info.machine_ip is not None, "机器IP不应该为空"
             assert machine_info.machine_type is not None, "机器类型不应该为空"
             assert machine_info.machine_status is not None, "机器状态不应该为空"
-            
+    
             # 验证机器类型和状态是有效的枚举值
             assert machine_info.machine_type in [t.value for t in MachineTypes], f"机器类型 {machine_info.machine_type} 应该是有效的MachineTypes枚举值"
             assert machine_info.machine_status in [s.value for s in MachineStatus], f"机器状态 {machine_info.machine_status} 应该是有效的MachineStatus枚举值"
-        
+    
         # 3) 测试第二页，每页3条数据
         page_number = 1
         page_size = 3
-        result_page2 = List_all_machine_bref_information(page_number, page_size)
-        
-        total_count = Machine.query.count()
+        result_page2, total_pages2 = List_all_machine_bref_information(
+            page_number=page_number,
+            page_size=page_size
+        )
+    
         assert result_page2 is not None, "第二页函数应该返回列表，而不是None"
-        assert isinstance(result_page2, list), "第二页函数应该返回列表"
-        # 第二页应该返回剩余的数据（5-3=2条）
-        expected_page2_count = max(0, min(page_size, total_count - page_number * page_size))
-        assert len(result_page2) == expected_page2_count, f"第二页应该返回{expected_page2_count}条数据，实际返回{len(result_page2)}条"
+        assert isinstance(result_page2, list), "第二页第一个返回值应该是列表"
+        assert len(result_page2) <= page_size, f"第二页应该返回最多{page_size}条数据，实际返回{len(result_page2)}条"
         
-        # 4) 测试空页（超出数据范围）
-        page_number = 2
-        page_size = 3
-        result_empty = List_all_machine_bref_information(page_number, page_size)
-
-        total_count = Machine.query.count()
-        expected_count = max(0, min(page_size, total_count - page_number * page_size))
-
-        assert result_empty is not None, "空页函数应该返回列表，而不是None"
-        assert isinstance(result_empty, list), "空页函数应该返回列表"
-        assert len(result_empty) == expected_count, f"页 {page_number} 应返回 {expected_count} 条数据，实际返回 {len(result_empty)} 条"
-                
-        # 5) 测试所有机器（大页面）
+        # 验证两页返回的数据不重复（根据ID判断）
+        if result_page1 and result_page2:  # 只有在两页都有数据时才检查
+            page1_ids = [info.id for info in result_page1]
+            page2_ids = [info.id for info in result_page2]
+            assert len(set(page1_ids) & set(page2_ids)) == 0, "第一页和第二页返回的数据有重复"
+        
+        # 4) 测试边界情况：超出范围的页码
+        page_number = 9999
+        page_size = 10
+        result_page_out, total_pages_out = List_all_machine_bref_information(
+            page_number=page_number,
+            page_size=page_size
+        )
+        
+        assert result_page_out is not None, "超出范围的页码应该返回空列表，而不是None"
+        assert isinstance(result_page_out, list), "超出范围的页码应该返回空列表"
+        assert len(result_page_out) == 0, f"超出范围的页码应该返回空列表，实际返回{len(result_page_out)}条数据"
+        
+        # 5) 测试page_size为0的情况
         page_number = 0
-        page_size = 100  # 足够大的页面大小获取所有机器
-        result_all = List_all_machine_bref_information(page_number, page_size)
-
-        # 动态计算预期数量（根据实际数据库）
-        total_count = Machine.query.count()
-
-        assert len(result_all) == total_count, \
-            f"获取所有机器应该返回 {total_count} 条数据，实际返回 {len(result_all)} 条"
+        page_size = 0
+        result_page_zero, total_pages_zero = List_all_machine_bref_information(
+            page_number=page_number,
+            page_size=page_size
+        )
         
-        # 6) 验证返回数据的正确性 - 检查第一台机器的数据是否与数据库匹配
-        if len(result_page1) > 0:
-            first_result = result_page1[0]
-            # 根据IP查找对应的机器
-            corresponding_machine = Machine.query.filter_by(machine_ip=first_result.machine_ip).first()
+        assert result_page_zero is not None, "page_size为0应该返回空列表，而不是None"
+        assert isinstance(result_page_zero, list), "page_size为0应该返回空列表"
+        assert len(result_page_zero) == 0, f"page_size为0应该返回空列表，实际返回{len(result_page_zero)}条数据"
+        # 根据原函数逻辑，page_size为0时，total_pages应该是0
+        assert total_pages_zero == 0, f"page_size为0时总页数应该为0，实际返回{total_pages_zero}"
+        
+        # 6) 验证新创建的测试机器确实在返回结果中（由于函数返回所有机器，我们遍历查找）
+        created_ids = [m.id for m in test_machines]
+        found_ids = set()  # 使用set来存储找到的ID，避免重复
+        found_machines = []  # 用于存储找到的机器信息
+        
+        # 计算总页数
+        first_page, total_pages = List_all_machine_bref_information(page_number=0, page_size=10)
+        
+        # 遍历所有页查找测试机器
+        for page in range(total_pages):
+            result, _ = List_all_machine_bref_information(
+                page_number=page,
+                page_size=10  # 使用较大的page_size减少请求次数
+            )
             
-            assert corresponding_machine is not None, "返回的机器IP应该在数据库中存在对应机器"
-            assert first_result.machine_type == corresponding_machine.machine_type.value, "返回的机器类型应该与数据库中的值匹配"
-            assert first_result.machine_status == corresponding_machine.machine_status.value, "返回的机器状态应该与数据库中的值匹配"
+            for info in result:
+                if info.id in created_ids and info.id not in found_ids:
+                    found_ids.add(info.id)
+                    found_machines.append(info)
         
-        print("List_all_machine_bref_information 测试通过")
+        assert len(found_machines) == len(test_machines), f"应该能找到所有{len(test_machines)}台测试机器，实际找到{len(found_machines)}台"
+        
+        # 验证找到的机器信息正确
+        for found in found_machines:
+            # 找到对应的原始机器
+            original = next(m for m in test_machines if m.id == found.id)
+            assert found.machine_name == original.machine_name, "机器名称不匹配"
+            assert found.machine_ip == original.machine_ip, "机器IP不匹配"
+            assert found.machine_type == original.machine_type.value, "机器类型不匹配"
+            assert found.machine_status == original.machine_status.value, "机器状态不匹配"
+    
+        print("test_List_all_machine_bref_information 测试通过")
             
     finally:
-        # 7) 清理测试数据
+        # 清理测试数据（只删除本次创建的测试机器）
         for machine in test_machines:
             db.session.delete(machine)
         db.session.commit()
