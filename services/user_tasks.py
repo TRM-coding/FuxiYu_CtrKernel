@@ -92,6 +92,33 @@ def Register(username: str, email: str, password: str, graduation_year):
     if email and len(email) > 115:
         return False, "email_too_long", None
 
+    # 禁用非ASCII字符（如中文）以避免数据库异常
+    import re
+    # username must be strict identifier: letters/digits/underscore only
+    def _is_valid_username(s: str) -> bool:
+        try:
+            if s is None:
+                return False
+            return bool(re.match(r'^[A-Za-z0-9_]+$', s))
+        except Exception:
+            return False
+
+    def _is_all_ascii(s: str) -> bool:
+        try:
+            if s is None:
+                return True
+            return all(ord(ch) < 128 for ch in s)
+        except Exception:
+            return False
+
+    # enforce username format first
+    if not _is_valid_username(username):
+        return False, 'invalid_username', None
+
+    # keep ascii checks for other fields
+    if not _is_all_ascii(email) or not _is_all_ascii(password):
+        return False, "no_none_ascii", None
+
     # 检查用户名是否已存在
     if User.query.filter_by(username=username).first():
         return False, "username_exists", None
@@ -115,6 +142,18 @@ def Register(username: str, email: str, password: str, graduation_year):
 #修改密码
 #####################################
 def Change_password(user: User, old_password: str, new_password: str) -> bool:
+    # disallow non-ASCII characters in passwords
+    def _is_all_ascii(s: str) -> bool:
+        try:
+            if s is None:
+                return True
+            return all(ord(ch) < 128 for ch in s)
+        except Exception:
+            return False
+
+    if not _is_all_ascii(old_password) or not _is_all_ascii(new_password):
+        raise ValueError('no_none_ascii')
+
     if check_password_hash(user.password_hash, old_password):
         update_user(user.id, password_hash=generate_password_hash(new_password))
         return True
@@ -225,6 +264,33 @@ def Update_user(user_id:int,**fields)->User|None:
         raise ValueError(f"username too long (max 75): length={len(fields['username'])}")
     if 'email' in fields and fields['email'] and len(fields['email']) > 115:
         raise ValueError(f"email too long (max 115): length={len(fields['email'])}")
+
+    # disallow non-ASCII characters in any provided string field
+    def _is_all_ascii(s: str) -> bool:
+        try:
+            if s is None:
+                return True
+            return all(ord(ch) < 128 for ch in s)
+        except Exception:
+            return False
+
+    # username has stricter validation (letters/digits/underscore)
+    import re
+    def _is_valid_username(s: str) -> bool:
+        try:
+            if s is None:
+                return False
+            return bool(re.match(r'^[A-Za-z0-9_]+$', s))
+        except Exception:
+            return False
+
+    for k, v in fields.items():
+        if k == 'username':
+            if not _is_valid_username(v):
+                raise ValueError('invalid_username')
+            continue
+        if isinstance(v, str) and not _is_all_ascii(v):
+            raise ValueError('no_none_ascii')
 
     user=update_user(user_id,**fields)
     return user

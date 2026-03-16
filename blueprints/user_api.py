@@ -59,7 +59,9 @@ def register():
 		error_reason = user_or_reason
 		error_messages = {
 			"username_exists": "Username already exists",
-			"email_exists": "Email already exists"
+			"email_exists": "Email already exists",
+			"no_none_ascii": "Input contains non-ASCII characters",
+			"invalid_username": "Username may contain only letters, digits and underscore"
 		}
 		message = error_messages.get(error_reason, "Registration failed")
 
@@ -283,10 +285,16 @@ def change_password_user():
 		return jsonify({"success": 0, "message": "user not found", "error_reason": "user_not_found"}), 404
 
 	ok = user_tasks.Change_password(user, old_password, new_password)
-	if ok:
-		return jsonify({"success": 1, "message": "password changed"}), 200
-	else:
-		return jsonify({"success": 0, "message": "old password incorrect", "error_reason": "old_password_incorrect"}), 400
+	try:
+		ok = user_tasks.Change_password(user, old_password, new_password)
+		if ok:
+			return jsonify({"success": 1, "message": "password changed"}), 200
+		else:
+			return jsonify({"success": 0, "message": "old password incorrect", "error_reason": "old_password_incorrect"}), 400
+	except ValueError as e:
+		if str(e) == 'no_none_ascii':
+			return jsonify({"success": 0, "message": "None ascii not allowed (Chinese not accepted)", "error_reason": "no_none_ascii"}), 400
+		raise
 
 @api_bp.post("/users/delete_user")
 def delete_user_api():
@@ -361,7 +369,16 @@ def update_user_api():
 	if not user_id or not fields:
 		return jsonify({"success": 0, "message": "user_id and fields required", "error_reason": "missing_fields"}), 400
 
-	user = user_tasks.Update_user(int(user_id), **fields)
+	try:
+		user = user_tasks.Update_user(int(user_id), **fields)
+	except ValueError as e:
+		if str(e) == 'no_none_ascii':
+			return jsonify({"success": 0, "message": "禁止非ASCII字符（请勿输入中文）", "error_reason": "no_none_ascii"}), 400
+		if str(e) == 'invalid_username':
+			return jsonify({"success": 0, "message": "用户名仅允许字母、数字和下划线", "error_reason": "invalid_username"}), 400
+		# propagate other ValueError messages as bad request
+		return jsonify({"success": 0, "message": str(e), "error_reason": "invalid_fields"}), 400
+
 	if user:
 		return jsonify({"success": 1, "message": "user updated", "user": user.username}), 200
 	else:
