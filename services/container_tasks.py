@@ -808,6 +808,7 @@ def list_all_container_bref_information(machine_id:int, user_id:int, page_number
     containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=user_id)
     res = []
     for container in containers:
+        machine_ip = ""
         # For information calls: if machine is offline or maintenance, skip node checks for containers on that machine
         do_node_check = True
         try:
