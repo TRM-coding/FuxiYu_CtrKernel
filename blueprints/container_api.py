@@ -486,7 +486,7 @@ def list_all_containers_bref_information_api():
     except Exception as e:
         reason = getattr(e, 'reason', None) or getattr(e, 'error_reason', None) or 'list_failed'
         status = REASON_STATUS_MAP.get(reason, 500)
-        payload = {"success":0,"message":"Failed to list containers", "error_reason": reason}
+        payload = {"success":0,"message":"Failed to list containers: " + str(e), "error_reason": reason}
         return jsonify(payload), status
 
     # convert pydantic models to plain dicts so jsonify can serialize
