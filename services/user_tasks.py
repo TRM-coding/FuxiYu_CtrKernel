@@ -4,6 +4,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from ..extensions import db
 from ..repositories.user_repo import *
 from ..repositories import authentications_repo
+from ..repositories import registration_code_repo
 from ..repositories import usercontainer_repo, containers_repo
 from ..constant import ROLE, ContainerStatus
 from pydantic import BaseModel
