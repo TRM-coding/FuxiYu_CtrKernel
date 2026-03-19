@@ -43,7 +43,7 @@ def register():
 	
 	# 调用 service 层注册用户
 	try:
-		success, user_or_reason, _ = user_tasks.Register_with_code(username, email, password, graduation_year, recived_data.get(registration_code))
+		success, user_or_reason, _ = user_tasks.Register_with_code(username, email, password, graduation_year, recived_data.get("registration_code"))
 	except Exception as e:
 		return jsonify({"success": 0, "message": "registration failed due to server error"}), 500
 	if success:
@@ -62,6 +62,10 @@ def register():
 			"email_exists": "Email already exists",
 			"no_none_ascii": "Input contains non-ASCII characters",
 			"invalid_username": "Username may contain only letters, digits and underscore",
+			"email_domain_not_allowed": "Email domain is not allowed",
+			"registration_code_required": "Verification code required",
+			"registration_code_invalid": "Verification code invalid or expired",
+			"mail_send_failed": "Failed to send verification email",
 			"email_domain_not_allowed": "Email domain is not allowed",
 			"registration_code_required": "Verification code required",
 			"registration_code_invalid": "Verification code invalid or expired",
