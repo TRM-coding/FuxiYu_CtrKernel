@@ -5,6 +5,7 @@ from ..extensions import db
 from ..repositories.user_repo import *
 from ..repositories import authentications_repo
 from ..repositories import registration_code_repo
+from ..repositories import email_change_code_repo
 from ..utils.mail import send as send_mail
 from ..repositories import usercontainer_repo, containers_repo
 from ..constant import ROLE, ContainerStatus
@@ -349,3 +350,35 @@ def Register_with_code(username: str, email: str, password: str, graduation_year
         return False, 'registration_code_invalid', None
 
     return Register(username, email, password, graduation_year)
+
+ALLOWED_EMAIL_CHANGE_DOMAINS = ALLOWED_REGISTRATION_EMAIL_DOMAINS
+
+
+def Request_update_email_code(user_id: int, new_email: str):
+    domain = _get_email_domain(new_email)
+    if domain not in ALLOWED_EMAIL_CHANGE_DOMAINS:
+        return False, 'email_domain_not_allowed'
+    user = get_by_id(user_id)
+    if not user:
+        return False, 'user_not_found'
+    code = f"{secrets.randbelow(1000000):06d}"
+    expires_at = datetime.utcnow() + timedelta(minutes=3)
+    email_change_code_repo.create_code(user_id=user_id, new_email=new_email, school_domain=domain, code=code, expires_at=expires_at)
+    result = send_mail(to=new_email, subject='伏羲系统邮箱修改验证码', content=f'你的邮箱修改验证码是：{code}\n验证码有效期为3分钟。请勿泄露给他人。')
+    if not result.get('ok'):
+        return False, 'mail_send_failed'
+    return True, 'code_sent'
+
+
+def Update_user_with_email_code(user_id: int, **fields):
+    email_code = fields.pop('email_change_code', None)
+    email = fields.get('email')
+    if email is not None:
+        domain = _get_email_domain(email)
+        if domain not in ALLOWED_EMAIL_CHANGE_DOMAINS:
+            return False, 'email_domain_not_allowed', None
+        if not email_code:
+            return False, 'email_code_required', None
+        if not email_change_code_repo.verify_code(user_id=user_id, new_email=email, code=email_code, school_domain=domain):
+            return False, 'email_code_invalid', None
+    return Update_user(user_id, **fields)

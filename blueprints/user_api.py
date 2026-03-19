@@ -392,7 +392,7 @@ def update_user_api():
 		return jsonify({"success": 0, "message": "user_id and fields required", "error_reason": "missing_fields"}), 400
 
 	try:
-		user = user_tasks.Update_user(int(user_id), **fields)
+		user = user_tasks.Update_user_with_email_code(int(user_id), **fields)
 	except ValueError as e:
 		if str(e) == 'no_none_ascii':
 			return jsonify({"success": 0, "message": "禁止非ASCII字符（请勿输入中文）", "error_reason": "no_none_ascii"}), 400
