@@ -6,16 +6,21 @@ from ..models.registration_code import RegistrationCode
 
 
 def create_code(email: str, school_domain: str, code: str, expires_at: datetime) -> RegistrationCode:
-    db.session.query(RegistrationCode).filter_by(email=email, consumed_at=None).delete()
-    record = RegistrationCode(
-        email=email,
-        school_domain=school_domain,
-        code_hash=generate_password_hash(code),
-        expires_at=expires_at,
-    )
-    db.session.add(record)
-    db.session.commit()
-    return record
+    try: 
+        db.session.query(RegistrationCode).filter_by(email=email, consumed_at=None).delete()
+        record = RegistrationCode(
+            email=email,
+            school_domain=school_domain,
+            code_hash=generate_password_hash(code),
+            expires_at=expires_at,
+        )
+        db.session.add(record)
+        db.session.commit()
+        return record
+    except Exception as exc:
+        db.session.rollback()
+        print(f"Failed to create registration code for {email}: {exc}")
+        raise
 
 
 def verify_code(email: str, code: str, school_domain: str) -> bool:
