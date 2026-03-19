@@ -5,6 +5,7 @@ from ..extensions import db
 from ..repositories.user_repo import *
 from ..repositories import authentications_repo
 from ..repositories import registration_code_repo
+from ..utils.mail import send as send_mail
 from ..repositories import usercontainer_repo, containers_repo
 from ..constant import ROLE, ContainerStatus
 from pydantic import BaseModel
