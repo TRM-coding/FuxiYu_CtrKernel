@@ -1,6 +1,7 @@
 """邮件发送工具。
 
-这个模块封装 Ctrl 子系统的邮件发送能力。核心入口是 send，调用者只需要提供收件人邮箱和邮件内容即可。
+这个模块封装 Ctrl 子系统的邮件发送能力。
+核心入口是 send，调用者只需要提供收件人邮箱和邮件内容即可。
 """
 
 from __future__ import annotations
@@ -15,7 +16,18 @@ from typing import Iterable
 
 @dataclass(slots=True)
 class MailConfig:
-    """SMTP 发送配置。"""
+    """SMTP 发送配置。
+
+    Attributes:
+        host: SMTP 服务地址。
+        port: SMTP 服务端口。
+        username: SMTP 登录用户名。
+        password: SMTP 登录密码。
+        sender: 邮件发件人地址。
+        use_tls: 是否在普通 SMTP 连接上启用 STARTTLS。
+        use_ssl: 是否使用 SMTP_SSL 直接加密连接。
+        timeout: 连接超时时间（秒）。
+    """
 
     host: str = os.getenv("MAIL_HOST", "localhost")
     port: int = int(os.getenv("MAIL_PORT", "25"))
@@ -28,6 +40,15 @@ class MailConfig:
 
 
 def _attach_files(msg: EmailMessage, attachments: Iterable[str | Path] | None) -> None:
+    """为邮件消息添加附件。
+
+    Args:
+        msg: 已创建的邮件消息对象。
+        attachments: 附件路径列表。
+
+    Returns:
+        None
+    """
     if not attachments:
         return
     for item in attachments:
@@ -52,7 +73,7 @@ def send(
     attachments: Iterable[str | Path] | None = None,
     config: MailConfig | None = None,
 ) -> dict:
-    """Send an email.
+    """发送一封邮件。
 
     Args:
         to: 收件人邮箱，支持单个邮箱或邮箱列表。
@@ -61,10 +82,10 @@ def send(
         cc: 抄送列表。
         bcc: 密送列表。
         attachments: 附件路径列表。
-        config: 可选的 SMTP 配置。
+        config: 可选的 SMTP 配置；不传则使用环境变量默认值。
 
     Returns:
-        dict: 包含发送结果的字典，成功时返回 `{"ok": True}`。
+        dict: 发送结果。成功时返回 {"ok": True, "to": [...]}，失败时包含 error 信息。
     """
 
     cfg = config or MailConfig()
