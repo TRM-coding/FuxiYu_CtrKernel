@@ -7,44 +7,54 @@ import os
 
 
 class SqlConfig:
-    SQLNAME='fuxi'
-    SQLURL='127.0.0.1'
-    SQLPORT='3306'
-    SQLUSER='root'
+    SQLNAME = "fuxi"
+    SQLURL = "127.0.0.1"
+    SQLPORT = "3306"
+    SQLUSER = "root"
+
 
 class KeyConfig:
-    PUBLIC_KEY_PATH='public_A.pem'
-    PRIVATE_KEY_PATH='private_A.pem'
-    PUBLIC_KEY_NODE='public_node.pem'
+    PUBLIC_KEY_PATH = "public_A.pem"
+    PRIVATE_KEY_PATH = "private_A.pem"
+    PUBLIC_KEY_NODE = "public_node.pem"
+
 
 class CommsConfig:
-    NODE_URL_MIDDLE=':5789/api'
+    NODE_URL_MIDDLE = ":5789/api"
+
 
 class CORSHeaderConfig:
     # Allow both localhost and 127.0.0.1 origins used in development
     # 这里列出允许的前端地址，前端开发时可能会用 localhost 或230
-    ALLOW_ORIGINS='http://localhost:5173,http://127.0.0.1:5173, http://192.168.5.230:5173,https://localhost:5173,https://127.0.0.1:5173,https://192.168.5.230:5173'
+    ALLOW_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173, http://192.168.5.230:5173,https://localhost:5173,https://127.0.0.1:5173,https://192.168.5.230:5173"
 
-# 新增：统一的 AppConfig 和 get_config
+
 class AppConfig(SqlConfig, KeyConfig):
     # 允许通过环境变量覆盖
     SQLNAME = os.getenv("SQLNAME", SqlConfig.SQLNAME)
     SQLURL = os.getenv("SQLURL", SqlConfig.SQLURL)
     SQLPORT = os.getenv("SQLPORT", SqlConfig.SQLPORT)
     SQLUSER = os.getenv("SQLUSER", SqlConfig.SQLUSER)
+    SQLPASSWORD = os.getenv("SQLPASSWORD", "")
+    DATABASE_URL = os.getenv("DATABASE_URL")
     PUBLIC_KEY_PATH = os.getenv("PUBLIC_KEY_PATH", KeyConfig.PUBLIC_KEY_PATH)
     PRIVATE_KEY_PATH = os.getenv("PRIVATE_KEY_PATH", KeyConfig.PRIVATE_KEY_PATH)
 
-    # 使用本地 MySQL（root 无密码）
-    SQLALCHEMY_DATABASE_URI = f"mysql+pymysql://{SQLUSER}@{SQLURL}:{SQLPORT}/{SQLNAME}?charset=utf8mb4"
+    # 默认使用 MySQL；若指定 DATABASE_URL，则优先使用它，便于本地部署或测试切换到 SQLite。
+    if DATABASE_URL:
+        SQLALCHEMY_DATABASE_URI = DATABASE_URL
+    else:
+        auth = f":{SQLPASSWORD}" if SQLPASSWORD else ""
+        SQLALCHEMY_DATABASE_URI = f"mysql+pymysql://{SQLUSER}{auth}@{SQLURL}:{SQLPORT}/{SQLNAME}?charset=utf8mb4"
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SECRET_KEY = os.getenv("SECRET_KEY", "dev")
     # SSL / HTTPS (development toggle)
-    # Set ENABLE_SSL=false to disable HTTPS in development. 默认开了启，除非明确设置为 'false'（字符串）。--- IGNORE ---
+    # Set ENABLE_SSL=false to disable HTTPS in development. 默认开了启，除非明确设置为 false（字符串）。--- IGNORE ---
     SSL_ENABLED = os.getenv("ENABLE_SSL", "true").lower() == "true"
     # P这些都是相对于web根目录存的/certs/localhost.pem。与现有架构有出入 可调整
     SSL_CERT_PATH = os.getenv("SSL_CERT_PATH", "certs/localhost.pem")
     SSL_KEY_PATH = os.getenv("SSL_KEY_PATH", "certs/localhost-key.pem")
+
 
 def get_config(env: str | None = None):
     """
