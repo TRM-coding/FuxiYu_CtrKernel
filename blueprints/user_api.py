@@ -62,11 +62,6 @@ def register():
 			"email_exists": "Email already exists",
 			"no_none_ascii": "Input contains non-ASCII characters",
 			"invalid_username": "Username may contain only letters, digits and underscore",
-			"email_domain_not_allowed": "Email domain is not allowed",
-			"registration_code_required": "Verification code required",
-			"registration_code_invalid": "Verification code invalid or expired",
-			"mail_send_failed": "Failed to send verification email",
-			"email_domain_not_allowed": "Email domain is not allowed",
 			"registration_code_required": "Verification code required",
 			"registration_code_invalid": "Verification code invalid or expired",
 			"mail_send_failed": "Failed to send verification email"
@@ -392,13 +387,12 @@ def update_user_api():
 		return jsonify({"success": 0, "message": "user_id and fields required", "error_reason": "missing_fields"}), 400
 
 	try:
-		user = user_tasks.Update_user_with_email_code(int(user_id), **fields)
+		user = user_tasks.Update_user(int(user_id), **fields)
 	except ValueError as e:
 		if str(e) == 'no_none_ascii':
 			return jsonify({"success": 0, "message": "禁止非ASCII字符（请勿输入中文）", "error_reason": "no_none_ascii"}), 400
 		if str(e) == 'invalid_username':
 			return jsonify({"success": 0, "message": "用户名仅允许字母、数字和下划线", "error_reason": "invalid_username"}), 400
-		# propagate other ValueError messages as bad request
 		return jsonify({"success": 0, "message": str(e), "error_reason": "invalid_fields"}), 400
 
 	if user:
