@@ -370,6 +370,46 @@ def test_add_collaborator():
         Machine.query.filter_by(id=machine.id).delete()
         db.session.commit()
 
+
+def test_Create_container_denies_unauthorized_machine_access(monkeypatch):
+    from ..services import container_tasks as ct
+    from ..utils.Container import Container_info
+
+    monkeypatch.setattr(ct, "_can_access_machine", lambda user_id, machine_id: False)
+    with pytest.raises(ct.NodeServiceError) as exc:
+        ct.Create_container(
+            owner_name="alice",
+            machine_id=123,
+            container=Container_info(name="c1", image="ubuntu:latest", gpu_list=[], cpu_number=1, memory=1),
+            operator_user_id=7,
+        )
+    assert exc.value.reason == "machine_permission_denied"
+
+
+def test_add_collaborator_denies_unauthorized_machine_access(monkeypatch):
+    from ..services import container_tasks as ct
+
+    monkeypatch.setattr(ct, "_can_access_machine", lambda user_id, machine_id: False)
+    with pytest.raises(ct.NodeServiceError) as exc:
+        ct.add_collaborator(container_id=1, user_id=2, role=ROLE.COLLABORATOR, operator_user_id=7)
+    assert exc.value.reason == "machine_permission_denied"
+
+
+def test_list_all_container_bref_information_filters_by_machine_permission(monkeypatch):
+    from ..services import container_tasks as ct
+
+    c1 = type("C", (), {"id": 1, "name": "c1", "machine_id": 10, "port": 8001, "container_status": type("S", (), {"value": "online"})()})()
+    c2 = type("C", (), {"id": 2, "name": "c2", "machine_id": 20, "port": 8002, "container_status": type("S", (), {"value": "online"})()})()
+    monkeypatch.setattr(ct, "list_containers", lambda **kwargs: [c1, c2])
+    monkeypatch.setattr(ct.machine_permission_repo, "list_machine_ids_by_user", lambda user_id: [10])
+    monkeypatch.setattr(ct, "_is_operator_user", lambda user_id: False)
+    monkeypatch.setattr(ct.machine_repo, "get_by_id", lambda machine_id: None)
+    monkeypatch.setattr(ct, "get_container_status", lambda machine_ip, name: {"container_status": "online"})
+    monkeypatch.setattr(ct, "get_machine_ip_by_id", lambda machine_id: f"10.0.0.{machine_id}")
+
+    result = ct.list_all_container_bref_information(machine_id=None, user_id=5, page_number=0, page_size=10)
+    assert [c.container_id for c in result["containers"]] == [1]
+
 ##################################
 
 

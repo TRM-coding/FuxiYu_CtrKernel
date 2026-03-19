@@ -4,7 +4,7 @@ from . import api_bp
 from ..services import container_tasks as container_service
 from ..utils.Container import Container_info
 from ..constant import ROLE
-from ..repositories import containers_repo, authentications_repo
+from ..repositories import containers_repo, authentications_repo, user_repo
 from ..schemas.user_schema import user_schema, users_schema
 
 # map known error_reason strings to HTTP status codes so we can surface them to clients
@@ -51,11 +51,13 @@ def create_container_api():
         ["error_reason": "xxxx"]
     }
     '''
-    if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+    token = request.headers.get("token", "")
+    if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json() or {}
     owner_name = data.get("user_name", "")
     machine_id = data.get("machine_id", 0)
+    operator_user_id = authentications_repo.get_user_id_by_token(token)
 
     # 似乎是一些结构问题
     container_raw = data.get("container") or {}
@@ -103,7 +105,8 @@ def create_container_api():
         if not container_service.Create_container(owner_name=owner_name,
                         machine_id=machine_id,
                         container=container_obj,
-                        public_key=public_key):
+                        public_key=public_key,
+                        operator_user_id=operator_user_id):
             return jsonify({"success": 0, "message": "Failed to create container", "error_reason": "create_failed"}), 500
     except IntegrityError as e:
         return jsonify({"success": 0, "message": f"Duplicate entry: {str(e.orig) if hasattr(e, 'orig') else str(e)}", "error_reason": "duplicate_entry"}), 409
@@ -137,12 +140,14 @@ def delete_container_api():
         ["error_reason": "xxxx"]
     }
     '''
-    if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+    token = request.headers.get("token", "")
+    if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json() or {}
     container_id = data.get("container_id", 0)
+    request_user_id = authentications_repo.get_user_id_by_token(token)
     try:
-        if not container_service.remove_container(container_id=container_id):
+        if not container_service.remove_container(container_id=container_id, operator_user_id=request_user_id):
             return jsonify({"success": 0, "message": "Failed to delete container", "error_reason": "delete_failed"}), 500
     except container_service.NodeServiceError as e:
         # prefer remote's reason when available
@@ -164,12 +169,14 @@ def start_container_api():
     请求格式：
     { "token", "container_id" }
     '''
-    if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+    token = request.headers.get("token", "")
+    if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json() or {}
     container_id = data.get("container_id", 0)
+    request_user_id = authentications_repo.get_user_id_by_token(token)
     try:
-        if not container_service.start_container(container_id=container_id):
+        if not container_service.start_container(container_id=container_id, operator_user_id=request_user_id):
             return jsonify({"success": 0, "message": "Failed to start container", "error_reason": "start_failed"}), 500
     except container_service.NodeServiceError as e:
         # propagate known node errors
@@ -190,12 +197,14 @@ def stop_container_api():
     请求格式：
     { "token", "container_id" }
     '''
-    if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+    token = request.headers.get("token", "")
+    if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json() or {}
     container_id = data.get("container_id", 0)
+    request_user_id = authentications_repo.get_user_id_by_token(token)
     try:
-        if not container_service.stop_container(container_id=container_id):
+        if not container_service.stop_container(container_id=container_id, operator_user_id=request_user_id):
             return jsonify({"success": 0, "message": "Failed to stop container", "error_reason": "stop_failed"}), 500
     except container_service.NodeServiceError as e:
         return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), 500
@@ -215,12 +224,14 @@ def restart_container_api():
     请求格式：
     { "token", "container_id" }
     '''
-    if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+    token = request.headers.get("token", "")
+    if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json() or {}
     container_id = data.get("container_id", 0)
+    request_user_id = authentications_repo.get_user_id_by_token(token)
     try:
-        if not container_service.restart_container(container_id=container_id):
+        if not container_service.restart_container(container_id=container_id, operator_user_id=request_user_id):
             return jsonify({"success": 0, "message": "Failed to restart container", "error_reason": "restart_failed"}), 500
     except container_service.NodeServiceError as e:
         return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), 500
@@ -251,18 +262,21 @@ def add_collaborator_api():
         ["error_reason": "xxxx"]
     }
     '''
-    if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
+    token = request.headers.get("token","")
+    if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success":0,"message":"invalid or missing token", "error_reason": "invalid_token"}),401
     data=request.get_json() or {}
     user_id=data.get("user_id","")
     container_id=data.get("container_id",0)
+    operator_user_id = authentications_repo.get_user_id_by_token(token)
     role=data.get("role","COLLABORATOR")
 
         
     try:
         if not container_service.add_collaborator(container_id=container_id,
                      user_id=user_id,
-                     role=ROLE(role)):
+                     role=ROLE(role),
+                     operator_user_id=operator_user_id):
             return jsonify({"success":0,"message":"Failed to add collaborator", "error_reason": "add_collaborator_failed"}),500
     except container_service.NodeServiceError as e:    
         if getattr(e, 'reason', None) == 'container_offline':
@@ -289,15 +303,18 @@ def remove_collaborator_api():
         ["error_reason": "xxxx"]
     }
     '''
-    if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
+    token = request.headers.get("token", "")
+    if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success":0,"message":"invalid or missing token", "error_reason": "invalid_token"}),401
     data=request.get_json() or {}
     container_id=data.get("container_id",0)
     user_id=data.get("user_id","")
+    request_user_id = authentications_repo.get_user_id_by_token(token)
 
     try:
         if not container_service.remove_collaborator(container_id=container_id,
-                                                 user_id=user_id):
+                                                 user_id=user_id,
+                                                 operator_user_id=request_user_id):
             return jsonify({"success":0,"message":"Failed to remove collaborator", "error_reason": "remove_collaborator_failed"}),500
     except container_service.NodeServiceError as e:
         if getattr(e, 'reason', None) == 'container_offline':
@@ -325,16 +342,19 @@ def update_role_api():
         ["error_reason": "xxxx"]
     }
     '''
-    if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
+    token = request.headers.get("token", "")
+    if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success":0,"message":"invalid or missing token", "error_reason": "invalid_token"}),401
     data=request.get_json() or {}
     container_id=data.get("container_id",0)
     user_id=data.get("user_id","")
     updated_role=data.get("updated_role","COLLABORATOR")
+    request_user_id = authentications_repo.get_user_id_by_token(token)
     try:
         if not container_service.update_role(container_id=container_id,
                 user_id=user_id,
-                updated_role=ROLE(updated_role)):
+                updated_role=ROLE(updated_role),
+                operator_user_id=request_user_id):
             return jsonify({"success":0,"message":"Failed to update role", "error_reason": "update_role_failed"}),500
     except container_service.NodeServiceError as e:
         if getattr(e, 'reason', None) == 'container_offline':
@@ -452,11 +472,13 @@ def list_all_containers_bref_information_api():
         }],
     }
     '''
-    if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
+    token = request.headers.get("token","")
+    if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success":0,"message":"invalid or missing token", "error_reason": "invalid_token"}),401
     data=request.get_json() or {}
     machine_id=data.get("machine_id","")
     user_id=data.get("user_id","")
+    request_user_id = authentications_repo.get_user_id_by_token(token)
     page_number=data.get("page_number",0)
     page_size=data.get("page_size",10)
     # 在此处统一为 None，并数字化 ID
@@ -477,7 +499,7 @@ def list_all_containers_bref_information_api():
     try: # 这里其实理论不会报错 但是保留
         result = container_service.list_all_container_bref_information(
             machine_id=machine_id,
-            user_id=user_id,
+            user_id=request_user_id,
             page_number=page_number,
             page_size=page_size)
         # expect a dict: { containers: [...], total_page: n }

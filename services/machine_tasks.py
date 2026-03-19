@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import Optional
 from ..utils.heartbeat import send, start_machine_maintenance_transition_heartbeat
 from ..repositories.containers_repo import update_container, list_containers as repo_list_containers
+from ..repositories import machine_permission_repo, user_repo
 from ..constant import ContainerStatus, MachineStatus
 #######################################
 #API Definition
@@ -32,7 +33,38 @@ class machine_detail_information(BaseModel):
 #######################################
 
 #######################################
+# 机器权限管理
+
+def Add_machine_permission(machine_id: int, user_id: int) -> bool:
+    machine = get_by_id(machine_id)
+    if not machine:
+        raise ValueError(machine_not_found)
+    user = user_repo.get_by_id(user_id)
+    if not user:
+        raise ValueError(user_not_found)
+    machine_permission_repo.add_permission(machine_id, user_id)
+    return True
+
+
+def Remove_machine_permission(machine_id: int, user_id: int) -> bool:
+    return machine_permission_repo.remove_permission(machine_id, user_id)
+
+
+def List_machine_permissions(machine_id: int) -> list[int]:
+    return machine_permission_repo.list_user_ids_by_machine(machine_id)
+
+
+#######################################
 # 辅助方法
+
+def _is_operator_user(user_id: int) -> bool:
+    try:
+        u = user_repo.get_by_id(user_id)
+        perm = getattr(u, permission, None) if u else None
+        return bool(perm and getattr(perm, value, str(perm)).lower() == operator)
+    except Exception:
+        return False
+
 def is_machine_online_remote(machine_id: int, timeout: float = 2.0) -> bool:
     """
     Perform a single, lightweight communication check to the Node's `/machine_status` endpoint.
@@ -194,7 +226,8 @@ def List_all_machine_bref_information(
     page_size: int,
     machine_name_prefix: str = None,  # 新增：按机器名称前缀过滤
     sort_by: str = "id",              # 新增：排序字段
-    sort_order: str = "asc"           # 新增：排序方向（asc/desc）
+    sort_order: str = "asc",          # 新增：排序方向（asc/desc）
+    user_id: int | None = None
 ) -> tuple[list[machine_bref_information], int]:
     """
     获取机器概要信息列表，支持分页、过滤和排序
@@ -234,6 +267,11 @@ def List_all_machine_bref_information(
         else:
             machines_query = machines_query.order_by(Machine.machine_ip.desc())
     
+        # 3. 权限过滤：普通用户仅能看到被授权机器
+    if user_id and not _is_operator_user(user_id):
+        allowed = set(machine_permission_repo.list_machine_ids_by_user(user_id))
+        machines_query = machines_query.filter(Machine.id.in_(allowed)) if allowed else machines_query.filter(False)
+
     # 3. 执行分页查询
     # 先计算符合过滤条件的总数量（而非全量机器）
     total_count = machines_query.count()

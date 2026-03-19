@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from ..config import CommsConfig
 from ..constant import *
 from sqlalchemy.exc import IntegrityError
-from ..repositories import containers_repo, machine_repo
+from ..repositories import containers_repo, machine_repo, machine_permission_repo
 from ..repositories import containers_repo as container_repo
 from .machine_tasks import is_machine_online_remote
 from ..repositories.machine_repo import *
@@ -31,6 +31,27 @@ from ..utils import sanitizer as _sanitizer
 
 ####################################################
 # 辅助工具
+
+def _is_operator_user(user_id: int) -> bool:
+    try:
+        u = get_by_id(user_id)
+        perm = getattr(u, 'permission', None) if u else None
+        return bool(perm and getattr(perm, 'value', str(perm)).lower() == 'operator')
+    except Exception:
+        return False
+
+
+def _can_access_machine(user_id: int, machine_id: int) -> bool:
+    if not user_id or not machine_id:
+        return False
+    if _is_operator_user(user_id):
+        return True
+    try:
+        allowed = set(machine_permission_repo.list_machine_ids_by_user(user_id))
+        return machine_id in allowed
+    except Exception:
+        return False
+
 def _ensure_machine_online_for_operation(machine_id: int, operation: str = ''):
     """
     这里检查机器在线状态的主要目的是为了在执行诸如创建/删除/修改容器等操作之前，先验证目标机器是否在线，以避免不必要的远程调用和更快地反馈给用户。虽然最终的远程调用也会有类似的检查，但这个预检查可以节省资源并提供更即时的错误响应。
@@ -187,7 +208,9 @@ class container_detail_information(BaseModel):
 
 
 # 将user_id作为admin，创建新容器
-def Create_container(owner_name:str,machine_id:int,container:Container_info,public_key=None, debug=False)->bool:
+def Create_container(owner_name:str,machine_id:int,container:Container_info,public_key=None, debug=False, operator_user_id:int|None=None)->bool:
+    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
+        raise NodeServiceError(f'Machine {machine_id} not accessible for user {operator_user_id}', reason='machine_permission_denied')
     # ensure machine is online before attempting creation
     _ensure_machine_online_for_operation(machine_id, 'create')
     machine_ip=get_machine_ip_by_id(machine_id)
@@ -333,8 +356,10 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
     return False
 
 #删除容器并删除其所有者记录
-def remove_container(container_id:int, debug=False)->bool:
+def remove_container(container_id:int, debug=False, operator_user_id:int|None=None)->bool:
     machine_id = get_machine_id_by_container_id(container_id)
+    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
+        raise NodeServiceError(f'Machine {machine_id} not accessible for user {operator_user_id}', reason='machine_permission_denied')
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
     # 使得只在机器在线时执行
@@ -396,8 +421,10 @@ def remove_container(container_id:int, debug=False)->bool:
     return False
 #将container_id对应的容器新增user_id作为collaborator,其权限为role
 
-def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
+def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False, operator_user_id:int|None=None)->bool:
     machine_id = get_machine_id_by_container_id(container_id)
+    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
+        raise NodeServiceError(f'Machine {machine_id} not accessible for user {operator_user_id}', reason='machine_permission_denied')
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
     machine_ip=get_machine_ip_by_id(machine_id)
@@ -469,8 +496,10 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False)->bool:
     return False
 #从container_id中移除user_id对应的用户访问权
 
-def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
+def remove_collaborator(container_id:int,user_id:int,debug=False, operator_user_id:int|None=None)->bool:
     machine_id = get_machine_id_by_container_id(container_id)
+    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
+        raise NodeServiceError(f'Machine {machine_id} not accessible for user {operator_user_id}', reason='machine_permission_denied')
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
     machine_ip=get_machine_ip_by_id(machine_id)
@@ -545,8 +574,10 @@ def remove_collaborator(container_id:int,user_id:int,debug=False)->bool:
 
 #修改user_id对container_id的访问权
 
-def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->bool:
+def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False, operator_user_id:int|None=None)->bool:
     machine_id = get_machine_id_by_container_id(container_id)
+    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
+        raise NodeServiceError(f'Machine {machine_id} not accessible for user {operator_user_id}', reason='machine_permission_denied')
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
     machine_ip=get_machine_ip_by_id(machine_id)
@@ -617,9 +648,11 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False)->boo
     return False
 
 
-def start_container(container_id:int, debug=False)->bool:
+def start_container(container_id:int, debug=False, operator_user_id:int|None=None)->bool:
     """发送start到对应容器所在node,启动后心跳机制监控状态，直到状态变为ONLINE或失败"""
     machine_id = get_machine_id_by_container_id(container_id)
+    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
+        raise NodeServiceError(f'Machine {machine_id} not accessible for user {operator_user_id}', reason='machine_permission_denied')
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
     _ensure_machine_online_for_operation(machine_id, 'start')
@@ -649,9 +682,11 @@ def start_container(container_id:int, debug=False)->bool:
     raise NodeServiceError(f"NODE start returned failure: {res}", reason=res.get('error_reason') or 'start_failed')
 
 
-def stop_container(container_id:int, debug=False)->bool:
+def stop_container(container_id:int, debug=False, operator_user_id:int|None=None)->bool:
     """发送stop到对应容器所在node,停止后心跳机制监控状态，直到状态变为OFFLINE或失败"""
     machine_id = get_machine_id_by_container_id(container_id)
+    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
+        raise NodeServiceError(f'Machine {machine_id} not accessible for user {operator_user_id}', reason='machine_permission_denied')
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
     _ensure_machine_online_for_operation(machine_id, 'stop')
@@ -678,9 +713,11 @@ def stop_container(container_id:int, debug=False)->bool:
     raise NodeServiceError(f"NODE stop returned failure: {res}", reason=res.get('error_reason') or 'stop_failed')
 
 
-def restart_container(container_id:int, debug=False)->bool:
+def restart_container(container_id:int, debug=False, operator_user_id:int|None=None)->bool:
     """发送restart到对应容器所在node,重启后心跳机制监控状态，直到状态变为ONLINE或失败"""
     machine_id = get_machine_id_by_container_id(container_id)
+    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
+        raise NodeServiceError(f'Machine {machine_id} not accessible for user {operator_user_id}', reason='machine_permission_denied')
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
     _ensure_machine_online_for_operation(machine_id, 'restart')
@@ -805,7 +842,19 @@ def get_container_detail_information(container_id:int)->container_detail_informa
 
 #返回一页容器的概要信息
 def list_all_container_bref_information(machine_id:int, user_id:int, page_number:int, page_size:int)->dict:
-    containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=user_id)
+    # 非管理员用户必须先通过机器权限表过滤可见机器
+    if user_id and not _is_operator_user(user_id):
+        allowed = set(machine_permission_repo.list_machine_ids_by_user(user_id))
+        if machine_id is not None:
+            if machine_id not in allowed:
+                containers = []
+            else:
+                containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=None)
+        else:
+            containers = [c for c in list_containers(limit=99999, offset=0, machine_id=None, user_id=None) if c.machine_id in allowed]
+            containers = containers[page_number*page_size:page_number*page_size+page_size]
+    else:
+        containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=user_id)
     res = []
     for container in containers:
         machine_ip = ""
