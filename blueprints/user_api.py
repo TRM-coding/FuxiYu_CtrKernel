@@ -43,7 +43,7 @@ def register():
 	
 	# 调用 service 层注册用户
 	try:
-		success, user_or_reason, _ = user_tasks.Register(username, email, password, graduation_year)
+		success, user_or_reason, _ = user_tasks.Register_with_code(username, email, password, graduation_year, recived_data.get("registration_code"))
 	except Exception as e:
 		return jsonify({"success": 0, "message": "registration failed due to server error"}), 500
 	if success:
@@ -61,7 +61,10 @@ def register():
 			"username_exists": "Username already exists",
 			"email_exists": "Email already exists",
 			"no_none_ascii": "Input contains non-ASCII characters",
-			"invalid_username": "Username may contain only letters, digits and underscore"
+			"invalid_username": "Username may contain only letters, digits and underscore",
+			"registration_code_required": "Verification code required",
+			"registration_code_invalid": "Verification code invalid or expired",
+			"mail_send_failed": "Failed to send verification email"
 		}
 		message = error_messages.get(error_reason, "Registration failed")
 
@@ -76,6 +79,20 @@ def register():
 			"error_reason": error_reason
 		}), status_code
 
+
+
+
+@api_bp.post("/request_register_code")
+def request_register_code():
+	data = request.get_json(silent=True) or {}
+	email = data.get("email")
+	if not email:
+		return jsonify({"success": 0, "message": "email required", "error_reason": "missing_email"}), 400
+	success, reason = user_tasks.Request_register_code(email)
+	if success:
+		return jsonify({"success": 1, "message": "verification code sent"}), 200
+	status = 400 if reason == 'email_domain_not_allowed' else 500
+	return jsonify({"success": 0, "message": reason, "error_reason": reason}), status
 
 @api_bp.post("/login")
 def login():
@@ -376,7 +393,6 @@ def update_user_api():
 			return jsonify({"success": 0, "message": "禁止非ASCII字符（请勿输入中文）", "error_reason": "no_none_ascii"}), 400
 		if str(e) == 'invalid_username':
 			return jsonify({"success": 0, "message": "用户名仅允许字母、数字和下划线", "error_reason": "invalid_username"}), 400
-		# propagate other ValueError messages as bad request
 		return jsonify({"success": 0, "message": str(e), "error_reason": "invalid_fields"}), 400
 
 	if user:

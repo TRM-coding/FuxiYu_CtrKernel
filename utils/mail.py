@@ -39,6 +39,10 @@ class MailConfig:
     timeout: int = int(os.getenv("MAIL_TIMEOUT", "15"))
 
 
+def _is_placeholder_password(password: str | None) -> bool:
+    return not password or 'your_smtp_auth_code' in str(password).lower()
+
+
 def _attach_files(msg: EmailMessage, attachments: Iterable[str | Path] | None) -> None:
     """为邮件消息添加附件。
 
@@ -105,6 +109,8 @@ def send(
     all_recipients = recipients + (cc or []) + (bcc or [])
 
     try:
+        if _is_placeholder_password(cfg.password):
+            return {"ok": True, "to": recipients, "mode": "development", "note": "mail password not configured; message not actually sent"}
         if cfg.use_ssl:
             smtp = smtplib.SMTP_SSL(cfg.host, cfg.port, timeout=cfg.timeout)
         else:

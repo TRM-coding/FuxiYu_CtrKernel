@@ -26,7 +26,7 @@ class CommsConfig:
 class CORSHeaderConfig:
     # Allow both localhost and 127.0.0.1 origins used in development
     # 这里列出允许的前端地址，前端开发时可能会用 localhost 或230
-    ALLOW_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173, http://192.168.5.230:5173,https://localhost:5173,https://127.0.0.1:5173,https://192.168.5.230:5173"
+    ALLOW_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173,http://192.168.5.141:5173,http://192.168.5.141:4173,http://192.168.5.230:5173,https://localhost:5173,https://127.0.0.1:5173,https://192.168.5.141:5173,https://192.168.5.141:4173,https://192.168.5.230:5173"
 
 
 class AppConfig(SqlConfig, KeyConfig):

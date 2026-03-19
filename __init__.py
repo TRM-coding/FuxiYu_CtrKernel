@@ -1,7 +1,9 @@
 # yourapp/__init__.py
+from dotenv import load_dotenv
+load_dotenv()
+
 from flask import Flask
 from flask_cors import CORS
-from dotenv import load_dotenv
 from .extensions import db, migrate, login_manager
 from .config import get_config, CORSHeaderConfig
 from .blueprints import register_blueprints
