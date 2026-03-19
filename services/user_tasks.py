@@ -309,3 +309,41 @@ def Reset_password(user_id:int)->str|None:
     return new_password
 #####################################
 
+
+ALLOWED_REGISTRATION_EMAIL_DOMAINS = {'bjtu.edu.cn', 'tsinghua.edu.cn', 'bupt.edu.cn'}
+
+
+def _get_email_domain(email: str) -> str | None:
+    if not email or '@' not in email:
+        return None
+    return email.rsplit('@', 1)[-1].lower().strip()
+
+
+def Request_register_code(email: str):
+    '''给指定学校邮箱发送注册验证码。'''
+    domain = _get_email_domain(email)
+    if domain not in ALLOWED_REGISTRATION_EMAIL_DOMAINS:
+        return False, 'email_domain_not_allowed'
+
+    code = f'{secrets.randbelow(1000000):06d}'
+    expires_at = datetime.utcnow() + timedelta(minutes=3)
+    registration_code_repo.create_code(email=email, school_domain=domain, code=code, expires_at=expires_at)
+    result = send_mail(to=email, subject='伏羲系统注册验证码', content=f'你的注册验证码是：{code}\n验证码有效期为3分钟。请勿泄露给他人。')
+    if not result.get('ok'):
+        return False, 'mail_send_failed'
+    return True, 'code_sent'
+
+
+def Register_with_code(username: str, email: str, password: str, graduation_year, registration_code: str):
+    '''带验证码的注册流程。'''
+    if not registration_code:
+        return False, 'registration_code_required', None
+
+    domain = _get_email_domain(email)
+    if domain not in ALLOWED_REGISTRATION_EMAIL_DOMAINS:
+        return False, 'email_domain_not_allowed', None
+
+    if not registration_code_repo.verify_code(email=email, code=registration_code, school_domain=domain):
+        return False, 'registration_code_invalid', None
+
+    return Register(username, email, password, graduation_year)
