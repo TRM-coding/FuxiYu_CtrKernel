@@ -2,6 +2,7 @@ import json
 import requests
 import time
 import base64
+from datetime import datetime, timedelta
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
@@ -12,6 +13,7 @@ from ..constant import *
 from sqlalchemy.exc import IntegrityError
 from ..repositories import containers_repo, machine_repo, machine_permission_repo
 from ..repositories import containers_repo as container_repo
+from ..repositories import container_ssh_login_repo
 from .machine_tasks import is_machine_online_remote
 from ..repositories.machine_repo import *
 from ..repositories.user_repo import *
@@ -31,6 +33,84 @@ from ..utils import sanitizer as _sanitizer
 
 ####################################################
 # 辅助工具
+
+_MONTH_ABBR_TO_NUM = {
+    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+    "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+}
+
+
+def _parse_last_ssh_time(raw: str | None) -> datetime | None:
+    """
+    尝试把 Node 返回的 last ssh 时间解析为 datetime。
+    支持：
+    - ISO/常见 datetime 字符串
+    - syslog 风格：`Mar 20 12:34:56 ...`
+    - `last` 输出中的日期片段：`Fri Mar 20 12:34 ...`
+    """
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+
+    # 1) 直接尝试 fromisoformat / 通用格式
+    try:
+        v = s.replace("Z", "+00:00")
+        return datetime.fromisoformat(v)
+    except Exception:
+        pass
+
+    # 2) 提取 "Mon DD HH:MM[:SS]" 片段（无年份时使用当前年）
+    m = re.search(r"\b([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}:\d{2}(?::\d{2})?)\b", s)
+    if not m:
+        return None
+    mon = _MONTH_ABBR_TO_NUM.get(m.group(1))
+    if not mon:
+        return None
+    day = int(m.group(2))
+    hhmmss = m.group(3)
+    parts = hhmmss.split(":")
+    hour = int(parts[0])
+    minute = int(parts[1])
+    second = int(parts[2]) if len(parts) > 2 else 0
+    now = datetime.utcnow()
+    try:
+        return datetime(now.year, mon, day, hour, minute, second)
+    except Exception:
+        return None
+
+
+def build_cleanup_info(last_ssh_login_time: str | None, cleanup_after_days: int) -> dict:
+    """
+    基于上次 SSH 登录时间计算清理时间信息（仅计算，不执行清理）。
+    """
+    if cleanup_after_days <= 0:
+        cleanup_after_days = 1
+
+    last_dt = _parse_last_ssh_time(last_ssh_login_time)
+    if last_dt is None:
+        return {
+            "cleanup_after_days": cleanup_after_days,
+            "cleanup_at": None,
+            "seconds_until_cleanup": None,
+            "cleanup_status": "unknown",
+        }
+
+    cleanup_at = last_dt + timedelta(days=cleanup_after_days)
+    seconds_left = int((cleanup_at - datetime.utcnow()).total_seconds())
+    if seconds_left <= 0:
+        status = "due"
+        seconds_left = 0
+    else:
+        status = "countdown"
+
+    return {
+        "cleanup_after_days": cleanup_after_days,
+        "cleanup_at": cleanup_at.isoformat(),
+        "seconds_until_cleanup": seconds_left,
+        "cleanup_status": status,
+    }
 
 def _is_operator_user(user_id: int) -> bool:
     try:
@@ -172,6 +252,85 @@ def get_container_status(machine_ip: str, container_name: str, timeout: float = 
 
     # both attempts failed due to network/request errors
     return {"error": str(last_exc) if last_exc is not None else "unknown error"}
+
+
+def get_container_last_ssh_login_time(container_name: str, timeout: float = 5.0) -> str | None:
+    """
+    通过中心端向集群客户端请求容器上次 SSH 登录时间。
+    入参: container_name
+    返回: 时间字符串或 None
+    """
+    if not container_name:
+        return None
+
+    try:
+        _sanitizer.validate_username(container_name)
+    except Exception:
+        return None
+
+    # 由于 DB 约束是 (name, machine_id) 唯一，name 在全局可能重复。
+    # 这里优先取最新 id 的那条记录来匹配既有接口的简化调用方式。
+    container = (
+        Container.query.filter_by(name=container_name)
+        .order_by(Container.id.desc())
+        .first()
+    )
+    if not container:
+        return None
+
+    machine_id = container.machine_id
+    machine_ip = get_machine_ip_by_id(machine_id)
+    url = get_full_url(machine_ip, "/container_last_ssh_time")
+
+    payload = json.dumps({"config": {"container_name": container_name}})
+    sig = signature(payload)
+    enc = encryption(payload)
+    res = send(enc, sig, url, timeout=timeout)
+    print(f"get_container_last_ssh_login_time: NODE response: {res}")
+
+    if not isinstance(res, dict):
+        raise NodeServiceError(
+            f"NODE get_last_ssh_login_time unexpected response: {res}",
+            reason="unexpected_response",
+        )
+
+    status_code = res.get("status_code")
+    err_reason = res.get("error_reason")
+
+    # 这类 404 通常是 Node 尚未部署该接口（返回 HTML 404），不是“容器没有SSH记录”
+    if status_code == 404 and not err_reason:
+        txt = str(res.get("text") or "")
+        if "<!doctype html" in txt.lower() or "not found" in txt.lower():
+            raise NodeServiceError(
+                "NODE get_last_ssh_login_time failed: endpoint /container_last_ssh_time not found on node",
+                reason="node_endpoint_not_found",
+            )
+
+    # 节点明确声明“未找到SSH登录记录”才返回空值
+    if err_reason == "not_found":
+        last_time = None
+    elif res.get("success") in (1, True):
+        raw = res.get("last_ssh_connect_time")
+        last_time = str(raw) if raw is not None else None
+    else:
+        # 其余情况都作为错误抛出，避免被静默吞掉
+        _raise_on_node_error(res, "get_last_ssh_login_time")
+        raise NodeServiceError(
+            f"NODE get_last_ssh_login_time failed: {res}",
+            reason=err_reason or "NODE_error",
+        )
+
+    # 记录请求结果（包括空值）
+    try:
+        container_ssh_login_repo.upsert_last_ssh_login_time(
+            machine_id=machine_id,
+            container_id=container.id,
+            last_ssh_login_time=last_time,
+        )
+    except Exception as e:
+        print(f"Warning: failed to persist last ssh login time for container {container.id}: {e}")
+
+    return last_time
 
 ####################################################
 
