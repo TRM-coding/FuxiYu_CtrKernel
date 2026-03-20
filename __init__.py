@@ -9,6 +9,7 @@ from .extensions import db, migrate, login_manager
 from .config import get_config, CORSHeaderConfig
 from .blueprints import register_blueprints
 from .schemas.container_ssh_refresh_task import start_container_ssh_refresh_scheduler
+from .schemas.container_cleanup_task import start_container_cleanup_scheduler
 
 
 def create_app(config: str | None = None):
@@ -34,5 +35,7 @@ def create_app(config: str | None = None):
     # Flask debug 模式下父进程和子进程都会执行 create_app，这里仅在 reloader 子进程启动任务，避免重复线程。
     if (not app.debug) or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         start_container_ssh_refresh_scheduler(app, interval_seconds=300)
+        # 启动容器定时清理任务（每20分钟扫描一次到期容器并释放）
+        start_container_cleanup_scheduler(app, interval_seconds=1200)
 
     return app
