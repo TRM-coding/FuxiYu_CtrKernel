@@ -125,4 +125,5 @@ def send(
             smtp.send_message(msg, from_addr=cfg.sender, to_addrs=all_recipients)
         return {"ok": True, "to": recipients}
     except Exception as exc:
+        print(f"Failed to send email to {recipients}: {exc}")
         return {"ok": False, "error": str(exc), "to": recipients}

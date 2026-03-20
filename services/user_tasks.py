@@ -331,7 +331,11 @@ def Request_register_code(email: str):
 
     code = f'{secrets.randbelow(1000000):06d}'
     expires_at = datetime.utcnow() + timedelta(minutes=3)
-    registration_code_repo.create_code(email=email, school_domain=domain, code=code, expires_at=expires_at)
+    try:
+        registration_code_repo.create_code(email=email, school_domain=domain, code=code, expires_at=expires_at)
+    except Exception as exc:
+        print(f"Failed to create registration code for {email}: {exc}")
+        return False, 'code_creation_failed'
     result = send_mail(to=email, subject='伏羲系统注册验证码', content=f'你的注册验证码是：{code}\n验证码有效期为3分钟。请勿泄露给他人。')
     if not result.get('ok'):
         return False, 'mail_send_failed'

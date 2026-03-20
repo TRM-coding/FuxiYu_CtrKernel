@@ -8,4 +8,4 @@ pymysql
 pydantic
 Flask-Cors>=3.0.10
 requests
-cryptographypython-dotenv
+dotenv
