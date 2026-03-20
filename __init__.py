@@ -2,11 +2,13 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import os
 from flask import Flask
 from flask_cors import CORS
 from .extensions import db, migrate, login_manager
 from .config import get_config, CORSHeaderConfig
 from .blueprints import register_blueprints
+from .schemas.container_ssh_refresh_task import start_container_ssh_refresh_scheduler
 
 
 def create_app(config: str | None = None):
@@ -27,4 +29,10 @@ def create_app(config: str | None = None):
     login_manager.init_app(app)
 
     register_blueprints(app)
+
+    # 启动“每5分钟刷新容器上次 SSH 登录时间”的后台任务。
+    # Flask debug 模式下父进程和子进程都会执行 create_app，这里仅在 reloader 子进程启动任务，避免重复线程。
+    if (not app.debug) or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        start_container_ssh_refresh_scheduler(app, interval_seconds=300)
+
     return app

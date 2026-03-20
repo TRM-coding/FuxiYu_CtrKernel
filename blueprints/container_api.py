@@ -25,6 +25,7 @@ REASON_STATUS_MAP = {
     'stop_failed': 500,
     'restart_failed': 500,
     'container_offline': 400,
+    'node_endpoint_not_found': 502,
 }
 @api_bp.post("/containers/create_container")
 def create_container_api():
@@ -445,6 +446,64 @@ def container_status_api():
         return jsonify({"container_status": container.container_status.value}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@api_bp.post("/containers/refresh_last_ssh_login_time")
+def refresh_last_ssh_login_time_api():
+    '''
+    前端触发刷新容器上次 SSH 登录时间。
+    请求格式：
+    {
+        "container_id": <int>
+    }
+    header:
+    {
+        "token": "xxxx"
+    }
+    返回格式：
+    {
+        "success": 0|1,
+        "container_id": <int>,
+        "container_name": "<name>",
+        "last_ssh_login_time": "<time or null>"
+    }
+    '''
+    token = request.headers.get("token", "")
+    if not authentications_repo.is_token_valid(token):
+        return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
+
+    data = request.get_json() or {}
+    container_id = data.get("container_id", 0)
+    try:
+        container_id = int(container_id)
+    except Exception:
+        return jsonify({"success": 0, "message": "invalid container_id", "error_reason": "invalid_payload"}), 400
+
+    container = containers_repo.get_by_id(container_id)
+    if not container:
+        return jsonify({"success": 0, "message": "Container not found", "error_reason": "container_not_found"}), 404
+
+    try:
+        last_time = container_service.get_container_last_ssh_login_time(container.name)
+    except container_service.NodeServiceError as e:
+        reason = getattr(e, "reason", None)
+        status = REASON_STATUS_MAP.get(reason, 500)
+        return jsonify({"success": 0, "message": str(e), "error_reason": reason}), status
+    except Exception as e:
+        reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
+        status = REASON_STATUS_MAP.get(reason, 500)
+        payload = {"success": 0, "message": f"Internal error: {str(e)}"}
+        if reason:
+            payload["error_reason"] = reason
+        return jsonify(payload), status
+
+    return jsonify({
+        "success": 1,
+        "container_id": container.id,
+        "container_name": container.name,
+        "last_ssh_login_time": last_time
+    }), 200
+
 
 @api_bp.post("/containers/list_all_container_bref_information")
 def list_all_containers_bref_information_api():
