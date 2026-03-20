@@ -4,6 +4,13 @@ from ..services import machine_tasks as machine_service
 from ..repositories import user_repo, authentications_repo
 from ..schemas.user_schema import user_schema, users_schema
 from ..constant import PERMISSION
+
+
+def _resolve_auth_token():
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        auth = auth[7:]
+    return request.cookies.get("auth_token", "") or request.headers.get("token", "") or auth.strip()
 from sqlalchemy.exc import IntegrityError
 
 
@@ -221,12 +228,14 @@ def list_all_machine_bref_information_api():
         ["error_reason": "xxxx"]
     }
     '''
-    if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+    token = _resolve_auth_token()
+    if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json(silent=True) or {}
     page_number = int(data.get("page_number", 0))
     page_size = int(data.get("page_size", 10))
-    machines_info, total_pages = machine_service.List_all_machine_bref_information(page_number=page_number, page_size=page_size)
+    user_id = authentications_repo.get_user_id_by_token(token)
+    machines_info, total_pages = machine_service.List_all_machine_bref_information(page_number=page_number, page_size=page_size, user_id=user_id)
     machines_list = []
     for machine in machines_info:
         machines_list.append({
@@ -237,3 +246,35 @@ def list_all_machine_bref_information_api():
             "machine_status": machine.machine_status
         })
     return jsonify({"machines": machines_list, "total_pages": total_pages}), 200
+
+@api_bp.post("/machines/add_machine_permission")
+def add_machine_permission_api():
+    token = _resolve_auth_token()
+    if (not authentications_repo.is_token_valid(token)):
+        return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
+    if (not user_repo.check_permission(token, required_permission=PERMISSION.OPERATOR)):
+        return jsonify({"success": 0, "message": "insufficient permissions", "error_reason": "insufficient_permission"}), 403
+    data = request.get_json(silent=True) or {}
+    machine_id = int(data.get("machine_id") or 0)
+    user_id = int(data.get("user_id") or 0)
+    if not machine_id or not user_id:
+        return jsonify({"success": 0, "message": "machine_id and user_id required", "error_reason": "missing_fields"}), 400
+    try:
+        machine_service.Add_machine_permission(machine_id, user_id)
+    except ValueError as e:
+        reason = str(e)
+        status = 404 if reason in ("machine_not_found", "user_not_found") else 400
+        return jsonify({"success": 0, "message": reason, "error_reason": reason}), status
+    return jsonify({"success": 1, "message": "machine permission added"}), 200
+
+
+@api_bp.get("/machines/list_machine_permissions")
+def list_machine_permissions_api():
+    token = _resolve_auth_token()
+    if (not authentications_repo.is_token_valid(token)):
+        return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
+    machine_id = request.args.get("machine_id", type=int) or 0
+    if not machine_id:
+        return jsonify({"success": 0, "message": "machine_id required", "error_reason": "missing_fields"}), 400
+    user_ids = machine_service.List_machine_permissions(machine_id)
+    return jsonify({"success": 1, "machine_id": machine_id, "user_ids": user_ids}), 200
