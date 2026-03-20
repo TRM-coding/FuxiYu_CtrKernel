@@ -34,7 +34,7 @@ from ..utils import sanitizer as _sanitizer
 
 def _is_operator_user(user_id: int) -> bool:
     try:
-        u = get_by_id(user_id)
+        u = user_repo.get_by_id(user_id)
         perm = getattr(u, 'permission', None) if u else None
         return bool(perm and getattr(perm, 'value', str(perm)).lower() == 'operator')
     except Exception:

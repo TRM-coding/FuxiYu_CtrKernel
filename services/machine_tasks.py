@@ -38,10 +38,10 @@ class machine_detail_information(BaseModel):
 def Add_machine_permission(machine_id: int, user_id: int) -> bool:
     machine = get_by_id(machine_id)
     if not machine:
-        raise ValueError(machine_not_found)
+        raise ValueError('machine_not_found')
     user = user_repo.get_by_id(user_id)
     if not user:
-        raise ValueError(user_not_found)
+        raise ValueError('user_not_found')
     machine_permission_repo.add_permission(machine_id, user_id)
     return True
 
@@ -60,8 +60,8 @@ def List_machine_permissions(machine_id: int) -> list[int]:
 def _is_operator_user(user_id: int) -> bool:
     try:
         u = user_repo.get_by_id(user_id)
-        perm = getattr(u, permission, None) if u else None
-        return bool(perm and getattr(perm, value, str(perm)).lower() == operator)
+        perm = getattr(u, 'permission', None) if u else None
+        return bool(perm and getattr(perm, 'value', str(perm)).lower() == 'operator')
     except Exception:
         return False
 
