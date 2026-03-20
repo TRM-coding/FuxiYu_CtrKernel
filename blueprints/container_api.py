@@ -1,5 +1,6 @@
 from sqlalchemy.exc import IntegrityError
 from flask import jsonify, request
+from flask import current_app
 from . import api_bp
 from ..services import container_tasks as container_service
 from ..utils.Container import Container_info
@@ -485,6 +486,8 @@ def refresh_last_ssh_login_time_api():
 
     try:
         last_time = container_service.get_container_last_ssh_login_time(container.name)
+        cleanup_days = int(current_app.config.get("CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
+        cleanup_info = container_service.build_cleanup_info(last_time, cleanup_days)
     except container_service.NodeServiceError as e:
         reason = getattr(e, "reason", None)
         status = REASON_STATUS_MAP.get(reason, 500)
@@ -501,7 +504,11 @@ def refresh_last_ssh_login_time_api():
         "success": 1,
         "container_id": container.id,
         "container_name": container.name,
-        "last_ssh_login_time": last_time
+        "last_ssh_login_time": last_time,
+        "cleanup_after_days": cleanup_info.get("cleanup_after_days"),
+        "cleanup_at": cleanup_info.get("cleanup_at"),
+        "seconds_until_cleanup": cleanup_info.get("seconds_until_cleanup"),
+        "cleanup_status": cleanup_info.get("cleanup_status"),
     }), 200
 
 

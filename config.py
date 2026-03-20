@@ -54,6 +54,8 @@ class AppConfig(SqlConfig, KeyConfig):
     # P这些都是相对于web根目录存的/certs/localhost.pem。与现有架构有出入 可调整
     SSL_CERT_PATH = os.getenv("SSL_CERT_PATH", "certs/localhost.pem")
     SSL_KEY_PATH = os.getenv("SSL_KEY_PATH", "certs/localhost-key.pem")
+    # 容器自动清理阈值（天）。这里只用于计算和展示，不在此处执行实际清理动作。
+    CONTAINER_CLEANUP_AFTER_DAYS = int(os.getenv("CONTAINER_CLEANUP_AFTER_DAYS", "7"))
 
 
 def get_config(env: str | None = None):
