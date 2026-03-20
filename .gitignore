@@ -6,3 +6,4 @@ certs/*.pem
 certs/*-key.pem
 certs/*.key
 *.log
+.env
