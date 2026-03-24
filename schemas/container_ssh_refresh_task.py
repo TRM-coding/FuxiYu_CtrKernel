@@ -24,7 +24,7 @@ def refresh_all_containers_last_ssh_login_time_once(page_size: int = 200) -> Non
         for c in containers:
             try:
                 # 该函数内部会把结果（含 None）写入 container_ssh_login_records
-                container_tasks.get_container_last_ssh_login_time(c.name)
+                container_tasks.get_container_last_ssh_login_time(c.id)
             except Exception as e:
                 print(
                     f"[ssh-refresh] failed for container id={getattr(c, 'id', '?')} "

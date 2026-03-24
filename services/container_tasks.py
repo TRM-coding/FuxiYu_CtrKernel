@@ -3,6 +3,7 @@ import requests
 import time
 import base64
 from datetime import datetime, timedelta
+import traceback
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
@@ -11,7 +12,7 @@ from pydantic import BaseModel
 from ..config import CommsConfig
 from ..constant import *
 from sqlalchemy.exc import IntegrityError
-from ..repositories import containers_repo, machine_repo, machine_permission_repo
+from ..repositories import containers_repo, machine_repo, machine_permission_repo, user_repo
 from ..repositories import containers_repo as container_repo
 from ..repositories import container_ssh_login_repo
 from .machine_tasks import is_machine_online_remote
@@ -85,6 +86,7 @@ def build_cleanup_info(last_ssh_login_time: str | None, cleanup_after_days: int)
     """
     基于上次 SSH 登录时间计算清理时间信息（仅计算，不执行清理）。
     """
+    print(f"DEBUG: build_cleanup_info called with last_ssh_login_time='{last_ssh_login_time}' and cleanup_after_days={cleanup_after_days}")
     if cleanup_after_days <= 0:
         cleanup_after_days = 1
 
@@ -115,6 +117,7 @@ def build_cleanup_info(last_ssh_login_time: str | None, cleanup_after_days: int)
 def _is_operator_user(user_id: int) -> bool:
     try:
         u = user_repo.get_by_id(user_id)
+        print(f"DEBUG: checking if user {user_id} is operator: permission={getattr(u, 'permission', None)}")
         perm = getattr(u, 'permission', None) if u else None
         return bool(perm and getattr(perm, 'value', str(perm)).lower() == 'operator')
     except Exception:
@@ -254,38 +257,44 @@ def get_container_status(machine_ip: str, container_name: str, timeout: float = 
     return {"error": str(last_exc) if last_exc is not None else "unknown error"}
 
 
-def get_container_last_ssh_login_time(container_name: str, timeout: float = 5.0) -> str | None:
+def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -> str | None:
     """
     通过中心端向集群客户端请求容器上次 SSH 登录时间。
-    入参: container_name
+    入参: container_id
     返回: 时间字符串或 None
     """
-    if not container_name:
+    try:
+        container_id = int(container_id)
+    except Exception:
+        print(f"Invalid container id for SSH login time query: {container_id}")
         return None
 
     try:
-        _sanitizer.validate_username(container_name)
+        container = containers_repo.get_by_id(container_id)
     except Exception:
+        print(f"Error querying container info for id={container_id}: {traceback.format_exc()}")
         return None
 
-    # 由于 DB 约束是 (name, machine_id) 唯一，name 在全局可能重复。
-    # 这里优先取最新 id 的那条记录来匹配既有接口的简化调用方式。
-    container = (
-        Container.query.filter_by(name=container_name)
-        .order_by(Container.id.desc())
-        .first()
-    )
     if not container:
         return None
+    try:
+        machine_id = container.machine_id
+        machine_ip = get_machine_ip_by_id(machine_id)
+        url = get_full_url(machine_ip, "/container_last_ssh_time")
+    except Exception:
+        print(f"Error retrieving machine info for container id={container_id}: {traceback.format_exc()}")
+        return None
 
-    machine_id = container.machine_id
-    machine_ip = get_machine_ip_by_id(machine_id)
-    url = get_full_url(machine_ip, "/container_last_ssh_time")
-
+    container_name = getattr(container, 'name', None)
     payload = json.dumps({"config": {"container_name": container_name}})
-    sig = signature(payload)
-    enc = encryption(payload)
-    res = send(enc, sig, url, timeout=timeout)
+    try:
+        sig = signature(payload)
+        enc = encryption(payload)
+        res = send(enc, sig, url, timeout=timeout)
+    except Exception as e:
+        print(f"Error sending request to {url}: {e}")
+        return None
+    print(f"DEBUG: get_container_last_ssh_login_time: sent request to {url} with payload {payload}")
     print(f"get_container_last_ssh_login_time: NODE response: {res}")
 
     if not isinstance(res, dict):
@@ -302,7 +311,7 @@ def get_container_last_ssh_login_time(container_name: str, timeout: float = 5.0)
         txt = str(res.get("text") or "")
         if "<!doctype html" in txt.lower() or "not found" in txt.lower():
             raise NodeServiceError(
-                "NODE get_last_ssh_login_time failed: endpoint /container_last_ssh_time not found on node",
+                f"NODE get_last_ssh_login_time failed: endpoint /container_last_ssh_time not found on node {machine_ip}",
                 reason="node_endpoint_not_found",
             )
 
@@ -1030,13 +1039,13 @@ def list_all_container_bref_information(machine_id:int, user_id:int, page_number
                 status_val = str(getattr(m, 'machine_status', '')).lower()
             if status_val in ('offline', 'maintenance'):
                 do_node_check = False
-
-        st = None
-        if do_node_check:
             try:
                 machine_ip = get_machine_ip_by_id(container.machine_id)
             except Exception:
                 machine_ip = None
+
+        st = None
+        if do_node_check:
             if machine_ip:
                 st = get_container_status(machine_ip, container.name)
                 # If Node reports 404, delete local record (existing behavior)

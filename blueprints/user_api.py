@@ -301,7 +301,6 @@ def change_password_user():
 	if not user:
 		return jsonify({"success": 0, "message": "user not found", "error_reason": "user_not_found"}), 404
 
-	ok = user_tasks.Change_password(user, old_password, new_password)
 	try:
 		ok = user_tasks.Change_password(user, old_password, new_password)
 		if ok:

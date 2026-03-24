@@ -485,7 +485,7 @@ def refresh_last_ssh_login_time_api():
         return jsonify({"success": 0, "message": "Container not found", "error_reason": "container_not_found"}), 404
 
     try:
-        last_time = container_service.get_container_last_ssh_login_time(container.name)
+        last_time = container_service.get_container_last_ssh_login_time(container.id)
         cleanup_days = int(current_app.config.get("CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
         cleanup_info = container_service.build_cleanup_info(last_time, cleanup_days)
     except container_service.NodeServiceError as e:
