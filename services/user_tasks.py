@@ -145,21 +145,30 @@ def Register(username: str, email: str, password: str, graduation_year):
 #####################################
 def Change_password(user: User, old_password: str, new_password: str) -> bool:
     # disallow non-ASCII characters in passwords
-    def _is_all_ascii(s: str) -> bool:
-        try:
-            if s is None:
-                return True
-            return all(ord(ch) < 128 for ch in s)
-        except Exception:
+    # def _is_all_ascii(s: str) -> bool:
+    #     try:
+    #         if s is None:
+    #             return True
+    #         return all(ord(ch) < 128 for ch in s)
+    #     except Exception:
+    #         print(f"Error checking ASCII for password: {s}")
+    #         return False
+    print(f"Attempting to change password for user_id={user.id}")
+
+    try:
+        if not check_password_hash(user.password_hash, old_password):
+            print("Old password does not match.")
             return False
-
-    if not _is_all_ascii(old_password) or not _is_all_ascii(new_password):
-        raise ValueError('no_none_ascii')
-
-    if check_password_hash(user.password_hash, old_password):
+    except Exception as e:
+        print(f"Error checking old password hash: {e}")
+        return False
+    try:
         update_user(user.id, password_hash=generate_password_hash(new_password))
-        return True
-    return False
+    except Exception as e:
+        print(f"Error updating password in database: {e}")
+        return False
+    print("Password changed successfully.")
+    return True
 
 #####################################
 #注销用户
