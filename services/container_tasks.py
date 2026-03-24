@@ -1009,20 +1009,22 @@ def get_container_detail_information(container_id:int)->container_detail_informa
 
 
 #返回一页容器的概要信息
-def list_all_container_bref_information(machine_id:int, user_id:int, page_number:int, page_size:int)->dict:
+def list_all_container_bref_information(machine_id:int, request_user_id:int, page_number:int, page_size:int, user_id:int = None)->dict:
     # 非管理员用户必须先通过机器权限表过滤可见机器
-    if user_id and not _is_operator_user(user_id):
+    if not _is_operator_user(request_user_id):
         allowed = set(machine_permission_repo.list_machine_ids_by_user(user_id))
         if machine_id is not None:
             if machine_id not in allowed:
                 containers = []
             else:
-                containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=None)
+                containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=request_user_id)
         else:
-            containers = [c for c in list_containers(limit=99999, offset=0, machine_id=None, user_id=None) if c.machine_id in allowed]
+            containers = [c for c in list_containers(limit=99999, offset=0, machine_id=None, user_id=request_user_id) if c.machine_id in allowed]
             containers = containers[page_number*page_size:page_number*page_size+page_size]
-    else:
+    elif user_id is not None:
         containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=user_id)
+    else:
+        containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=None)
     res = []
     for container in containers:
         machine_ip = ""
