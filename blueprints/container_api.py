@@ -520,6 +520,7 @@ def list_all_containers_bref_information_api():
     {
         "token",
         "machine_id",
+        "user_id",
         "page_number",
         "page_size"
     }
@@ -565,9 +566,10 @@ def list_all_containers_bref_information_api():
     try: # 这里其实理论不会报错 但是保留
         result = container_service.list_all_container_bref_information(
             machine_id=machine_id,
-            user_id=request_user_id,
+            request_user_id=request_user_id,
             page_number=page_number,
-            page_size=page_size)
+            page_size=page_size,
+            user_id=user_id)
         # expect a dict: { containers: [...], total_page: n }
         containers_info = result.get('containers', [])
         total_page = result.get('total_page', 1)
