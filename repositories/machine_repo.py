@@ -57,7 +57,7 @@ def create_machine(machinename:str,
                    gpu_number:int,
                    gpu_type:str,
                    memory_size:int,
-                   max_swap_size:int,
+                   max_shared_gb:int,
                    disk_size:int,
                    max_cpu_core_number:int,
                    max_gpu_number:int,
@@ -71,7 +71,7 @@ def create_machine(machinename:str,
          gpu_number=gpu_number,
          gpu_type=gpu_type,
          memory_size_gb=memory_size,
-         max_swap_gb=max_swap_size,
+        max_shared_gb=max_shared_gb,
          max_cpu_core_number=max_cpu_core_number,
          max_gpu_number=max_gpu_number,
          max_memory_gb=max_memory_gb,
@@ -94,14 +94,14 @@ def update_machine(machine_id: int, *, commit: bool = True, **fields) -> bool:
     部分更新用户字段。
     使用示例:
         update_machine(1, machine_name="new_name", cpu_core_number=16)
-    allowed = {"machine_name", "machine_ip", "machine_type", "machine_status", "cpu_core_number", "memory_size", "gpu_number", "gpu_type", "disk_size", "machine_description", "max_swap_gb", "max_memory_gb", "max_gpu_number", "max_cpu_core_number"}
+    allowed = {"machine_name", "machine_ip", "machine_type", "machine_status", "cpu_core_number", "memory_size", "gpu_number", "gpu_type", "disk_size", "machine_description", "max_shared_gb", "max_memory_gb", "max_gpu_number", "max_cpu_core_number"}
     """
     machine = get_by_id(machine_id)
     if not machine:
         return None
 
     allowed = {"machine_name", "machine_ip", "machine_type", "machine_status", "cpu_core_number",
-               "memory_size_gb", "gpu_number", "gpu_type", "disk_size_gb", "machine_description", "swap_size_gb", "max_swap_gb",
+               "memory_size_gb", "gpu_number", "gpu_type", "disk_size_gb", "machine_description", "shared_size_gb", "max_shared_gb",
                "max_memory_gb", "max_gpu_number", "max_cpu_core_number"}
     dirty = False
     for k, v in fields.items():
@@ -137,7 +137,7 @@ def get_max_memory_gb(machine_id:int) -> int:
     return int(max_val) if max_val is not None else 0
 
 
-def get_max_swap_gb(machine_id:int) -> int:
-    """用于取数据库里的max_swap_gb字段。"""
-    max_val = db.session.query(Machine.max_swap_gb).filter(Machine.id == machine_id).scalar()
+def get_max_shared_gb(machine_id:int) -> int:
+    """用于取数据库里的max_shared_gb字段。"""
+    max_val = db.session.query(Machine.max_shared_gb).filter(Machine.id == machine_id).scalar()
     return int(max_val) if max_val is not None else 0

@@ -17,7 +17,7 @@ class Machine(db.Model):
     memory_size_gb: int = db.Column(db.Integer, nullable=True)
     gpu_number: int = db.Column(db.Integer, nullable=True)
     gpu_type: str = db.Column(db.String(120), nullable=True)
-    max_swap_gb: int = db.Column(db.Integer, nullable=False, default=2)
+    max_shared_gb: int = db.Column(db.Integer, nullable=True)
     disk_size_gb: int = db.Column(db.Integer, nullable=True)
     machine_description: str = db.Column(db.String(500), nullable=True)
     max_memory_gb: int = db.Column(db.Integer, nullable=True) 
