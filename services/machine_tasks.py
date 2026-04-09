@@ -23,7 +23,7 @@ class machine_detail_information(BaseModel):
     gpu_number:int
     gpu_type: Optional[str] # 部分sql数据会出现此字段是NULL的情况，因此暂时用这个方法解决
     memory_size_gb:int
-    max_swap_gb:int
+    max_shared_gb:int
     max_cpu_core_number:int
     max_gpu_number:int
     max_memory_gb:int
@@ -99,7 +99,7 @@ def Add_machine(machine_name:str,
                    gpu_number:int,
                    gpu_type:str,
                    memory_size:int,
-                   max_swap_size:int,
+                   max_shared_gb:int,
                    disk_size:int,
                    max_memory_gb:int,
                    max_gpu_number:int,
@@ -112,20 +112,32 @@ def Add_machine(machine_name:str,
     if machine_type and len(str(machine_type)) > 255:
         raise ValueError(f"machine_type too long (max 255): length={len(str(machine_type))}")
 
-    # max_swap_size defensive check: must be non-negative integer and <= 8 (GB)
-    if max_swap_size is not None:
+    # max_shared_gb defensive check: must be non-negative integer and <= 8 (GB)
+    if max_shared_gb is not None:
         try:
-            ss = int(max_swap_size)
+            ss = int(max_shared_gb)
         except Exception:
-            e = ValueError(f"max_swap_size must be an integer: {max_swap_size}")
+            e = ValueError(f"max_shared_gb must be an integer: {max_shared_gb}")
             setattr(e, 'error_reason', 'create_failed')
             raise e
-        if ss < 0 or ss > 8:
-            e = ValueError(f"swap_size out of range (0-8 GB): {ss}")
+        if ss <= 0:
+            e = ValueError(f"shared size out of range (0-8 GB): {ss}")
             setattr(e, 'error_reason', 'create_failed')
             raise e
 
-    create_machine(
+        # ensure machine max_shared does not exceed machine max_memory
+        try:
+            mm = int(max_memory_gb) if max_memory_gb is not None else None
+        except Exception:
+            e = ValueError(f"max_memory_gb must be an integer: {max_memory_gb}")
+            setattr(e, 'error_reason', 'create_failed')
+            raise e
+        if mm is not None and ss > mm:
+            e = ValueError(f"max_shared_gb ({ss}) cannot be greater than max_memory_gb ({mm})")
+            setattr(e, 'error_reason', 'create_failed')
+            raise e
+
+        create_machine(
          machinename=machine_name,
          machine_ip=machine_ip,
          machine_type=machine_type,
@@ -134,7 +146,7 @@ def Add_machine(machine_name:str,
          gpu_number=gpu_number,
          gpu_type=gpu_type,
          memory_size=memory_size,
-         max_swap_size=max_swap_size,
+            max_shared_gb=max_shared_gb,
          disk_size=disk_size,
          max_memory_gb=max_memory_gb,
          max_gpu_number=max_gpu_number,
@@ -161,19 +173,41 @@ def Update_machine(machine_id: int, **fields) -> bool:
     if not machine:
         return False
 
-    # validate swap_size when provided: must be integer and <= 8 GB
-    if 'swap_size' in fields:
-        ss_val = fields.get('swap_size')
+    # validate shared_size when provided: must be integer and <= 8 GB
+    if 'shared_size' in fields or 'shared_gb' in fields or 'max_shared_gb' in fields:
+        # prefer explicit max_shared_gb field when present
+        ss_val = None
+        if 'max_shared_gb' in fields:
+            ss_val = fields.get('max_shared_gb')
+        else:
+            ss_val = fields.get('shared_size') if 'shared_size' in fields else fields.get('shared_gb')
         try:
             ss = int(ss_val) if ss_val is not None else None
         except Exception:
-            e = ValueError(f"swap_size must be an integer: {ss_val}")
+            e = ValueError(f"shared_size must be an integer: {ss_val}")
             setattr(e, 'error_reason', 'update_failed')
             raise e
         if ss is not None and (ss < 0 or ss > 8):
-            e = ValueError(f"swap_size out of range (0-8 GB): {ss}")
+            e = ValueError(f"shared_size out of range (0-8 GB): {ss}")
             setattr(e, 'error_reason', 'update_failed')
             raise e
+
+        # if max_shared_gb provided, ensure it does not exceed updated or current max_memory_gb
+        if 'max_shared_gb' in fields:
+            try:
+                target_max_mem = None
+                if 'max_memory_gb' in fields:
+                    target_max_mem = int(fields.get('max_memory_gb')) if fields.get('max_memory_gb') is not None else None
+                else:
+                    target_max_mem = int(getattr(machine, 'max_memory_gb', None)) if getattr(machine, 'max_memory_gb', None) is not None else None
+            except Exception:
+                e = ValueError(f"max_memory_gb must be an integer when validating max_shared_gb")
+                setattr(e, 'error_reason', 'update_failed')
+                raise e
+            if target_max_mem is not None and ss is not None and ss > target_max_mem:
+                e = ValueError(f"max_shared_gb ({ss}) cannot be greater than max_memory_gb ({target_max_mem})")
+                setattr(e, 'error_reason', 'update_failed')
+                raise e
 
     requested_status = fields.get('machine_status', None)
     current_status = machine.machine_status.value if hasattr(machine.machine_status, 'value') else str(machine.machine_status)
@@ -209,7 +243,7 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
         gpu_number=machine.gpu_number,
         gpu_type=machine.gpu_type,
         memory_size_gb=machine.memory_size_gb,
-        max_swap_gb=machine.max_swap_gb,
+        max_shared_gb=machine.max_shared_gb,
         max_cpu_core_number=machine.max_cpu_core_number,
         max_gpu_number=machine.max_gpu_number,
         max_memory_gb=machine.max_memory_gb,

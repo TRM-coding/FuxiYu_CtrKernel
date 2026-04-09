@@ -361,7 +361,7 @@ class container_detail_information(BaseModel):
     machine_ip:str
     container_status:str
     memory_gb:int
-    swap_gb:int
+    shared_gb:int
     gpu_number:int
     cpu_number:int
     port:int 
@@ -398,15 +398,15 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
         # GPU 参数检查 
         print(f"DEBUG: validating GPU request for machine {machine_id} and container {container.NAME}")
         container_repo.validate_gpu_request(machine, container)
-        # swap 参数检查
-        print(f"DEBUG: validating swap request for machine {machine_id} and container {container.NAME}")
-        requested_swap = container_repo.validate_swap_request(machine, container)
+        # memory 参数检查（必须先于 shared）
+        print(f"DEBUG: validating memory request for machine {machine_id} and container {container.NAME}")
+        requested_memory = container_repo.validate_memory_request(machine, container)
+        # shared 参数检查（要求 shared <= memory）
+        print(f"DEBUG: validating shared request for machine {machine_id} and container {container.NAME}")
+        requested_shared = container_repo.validate_shared_request(machine, container, requested_memory)
         # cpu 参数检查
         print(f"DEBUG: validating CPU request for machine {machine_id} and container {container.NAME}")
         requested_cpus = container_repo.validate_cpu_request(machine, container)
-        # memory 参数检查
-        print(f"DEBUG: validating memory request for machine {machine_id} and container {container.NAME}")
-        requested_memory = container_repo.validate_memory_request(machine, container)
         # name/image/public_key length and format checks
         container_repo.validate_names_and_lengths(container, public_key)
         # duplicate name check (may raise IntegrityError)
@@ -495,7 +495,7 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
                      image=container.image,
                      machine_id=machine_id,
                      memory_gb=container.MEMORY,
-                     swap_gb=requested_swap,
+                     shared_gb=requested_shared,
                      gpu_number=gpu_count,
                      cpu_number=container.CPU_NUMBER,
                      port=free_port,
@@ -990,7 +990,7 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         "machine_ip": get_machine_ip_by_id(container.machine_id),
         "container_status": container.container_status.value,
         "memory_gb": container.memory_gb,
-        "swap_gb": container.swap_gb,
+        "shared_gb": container.shared_gb,
         "gpu_number": container.gpu_number,
         "cpu_number": container.cpu_number,
         "port": container.port,
@@ -1009,20 +1009,22 @@ def get_container_detail_information(container_id:int)->container_detail_informa
 
 
 #返回一页容器的概要信息
-def list_all_container_bref_information(machine_id:int, user_id:int, page_number:int, page_size:int)->dict:
+def list_all_container_bref_information(machine_id:int, request_user_id:int, page_number:int, page_size:int, user_id:int = None)->dict:
     # 非管理员用户必须先通过机器权限表过滤可见机器
-    if user_id and not _is_operator_user(user_id):
+    if not _is_operator_user(request_user_id):
         allowed = set(machine_permission_repo.list_machine_ids_by_user(user_id))
         if machine_id is not None:
             if machine_id not in allowed:
                 containers = []
             else:
-                containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=None)
+                containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=request_user_id)
         else:
-            containers = [c for c in list_containers(limit=99999, offset=0, machine_id=None, user_id=None) if c.machine_id in allowed]
+            containers = [c for c in list_containers(limit=99999, offset=0, machine_id=None, user_id=request_user_id) if c.machine_id in allowed]
             containers = containers[page_number*page_size:page_number*page_size+page_size]
-    else:
+    elif user_id is not None:
         containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=user_id)
+    else:
+        containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=None)
     res = []
     for container in containers:
         machine_ip = ""

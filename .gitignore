@@ -7,3 +7,6 @@ certs/*-key.pem
 certs/*.key
 *.log
 .env
+
+/logs/*
+!/logs/.gitkeep

@@ -192,7 +192,7 @@ def test_remove_container():
         container_status=ContainerStatus.CREATING,
         port=random.randint(8000, 9000),
         memory_gb=2048,
-        swap_gb=512,
+        shared_gb=512,
         gpu_number=0,
         cpu_number=2
     )
@@ -298,7 +298,7 @@ def test_add_collaborator():
         container_status=ContainerStatus.ONLINE,
         port=random.randint(8000, 9000),
         memory_gb=2048,
-        swap_gb=512,
+        shared_gb=512,
         gpu_number=0,
         cpu_number=2
     )
@@ -511,7 +511,7 @@ def test_remove_collaborator():
             container_status=ContainerStatus.ONLINE,
             port=random.randint(8000, 9000),
             memory_gb=2048,
-            swap_gb=512,
+            shared_gb=512,
             gpu_number=0,
             cpu_number=2
         )
@@ -609,7 +609,7 @@ def test_update_role():
         container_status=ContainerStatus.ONLINE,
         port=random.randint(8000, 9000),
         memory_gb=2048,
-        swap_gb=512,
+        shared_gb=512,
         gpu_number=0,
         cpu_number=2
     )
@@ -710,7 +710,7 @@ def test_get_container_detail_information():
         container_status=ContainerStatus.ONLINE,
         port=random.randint(8000, 9000),
         memory_gb=2048,
-        swap_gb=512,
+        shared_gb=512,
         gpu_number=0,
         cpu_number=2
     )
@@ -734,7 +734,7 @@ def test_get_container_detail_information():
         
         required_fields = [
             "container_id", "container_name", "container_image", "machine_id", 
-            "machine_ip", "container_status", "port", "memory_gb", "swap_gb",
+            "machine_ip", "container_status", "port", "memory_gb", "shared_gb",
             "gpu_number", "cpu_number", "owners", "accounts"
         ]
         for field in required_fields:
@@ -747,7 +747,7 @@ def test_get_container_detail_information():
         assert result["container_status"] == container.container_status.value
         assert result["port"] == container.port
         assert result["memory_gb"] == container.memory_gb
-        assert result["swap_gb"] == container.swap_gb
+        assert result["shared_gb"] == container.shared_gb
         assert result["gpu_number"] == container.gpu_number
         assert result["cpu_number"] == container.cpu_number
         
@@ -832,7 +832,7 @@ def test_list_all_container_bref_information():
             container_status=ContainerStatus.ONLINE,
             port=random.randint(8000, 9000),
             memory_gb=2048,
-            swap_gb=512,
+            shared_gb=512,
             gpu_number=0,
             cpu_number=2
         )

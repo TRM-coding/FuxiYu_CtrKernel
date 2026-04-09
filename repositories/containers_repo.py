@@ -8,7 +8,7 @@ from ..utils.Container import Container_info
 from ..constant import ROLE
 from sqlalchemy.exc import IntegrityError
 from . import machine_repo
-from .machine_repo import get_max_gpu_number, get_max_swap_gb, get_max_cpu_core_number, get_max_memory_gb
+from .machine_repo import get_max_gpu_number, get_max_shared_gb, get_max_cpu_core_number, get_max_memory_gb
 
 
 def get_by_id(container_id: int) -> Container | None:
@@ -39,8 +39,8 @@ def count_containers(machine_id: int | None = None) -> int:
     return q.count()
 
 
-def create_container(name: str, image: str, machine_id: int, memory_gb: int, swap_gb: int, gpu_number: int, cpu_number: int, port:int,status=None) -> Container:
-	container = Container(name=name, image=image, machine_id=machine_id, memory_gb=memory_gb, swap_gb=swap_gb, gpu_number=gpu_number, cpu_number=cpu_number, port=port)
+def create_container(name: str, image: str, machine_id: int, memory_gb: int, shared_gb: int, gpu_number: int, cpu_number: int, port:int,status=None) -> Container:
+	container = Container(name=name, image=image, machine_id=machine_id, memory_gb=memory_gb, shared_gb=shared_gb, gpu_number=gpu_number, cpu_number=cpu_number, port=port)
 	if status is not None:
 		container.container_status = status
 	db.session.add(container)
@@ -165,21 +165,32 @@ def validate_gpu_request(machine: Machine, container: Container_info) -> None:
 			raise err
 
 
-def validate_swap_request(machine: Machine, container: Container_info) -> int:
+def validate_shared_request(machine: Machine, container: Container_info, requested_memory: int | None = None) -> int:
+	# Ensure memory validation runs first if caller didn't provide the already-validated memory
+	if requested_memory is None:
+		requested_memory = validate_memory_request(machine, container)
+
 	try:
-		requested_swap = int(getattr(container, 'SWAP_MEMORY', getattr(container, 'swap_memory', 0) or 0))
+		requested_shared = int(getattr(container, 'SHARED_MEMORY', getattr(container, 'shared_memory', 0)) or 0)
 	except Exception:
-		err = ValueError(f"swap_memory must be an integer: {getattr(container, 'SWAP_MEMORY', None)}")
+		err = ValueError(f"shared_memory must be an integer: {getattr(container, 'SHARED_MEMORY', None)}")
 		setattr(err, 'error_reason', 'invalid_config')
 		raise err
-	
-	# 从机器的配置里取 max_swap_gb 字段
-	machine_max_swap = int(get_max_swap_gb(machine.id) or 0)
-	if requested_swap < 0 or requested_swap > machine_max_swap:
-		err = ValueError(f"Requested swap_memory {requested_swap}GB out of allowed range (0-{machine_max_swap} GB)")
+
+	# 从机器的配置里取 max_shared_gb 字段
+	machine_max_shared = int(get_max_shared_gb(machine.id) or 0)
+	if requested_shared < 0 or requested_shared > machine_max_shared:
+		err = ValueError(f"Requested shared_memory {requested_shared}GB out of allowed range (0-{machine_max_shared} GB)")
 		setattr(err, 'error_reason', 'invalid_config')
 		raise err
-	return requested_swap
+
+	# Shared must not exceed requested memory
+	if requested_shared > requested_memory:
+		err = ValueError(f"Requested shared_memory {requested_shared}GB cannot exceed requested memory {requested_memory}GB")
+		setattr(err, 'error_reason', 'invalid_config')
+		raise err
+
+	return requested_shared
 
 
 def validate_cpu_request(machine: Machine, container: Container_info) -> int:

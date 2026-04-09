@@ -29,7 +29,7 @@ def add_machine_api():
         "gpu_number",
         "gpu_type",
         "memory_size",
-        "max_swap_gb",
+        "max_shared_gb",
         "max_memory_gb",
         "max_gpu_number",
         "max_cpu_core_number",
@@ -55,7 +55,7 @@ def add_machine_api():
     gpu_number = data.get("gpu_number", 0)
     gpu_type = data.get("gpu_type", "")
     memory_size = data.get("memory_size", 0)
-    max_swap_size = data.get("max_swap_gb", 2)  # 默认值为2GB
+    max_shared_gb = data.get("max_shared_gb", 2)  # 默认值为2GB
     max_memory_gb = data.get("max_memory_gb", 0)
     max_gpu_number = data.get("max_gpu_number", 0)
     max_cpu_core_number = data.get("max_cpu_core_number", 0)
@@ -69,7 +69,7 @@ def add_machine_api():
                                             gpu_number=gpu_number,
                                             gpu_type=gpu_type,
                                             memory_size=memory_size,
-                                            max_swap_size=max_swap_size,
+                                            max_shared_gb=max_shared_gb,
                                             disk_size=disk_size,
                                             max_memory_gb=max_memory_gb,
                                             max_gpu_number=max_gpu_number,
@@ -120,7 +120,7 @@ def remove_machine_api():
 def update_machine_api():
     '''
     allowed = {"machine_name", "machine_ip", "machine_type", "machine_status", "cpu_core_number",
-               "memory_size", "gpu_number", "gpu_type", "disk_size", "machine_description", "max_swap_gb", "max_memory_gb", "max_gpu_number", "max_cpu_core_number"}
+               "memory_size", "gpu_number", "gpu_type", "disk_size", "machine_description", "max_shared_gb", "max_memory_gb", "max_gpu_number", "max_cpu_core_number"}
 
     通信数据格式：
 	发送格式：
@@ -136,7 +136,7 @@ def update_machine_api():
         "gpu_type",
         "memory_size",
         "disk_size",
-        "max_swap_gb",
+        "max_shared_gb",
         "max_memory_gb",
         "max_gpu_number",
         "max_cpu_core_number",
@@ -201,7 +201,7 @@ def get_detail_information_api():
             "gpu_number": machine_info.gpu_number,
             "gpu_type": machine_info.gpu_type,
             "memory_size_gb": machine_info.memory_size_gb,
-            "max_swap_gb": machine_info.max_swap_gb,
+            "max_shared_gb": machine_info.max_shared_gb,
             "max_memory_gb": machine_info.max_memory_gb,
             "max_gpu_number": machine_info.max_gpu_number,
             "max_cpu_core_number": machine_info.max_cpu_core_number,
