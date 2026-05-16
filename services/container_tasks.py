@@ -86,7 +86,7 @@ def build_cleanup_info(last_ssh_login_time: str | None, cleanup_after_days: int)
     """
     基于上次 SSH 登录时间计算清理时间信息（仅计算，不执行清理）。
     """
-    print(f"DEBUG: build_cleanup_info called with last_ssh_login_time='{last_ssh_login_time}' and cleanup_after_days={cleanup_after_days}")
+    #print(f"DEBUG: build_cleanup_info called with last_ssh_login_time='{last_ssh_login_time}' and cleanup_after_days={cleanup_after_days}")
     if cleanup_after_days <= 0:
         cleanup_after_days = 1
 
@@ -117,7 +117,7 @@ def build_cleanup_info(last_ssh_login_time: str | None, cleanup_after_days: int)
 def _is_operator_user(user_id: int) -> bool:
     try:
         u = user_repo.get_by_id(user_id)
-        print(f"DEBUG: checking if user {user_id} is operator: permission={getattr(u, 'permission', None)}")
+        #print(f"DEBUG: checking if user {user_id} is operator: permission={getattr(u, 'permission', None)}")
         perm = getattr(u, 'permission', None) if u else None
         return bool(perm and getattr(perm, 'value', str(perm)).lower() == 'operator')
     except Exception:
@@ -294,8 +294,8 @@ def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -
     except Exception as e:
         print(f"Error sending request to {url}: {e}")
         return None
-    print(f"DEBUG: get_container_last_ssh_login_time: sent request to {url} with payload {payload}")
-    print(f"get_container_last_ssh_login_time: NODE response: {res}")
+    #print(f"DEBUG: get_container_last_ssh_login_time: sent request to {url} with payload {payload}")
+    #print(f"get_container_last_ssh_login_time: NODE response: {res}")
 
     if not isinstance(res, dict):
         raise NodeServiceError(
