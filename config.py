@@ -56,6 +56,8 @@ class AppConfig(SqlConfig, KeyConfig):
     SSL_KEY_PATH = os.getenv("SSL_KEY_PATH", "certs/localhost-key.pem")
     # 容器自动清理阈值（天）。这里只用于计算和展示，不在此处执行实际清理动作。
     CONTAINER_CLEANUP_AFTER_DAYS = int(os.getenv("CONTAINER_CLEANUP_AFTER_DAYS", "7"))
+    # 每个用户最多可设置的长期容器数量。
+    LONG_TERM_CONTAINER_LIMIT = int(os.getenv("LONG_TERM_CONTAINER_LIMIT", "1"))
 
 
 def get_config(env: str | None = None):

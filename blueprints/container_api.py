@@ -27,6 +27,10 @@ REASON_STATUS_MAP = {
     'restart_failed': 500,
     'container_offline': 400,
     'node_endpoint_not_found': 502,
+    'container_not_found': 404,
+    'machine_permission_denied': 403,
+    'container_permission_denied': 403,
+    'long_term_limit_reached': 409,
 }
 @api_bp.post("/containers/create_container")
 def create_container_api():
@@ -163,6 +167,45 @@ def delete_container_api():
             payload['error_reason'] = reason
         return jsonify(payload), status
     return jsonify({"success": 1, "message": "Container deleted successfully"}), 200
+
+
+@api_bp.post("/containers/set_long_term_container")
+def set_long_term_container_api():
+    token = request.headers.get("token", "")
+    if not authentications_repo.is_token_valid(token):
+        return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
+
+    data = request.get_json() or {}
+    if "container_id" not in data or "is_long_term" not in data:
+        return jsonify({"success": 0, "message": "missing container_id or is_long_term", "error_reason": "invalid_payload"}), 400
+    try:
+        container_id = int(data.get("container_id"))
+    except Exception:
+        return jsonify({"success": 0, "message": "invalid container_id", "error_reason": "invalid_payload"}), 400
+    is_long_term = data.get("is_long_term")
+    if not isinstance(is_long_term, bool):
+        return jsonify({"success": 0, "message": "is_long_term must be boolean", "error_reason": "invalid_payload"}), 400
+
+    request_user_id = authentications_repo.get_user_id_by_token(token)
+    try:
+        result = container_service.set_long_term_container(
+            container_id=container_id,
+            is_long_term=is_long_term,
+            operator_user_id=request_user_id,
+        )
+    except container_service.NodeServiceError as e:
+        reason = getattr(e, "reason", None)
+        status = REASON_STATUS_MAP.get(reason, 500)
+        return jsonify({"success": 0, "message": str(e), "error_reason": reason}), status
+    except Exception as e:
+        reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
+        status = REASON_STATUS_MAP.get(reason, 500)
+        payload = {"success": 0, "message": f"Internal error: {str(e)}"}
+        if reason:
+            payload["error_reason"] = reason
+        return jsonify(payload), status
+
+    return jsonify({"success": 1, **result}), 200
 
 
 @api_bp.post("/containers/start_container")
@@ -573,6 +616,8 @@ def list_all_containers_bref_information_api():
         # expect a dict: { containers: [...], total_page: n }
         containers_info = result.get('containers', [])
         total_page = result.get('total_page', 1)
+        long_term_container_remaining = result.get('long_term_container_remaining')
+        long_term_container_limit = result.get('long_term_container_limit')
     except Exception as e:
         reason = getattr(e, 'reason', None) or getattr(e, 'error_reason', None) or 'list_failed'
         status = REASON_STATUS_MAP.get(reason, 500)
@@ -587,4 +632,8 @@ def list_all_containers_bref_information_api():
         except Exception:
             out.append(c)
 
-    return jsonify({"success":1,"containers_info":out, "total_page": total_page}),200
+    payload = {"success":1,"containers_info":out, "total_page": total_page}
+    if user_id is not None:
+        payload["long_term_container_remaining"] = long_term_container_remaining
+        payload["long_term_container_limit"] = long_term_container_limit
+    return jsonify(payload),200

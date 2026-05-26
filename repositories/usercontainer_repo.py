@@ -76,6 +76,7 @@ def get_container_bindings(container_id:int)->Sequence[dict]:
             uc.c.public_key,
             uc.c.username,
             uc.c.role,
+            uc.c.granted_at,
         ).where(
             uc.c.container_id == container_id,
         )
@@ -88,6 +89,7 @@ def get_container_bindings(container_id:int)->Sequence[dict]:
             "public_key": row.public_key,
             "username": row.username,
             "role": row.role,
+            "granted_at": row.granted_at,
         })
     return bindings
 
@@ -340,5 +342,4 @@ def remove_user_from_all_containers(user_id: int) -> dict:
         return {"ok": False, "wild_containers": wild_containers}
 
     return {"ok": True}
-
 

@@ -1,8 +1,10 @@
 import threading
 import time
+import json
 from flask import Flask
 
 from ..models.container_ssh_login import ContainerSSHLogin
+from ..repositories import long_term_container_repo
 from ..services import container_tasks
 
 
@@ -22,6 +24,26 @@ def cleanup_expired_containers_once(cleanup_after_days: int) -> None:
                 continue
 
             cid = int(rec.container_id)
+            if long_term_container_repo.is_long_term(cid):
+                print(f"[container-cleanup] container_id={cid} is long-term, skipping cleanup")
+                continue
+            snapshot = container_tasks.build_container_restore_snapshot(
+                cid,
+                cleanup_context={
+                    "machine_id": getattr(rec, "machine_id", None),
+                    "last_ssh_login_time": rec.last_ssh_login_time,
+                    "ssh_record_updated_at": (
+                        rec.updated_at.isoformat()
+                        if getattr(rec, "updated_at", None) is not None
+                        else None
+                    ),
+                    **info,
+                },
+            )
+            print(
+                "[container-cleanup] restore_snapshot="
+                + json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+            )
             print(f"[container-cleanup] container_id={cid} due for cleanup, removing...")
             ok = container_tasks.remove_container(container_id=cid)
             if ok:
@@ -73,4 +95,3 @@ def start_container_cleanup_scheduler(
     t.start()
     app.extensions[key] = {"thread": t, "stop_event": stop_event}
     return t
-

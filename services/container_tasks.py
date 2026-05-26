@@ -7,12 +7,12 @@ import traceback
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..config import CommsConfig
 from ..constant import *
 from sqlalchemy.exc import IntegrityError
-from ..repositories import containers_repo, machine_repo, machine_permission_repo, user_repo
+from ..repositories import containers_repo, machine_repo, machine_permission_repo, user_repo, long_term_container_repo
 from ..repositories import containers_repo as container_repo
 from ..repositories import container_ssh_login_repo
 from .machine_tasks import is_machine_online_remote
@@ -352,6 +352,11 @@ class container_bref_information(BaseModel):
     machine_ip:str
     port:int
     container_status:str
+    accounts: list[dict] = Field(default_factory=list)
+    is_long_term: bool = False
+    long_term_container_can_enable: bool = True
+    long_term_container_blocked_user_ids: list[int] = Field(default_factory=list)
+    long_term_container_remaining_by_user: dict[int, int] = Field(default_factory=dict)
 
 class container_detail_information(BaseModel):
     container_id: int # 与上方结构对称
@@ -367,6 +372,10 @@ class container_detail_information(BaseModel):
     port:int 
     owners:list[str]
     accounts:list[(str,ROLE)]
+    is_long_term: bool = False
+    long_term_container_can_enable: bool = True
+    long_term_container_blocked_user_ids: list[int] = Field(default_factory=list)
+    long_term_container_remaining_by_user: dict[int, int] = Field(default_factory=dict)
 ####################################################
 
 
@@ -587,6 +596,147 @@ def remove_container(container_id:int, debug=False, operator_user_id:int|None=No
     if Key:
         return True
     return False
+
+
+def build_container_restore_snapshot(container_id: int, cleanup_context: dict | None = None) -> dict:
+    """
+    Build a pre-removal snapshot with enough metadata to recreate the container and bindings.
+    """
+    container = get_by_id(container_id)
+    if not container:
+        return {
+            "container_id": container_id,
+            "snapshot_status": "container_not_found",
+            "cleanup_context": cleanup_context or {},
+        }
+
+    try:
+        machine = machine_repo.get_by_id(container.machine_id)
+    except Exception:
+        machine = None
+
+    bindings = get_container_bindings(container_id) or []
+    accounts = []
+    for binding in bindings:
+        user_id = binding.get("user_id")
+        role = binding.get("role")
+        role_value = role.value if isinstance(role, ROLE) else str(role or "")
+        accounts.append({
+            "user_id": user_id,
+            "system_username": get_name_by_id(user_id) if user_id is not None else None,
+            "container_username": binding.get("username"),
+            "role": role_value,
+            "public_key": binding.get("public_key"),
+            "granted_at": str(binding.get("granted_at")) if binding.get("granted_at") is not None else None,
+        })
+
+    status = container.container_status
+    status_value = status.value if isinstance(status, ContainerStatus) else str(status or "")
+    snapshot = {
+        "container_id": container.id,
+        "container_name": container.name,
+        "image": container.image,
+        "machine_id": container.machine_id,
+        "machine_ip": getattr(machine, "machine_ip", None),
+        "machine_name": getattr(machine, "machine_name", None),
+        "container_status": status_value,
+        "port": container.port,
+        "memory_gb": container.memory_gb,
+        "shared_gb": container.shared_gb,
+        "gpu_number": container.gpu_number,
+        "cpu_number": container.cpu_number,
+        "is_long_term": long_term_container_repo.is_long_term(container.id),
+        "accounts": accounts,
+        "cleanup_context": cleanup_context or {},
+    }
+    return snapshot
+
+
+def _get_long_term_container_limit() -> int:
+    try:
+        from flask import current_app
+        return max(0, int(current_app.config.get("LONG_TERM_CONTAINER_LIMIT", 1) or 1))
+    except Exception:
+        return 1
+
+
+def get_long_term_container_remaining(user_id: int) -> int:
+    limit = _get_long_term_container_limit()
+    used = long_term_container_repo.count_by_user(user_id)
+    return max(0, limit - used)
+
+
+def _binding_role_value(binding: dict) -> str:
+    role = binding.get("role") if isinstance(binding, dict) else None
+    return role.value if isinstance(role, ROLE) else str(role or "")
+
+
+def _root_user_ids_from_bindings(bindings: list | None) -> set[int]:
+    return {
+        int(b["user_id"])
+        for b in (bindings or [])
+        if isinstance(b, dict)
+        and b.get("user_id") is not None
+        and _binding_role_value(b).upper() == ROLE.ROOT.value
+    }
+
+
+def _build_long_term_container_state(container_id: int, bindings: list | None = None) -> dict:
+    bindings = bindings if bindings is not None else (get_container_bindings(container_id) or [])
+    is_long_term = long_term_container_repo.is_long_term(container_id)
+    user_ids = _root_user_ids_from_bindings(bindings)
+    remaining_by_user = {
+        uid: get_long_term_container_remaining(uid)
+        for uid in user_ids
+    }
+    blocked_user_ids = [] if is_long_term else [
+        uid for uid, remaining in remaining_by_user.items() if remaining <= 0
+    ]
+    return {
+        "is_long_term": is_long_term,
+        "long_term_container_can_enable": len(blocked_user_ids) == 0,
+        "long_term_container_blocked_user_ids": blocked_user_ids,
+        "long_term_container_remaining_by_user": remaining_by_user,
+    }
+
+
+def set_long_term_container(container_id: int, is_long_term: bool, operator_user_id: int | None = None) -> dict:
+    try:
+        container_id = int(container_id)
+    except Exception:
+        raise NodeServiceError("invalid container_id", reason="invalid_payload")
+
+    container = get_by_id(container_id)
+    if not container:
+        raise NodeServiceError("Container not found", reason="container_not_found")
+
+    bindings = get_container_bindings(container_id) or []
+    root_user_ids = _root_user_ids_from_bindings(bindings)
+    if operator_user_id is not None and operator_user_id not in root_user_ids and not _is_operator_user(operator_user_id):
+        raise NodeServiceError(
+            f"User {operator_user_id} is not owner of container {container_id}",
+            reason="container_permission_denied",
+        )
+
+    existing = long_term_container_repo.is_long_term(container_id)
+    if is_long_term:
+        if not existing:
+            limit = _get_long_term_container_limit()
+            for uid in root_user_ids:
+                if long_term_container_repo.count_by_user(uid) >= limit:
+                    raise NodeServiceError(
+                        f"User {uid} has reached long-term container limit",
+                        reason="long_term_limit_reached",
+                    )
+            long_term_container_repo.add(container_id, created_by_user_id=operator_user_id)
+    else:
+        long_term_container_repo.remove(container_id)
+
+    long_term_state = _build_long_term_container_state(container_id, bindings)
+    return {
+        "container_id": container_id,
+        **long_term_state,
+    }
 #将container_id对应的容器新增user_id作为collaborator,其权限为role
 
 def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False, operator_user_id:int|None=None)->bool:
@@ -982,6 +1132,7 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         print(f"Warning: error while attempting to persist Node status for {container.id if 'container' in locals() and container else '?'}: {e}")
 
     owener_bindings= get_container_bindings(container_id)
+    long_term_state = _build_long_term_container_state(container.id, owener_bindings)
     res={ 
         "container_id": container.id,
         "container_name": container.name,
@@ -994,6 +1145,7 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         "gpu_number": container.gpu_number,
         "cpu_number": container.cpu_number,
         "port": container.port,
+        **long_term_state,
         # 备忘：owners才是系统对应的用户名列表
         "owners": [get_name_by_id(binding['user_id']) for binding in owener_bindings],
         # 这里的变动是为了
@@ -1083,13 +1235,20 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
                     except Exception as e:
                         print(f"list_all_container_bref_information: ignored error while persisting status for {container.name}: {e}")
 
+        bindings = get_container_bindings(container.id) or []
+        long_term_state = _build_long_term_container_state(container.id, bindings)
         info = container_bref_information(
             container_id=container.id,
             container_name=container.name,
             machine_id=container.machine_id,
             machine_ip=machine_ip,
             port=container.port,
-            container_status=container.container_status.value
+            container_status=container.container_status.value,
+            accounts=[
+                {"user_id": binding.get('user_id'), "username": binding.get("username"), "role": (ROLE(binding.get('role')).value if binding.get('role') is not None else None)}
+                for binding in bindings
+            ],
+            **long_term_state,
         )
         res.append(info)
 
@@ -1100,6 +1259,10 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
     except Exception:
         total_page = 1
 
-    return {"containers": res, "total_page": total_page}
+    result = {"containers": res, "total_page": total_page}
+    if user_id is not None:
+        result["long_term_container_remaining"] = get_long_term_container_remaining(user_id)
+        result["long_term_container_limit"] = _get_long_term_container_limit()
+    return result
 
 ####################################################
