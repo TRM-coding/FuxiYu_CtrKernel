@@ -13,10 +13,12 @@ from .schemas.container_cleanup_task import start_container_cleanup_scheduler
 from .utils.logging_config import configure_daily_logging
 
 
-def create_app(config: str | None = None):
+def create_app(config: str | None = None, overrides: dict | None = None):
     load_dotenv()
     app = Flask(__name__)
     app.config.from_object(get_config(config))
+    if overrides:
+        app.config.update(overrides)
     configure_daily_logging(app)
     # Configure CORS for API routes. FRONTEND_ORIGINS can be a comma-separated
     # list of allowed origins (e.g. "http://localhost:5173,http://127.0.0.1:5173").
@@ -35,7 +37,11 @@ def create_app(config: str | None = None):
 
     # 启动“每5分钟刷新容器上次 SSH 登录时间”的后台任务。
     # Flask debug 模式下父进程和子进程都会执行 create_app，这里仅在 reloader 子进程启动任务，避免重复线程。
-    if (not app.debug) or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+    if (
+        not app.config.get("TESTING")
+        and not app.config.get("DISABLE_BACKGROUND_TASKS")
+        and ((not app.debug) or os.environ.get("WERKZEUG_RUN_MAIN") == "true")
+    ):
         start_container_ssh_refresh_scheduler(app, interval_seconds=300)
         # 启动容器定时清理任务（每20分钟扫描一次到期容器并释放）
         start_container_cleanup_scheduler(app, interval_seconds=1200)

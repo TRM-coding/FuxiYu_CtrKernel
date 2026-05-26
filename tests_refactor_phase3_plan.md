@@ -4,6 +4,10 @@
 
 Phase 1/2 已覆盖 Ctrl 的核心业务测试计划。Phase 3 不继续扩业务功能面，而是补齐“测试体系成熟度”：让测试能长期安全运行、能在本地与 GitHub Actions 中稳定执行、能产出可读报告，并逐步替代旧测试。
 
+测试体系统一以隔离 SQLite 为数据库底座。默认测试、全量安全回归、GitHub Actions 均不引入 MySQL 平行库；MySQL 方言差异不作为当前阶段验收目标。
+
+默认测试必须可在生产服务仍在运行时旁路执行：测试进程不得影响生产进程、生产数据库、真实 Node、真实邮件服务或后台定时任务。
+
 CI 只规划 GitHub Actions 能使用的部分：
 
 - 允许：checkout、setup-python、pip install、pytest、coverage、artifact 上传、静态安全保护检查。
@@ -20,7 +24,7 @@ CI 只规划 GitHub Actions 能使用的部分：
 - `PYTEST_UNIT_CMD = "pytest -m unit"`
 - `PYTEST_API_CMD = "pytest -m api"`
 - `PYTEST_DB_CMD = "pytest -m db"`
-- `TEST_DATABASE_URI = "sqlite:///:memory:"` 或 GitHub Actions 临时 sqlite 文件库。
+- `TEST_DATABASE_URI = "sqlite:///:memory:"`
 
 ### 1. 影响的文件范围
 
@@ -37,8 +41,8 @@ CI 只规划 GitHub Actions 能使用的部分：
 1. 开发者或 GitHub Actions 执行默认安全测试命令。
 2. pytest 读取 marker 配置。
 3. `conftest.py` 强制注入测试配置。
-4. `create_app()` 使用测试配置，不启动后台线程。
-5. 测试数据库使用隔离 URI。
+4. pytest fixture 调用 `create_app(overrides=TEST_CONFIG_OVERRIDES)`，不通过业务配置名启动测试模式。
+5. 测试数据库使用隔离 SQLite URI。
 6. 真实网络、真实邮件、真实 scheduler 默认被拦截。
 7. pytest 输出测试结果。
 
@@ -67,7 +71,7 @@ CI 只规划 GitHub Actions 能使用的部分：
 - 输入：pytest session。
 - 输出：测试安全环境。
 - 内部逻辑重点：
-  - 检测数据库 URI，若疑似生产/开发库则 fail fast。
+  - 检测数据库 URI，若不是 SQLite 则 fail fast。
   - 默认禁止真实 HTTP 请求。
   - 默认禁止真实 SMTP。
   - 默认禁止后台 scheduler 真实启动。
@@ -177,9 +181,8 @@ Mock 数据流：
 
 ### 0. 新增的常量定义
 
-建议在 workflow env 中定义：
+建议在 workflow env 中只定义 pytest 可消费的安全覆盖项，不定义 `FLASK_CONFIG=testing`：
 
-- `FLASK_CONFIG=testing`
 - `DISABLE_BACKGROUND_TASKS=1`
 - `DATABASE_URL=sqlite:///:memory:`
 - `LONG_TERM_CONTAINER_LIMIT=1`
@@ -214,8 +217,9 @@ GitHub Actions 数据流：
 - 输入：GitHub Actions 事件。
 - 输出：CI 通过/失败状态与测试报告 artifact。
 - 内部逻辑重点：
-  - 不启动 MySQL、Node、Docker service。
+  - 不启动 MySQL、Node、Docker service；数据库统一使用 SQLite。
   - 不读取生产 `.env`。
+  - 不通过 `FLASK_CONFIG=testing` 启动应用；测试配置由 pytest fixture 的 overrides 注入。
   - 不需要私有内网资源。
   - 只跑 `pytest -m "not integration and not legacy"`。
   - 可按路径过滤只在 Ctrl 相关文件变更时运行，但第一版可先无路径过滤。
@@ -383,7 +387,7 @@ Coverage 本身通过配置验收：
 
 Ctrl 内部 E2E 数据流：
 
-1. 使用测试库创建用户。
+1. 使用隔离 SQLite 测试库创建用户。
 2. 登录获得 token。
 3. operator 创建机器或 factory 建机器。
 4. 授权普通用户访问机器。
@@ -397,7 +401,7 @@ Ctrl 内部 E2E 数据流：
 
 `test_ctrl_user_machine_container_flow`：
 
-- 输入：隔离测试库、mock Node、mock mail、mock scheduler。
+- 输入：隔离 SQLite 测试库、mock Node、mock mail、mock scheduler。
 - 输出：完整流程断言通过。
 - 内部逻辑重点：
   - 不连接真实 Node。
@@ -554,6 +558,7 @@ Mock 规则：
 ## 本阶段不做的事
 
 - 不在 CI 中连接生产/开发数据库。
+- 不在 CI 或默认回归中引入 MySQL 平行库。
 - 不在 CI 中启动 Node、Docker 或真实邮件服务。
 - 不要求 GitHub Actions 访问内网资源。
 - 不把 legacy/integration 纳入默认阻塞检查。

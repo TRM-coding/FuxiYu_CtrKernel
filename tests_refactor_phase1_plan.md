@@ -4,6 +4,10 @@
 
 本阶段只处理 `FuxiYu_CtrKernel` 内部测试重构，不触碰 `FuxiYu_NodeKernel`。目标不是一次性重写全部测试，而是先把 `user` 与 `machine` 两组 task/API 的测试计划收口，使后续重构可以稳定推进，并避免测试期间误触真实业务数据、后台清理调度、Node 心跳或邮件发送。
 
+本阶段默认与全量回归均使用隔离 SQLite 测试库。MySQL 方言兼容性、生产库 migration 兼容性不作为当前测试阶段目标。
+
+默认测试必须可在生产服务仍在运行时旁路执行：测试进程不得影响生产进程、生产数据库、真实 Node、真实邮件服务或后台定时任务。
+
 现状主要风险：
 
 - 多个测试在 `create_app()` 之后才设置 `TESTING=True`，而 `create_app()` 当前会根据 debug/reloader 条件启动 SSH 刷新与容器清理后台线程。
@@ -15,21 +19,20 @@
 
 ### 0. 新增的常量定义
 
-建议新增测试专用配置常量，优先放在 `config.py` 或测试配置类中：
+建议新增 pytest 专用配置覆盖常量，优先放在 `test/conftest.py` 中，不新增可供业务启动命令选择的 `testing` 配置档：
 
 - `TESTING = True`
 - `DISABLE_BACKGROUND_TASKS = True`
-- `SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"` 或测试临时文件库 URI
+- `SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"`
 - `WTF_CSRF_ENABLED = False`，如后续引入表单/CSRF 测试再使用
 - `TEST_AUTH_TOKEN = "test-token"`，仅测试 fixture 使用
 - `TEST_OPERATOR_TOKEN = "test-operator-token"`，仅测试 fixture 使用
 
-如不希望污染业务配置，也可以放入 `test/conftest.py` 的 `TEST_CONFIG_OVERRIDES`。
+这些配置只由 pytest fixture 注入。业务启动仍走现有 `.env` / 默认配置，不通过 `FLASK_CONFIG=testing` 或类似方式运行应用。
 
 ### 1. 影响的文件范围
 
 - `__init__.py`
-- `config.py`
 - `pytest.ini`
 - `test/conftest.py`
 - `test/user/`
@@ -45,8 +48,8 @@
 测试启动数据流：
 
 1. `pytest` 读取 `test/conftest.py`。
-2. `app` fixture 调用 `create_app(config="testing")` 或 `create_app(test_config_overrides)`。
-3. `create_app()` 先加载测试配置，再初始化扩展、注册蓝图。
+2. `app` fixture 调用 `create_app(overrides=TEST_CONFIG_OVERRIDES)`。
+3. `create_app()` 先加载正常业务配置，再应用 pytest 注入的 overrides，然后初始化扩展、注册蓝图。
 4. `create_app()` 判断 `app.config["DISABLE_BACKGROUND_TASKS"]`，测试环境不启动：
    - `start_container_ssh_refresh_scheduler`
    - `start_container_cleanup_scheduler`
@@ -60,14 +63,15 @@
 `create_app(config=None, overrides=None)`：
 
 - 输入：
-  - `config`: 配置名，可为 `"testing"`。
-  - `overrides`: dict，可覆盖配置项。
+  - `config`: 现有业务配置名，测试不新增或依赖 `"testing"` 配置名。
+  - `overrides`: dict，仅 pytest fixture 使用，用于覆盖 `TESTING`、SQLite 测试库 URI、后台任务开关等。
 - 输出：
   - Flask `app`。
 - 内部逻辑：
-  - 配置加载必须早于 `db.init_app()` 与后台任务判断。
+  - 业务配置加载后，必须在 `db.init_app()` 与后台任务判断前应用 `overrides`。
   - 当 `app.config["TESTING"]` 或 `app.config["DISABLE_BACKGROUND_TASKS"]` 为真时，不启动任何后台线程。
   - 生产路径保持原行为。
+  - 不把 `"testing"` 作为应用可运行模式暴露给业务启动流程。
 
 `app` fixture：
 
@@ -77,7 +81,7 @@
   - 导入所有 model。
   - `db.create_all()`。
   - yield app。
-  - 测试库可安全 `drop_all()`，前提是 URI 明确为测试库。
+  - SQLite 测试库可安全 `drop_all()`。
 
 `db_session` fixture：
 
@@ -107,7 +111,7 @@
   - 断言：两个 scheduler 启动函数未被调用。
 - `test_app_fixture_uses_test_database`
   - 输入：`app` fixture。
-  - 断言：数据库 URI 包含 `sqlite` 或明确测试库标记，禁止真实生产库。
+  - 断言：数据库 URI 必须是 `sqlite`，禁止真实生产/开发库。
 - `test_client_fixture_can_access_registered_blueprints`
   - 输入：`client`。
   - 断言：访问一个需要鉴权的 API 返回 401，而不是 404 或 500。

@@ -1,4 +1,7 @@
 import pytest
+
+pytestmark = pytest.mark.legacy
+
 from ..services.container_tasks import (
     Create_container, remove_container, add_collaborator, 
     remove_collaborator, update_role, get_container_detail_information,

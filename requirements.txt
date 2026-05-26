@@ -9,3 +9,4 @@ pydantic
 Flask-Cors>=3.0.10
 requests
 dotenv
+pytest>=8.0.0

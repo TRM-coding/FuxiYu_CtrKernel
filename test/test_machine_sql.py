@@ -1,5 +1,8 @@
 #machine_tasks.py 单元测试
 import pytest
+
+pytestmark = pytest.mark.legacy
+
 from ..services.machine_tasks import Add_machine, Remove_machine, Update_machine, Get_detail_information, List_all_machine_bref_information,machine_bref_information,machine_detail_information
 from ..models.machine import Machine, MachineTypes, MachineStatus
 from ..extensions import db

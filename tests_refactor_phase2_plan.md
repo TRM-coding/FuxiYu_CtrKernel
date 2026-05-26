@@ -6,6 +6,10 @@ Phase 2 在 Phase 1 的测试安全底座之上推进，主要覆盖 `container`
 
 本阶段仍只处理 `FuxiYu_CtrKernel`，不触碰 `FuxiYu_NodeKernel`。Node 交互统一通过 mock 响应完成：测试验证 Ctrl 是否构造正确调用、正确处理 Node 返回、正确更新本地数据库与权限状态；不把网络连通性、真实 HTTP、真实 Docker 行为作为一般软件验收目标。
 
+本阶段默认与全量回归均使用隔离 SQLite 测试库，不引入 MySQL 平行库。
+
+默认测试必须可在生产服务仍在运行时旁路执行：测试进程不得影响生产进程、生产数据库、真实 Node、真实邮件服务或后台定时任务。
+
 默认测试命令仍应排除外部依赖：
 
 ```bash
@@ -758,7 +762,7 @@ SSH 刷新数据流：
 
 未测项目数据流：
 
-1. repository 测试使用隔离测试库。
+1. repository 测试使用隔离 SQLite 测试库。
 2. mail 测试只 mock SMTP，不发送真实邮件。
 3. logging config 测试只验证 handler 装配，不写生产日志。
 4. config 测试只验证 env 解析与默认值，不读取生产敏感配置。
@@ -813,7 +817,7 @@ SSH 刷新数据流：
   - `CONTAINER_CLEANUP_AFTER_DAYS`
   - `CONTAINER_CLEANUP_REMINDER_HOURS`
   - `LONG_TERM_CONTAINER_LIMIT`
-  - 数据库 URI
+  - SQLite 测试库 URI
   - CORS origins
 
 ### 4. 测试用例的构建描述
@@ -878,7 +882,7 @@ SSH 刷新数据流：
 
 - 任何真实 Node 操作必须 `integration`。
 - 任何真实邮件必须 `integration`。
-- 任何无法证明使用隔离测试库的 SQL 测试必须 `legacy`。
+- 任何无法证明使用隔离 SQLite 测试库的 SQL 测试必须 `legacy`。
 - 被新测试覆盖的旧测试不得长期双轨保留。
 
 ### 4. 测试用例的构建描述
@@ -917,4 +921,5 @@ SSH 刷新数据流：
 - 不验证真实 Docker 行为。
 - 不发送真实邮件。
 - 不使用生产库或开发库。
+- 不引入 MySQL 平行库；数据库兼容性差异不作为本阶段目标。
 - 不把前端行为纳入 Ctrl 测试范围。

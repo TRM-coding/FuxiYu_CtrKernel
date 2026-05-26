@@ -3,6 +3,8 @@ import uuid
 import random
 from http import HTTPStatus
 
+pytestmark = pytest.mark.legacy
+
 from .. import create_app
 from ..extensions import db
 from ..models.user import User
