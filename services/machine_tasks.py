@@ -82,7 +82,10 @@ def is_machine_online_remote(machine_id: int, timeout: float = 2.0) -> bool:
     if not machine_ip:
         return False
 
-    j = send(machine_ip, "/machine_status", {"config": {}}, timeout=timeout)
+    try:
+        j = send(machine_ip, "/machine_status", {"config": {}}, timeout=timeout)
+    except Exception:
+        return False
     if isinstance(j, dict) and j.get('success') in (1, True):
         ms = (j.get('machine_status') or '').lower()
         return ms == 'online'
@@ -382,4 +385,3 @@ def List_all_machine_bref_information(
     
     return res, total_pages
 #######################################
-
