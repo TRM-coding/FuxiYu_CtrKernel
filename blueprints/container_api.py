@@ -95,18 +95,6 @@ def create_container_api():
 
     except Exception as e:
         return jsonify({"success": 0, "message": f"Invalid container payload: {str(e)}", "error_reason": "invalid_payload"}), 400
-    # 这里：error_reason的补映射表。原则上服务层应该尽量提供明确的error_reason以便前端处理，但这里也做一个兜底，以防万一
-    reason_map = {
-        "container_exists": 409,
-        "invalid_payload": 400,
-        "invalid_signature": 401,
-        "invalid_json": 400,
-        "invalid_config": 400,
-        "docker_init_failed": 502,
-        "docker_check_failed": 502,
-        "unexpected_response": 502,
-    }
-
     try:
         if not container_service.Create_container(owner_name=owner_name,
                         machine_id=machine_id,
@@ -117,7 +105,7 @@ def create_container_api():
     except IntegrityError as e:
         return jsonify({"success": 0, "message": f"Duplicate entry: {str(e.orig) if hasattr(e, 'orig') else str(e)}", "error_reason": "duplicate_entry"}), 409
     except container_service.NodeServiceError as e:
-        status = reason_map.get(getattr(e, 'reason', None), 500)
+        status = REASON_STATUS_MAP.get(getattr(e, 'reason', None), 500)
         return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), status
     except Exception as e:
         # try to preserve any error_reason set on lower-level exceptions

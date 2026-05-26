@@ -867,9 +867,8 @@ def remove_collaborator(container_id:int,user_id:int,debug=False, operator_user_
     except Exception:
         binding = None
     if binding:
-        role_val = binding.get('role')
-        # stored role is usually the enum value string
-        if role_val is not None and str(role_val).upper() == str(ROLE.ROOT.value).upper():
+        role_val = _binding_role_value(binding)
+        if role_val.upper() == ROLE.ROOT.value.upper():
             # 不可移除 ROOT 用户
             return False
 

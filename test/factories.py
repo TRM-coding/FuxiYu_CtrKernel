@@ -10,6 +10,7 @@ from ..models.containers import Container
 from ..models.machine import Machine
 from ..models.user import User
 from ..models.usercontainer import UserContainer
+from ..repositories import machine_permission_repo
 
 
 _ids = count(1)
@@ -119,6 +120,30 @@ def create_container(
     db.session.add(container)
     db.session.commit()
     return container
+
+
+def create_container_graph(
+    *,
+    root_user: User | None = None,
+    collaborator_user: User | None = None,
+    machine: Machine | None = None,
+    container: Container | None = None,
+    root_username: str = "root",
+    collaborator_username: str | None = None,
+) -> tuple[User, Machine, Container]:
+    root_user = root_user or create_user()
+    machine = machine or create_machine()
+    container = container or create_container(machine=machine)
+    machine_permission_repo.add_permission(machine.id, root_user.id)
+    bind_user_container(root_user, container, role=ROLE.ROOT, username=root_username)
+    if collaborator_user is not None:
+        bind_user_container(
+            collaborator_user,
+            container,
+            role=ROLE.COLLABORATOR,
+            username=collaborator_username or collaborator_user.username,
+        )
+    return root_user, machine, container
 
 
 def bind_user_container(
