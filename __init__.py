@@ -10,12 +10,14 @@ from .config import get_config, CORSHeaderConfig
 from .blueprints import register_blueprints
 from .schemas.container_ssh_refresh_task import start_container_ssh_refresh_scheduler
 from .schemas.container_cleanup_task import start_container_cleanup_scheduler
+from .utils.logging_config import configure_daily_logging
 
 
 def create_app(config: str | None = None):
     load_dotenv()
     app = Flask(__name__)
     app.config.from_object(get_config(config))
+    configure_daily_logging(app)
     # Configure CORS for API routes. FRONTEND_ORIGINS can be a comma-separated
     # list of allowed origins (e.g. "http://localhost:5173,http://127.0.0.1:5173").
     # When credentials are used, do NOT set origins to * — specify exact origins.
