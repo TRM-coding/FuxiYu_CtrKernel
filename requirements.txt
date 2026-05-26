@@ -10,3 +10,4 @@ Flask-Cors>=3.0.10
 requests
 dotenv
 pytest>=8.0.0
+pytest-cov>=5.0.0

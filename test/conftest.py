@@ -77,7 +77,11 @@ def db_session(app):
 
 
 @pytest.fixture(autouse=True)
-def mock_external_services(monkeypatch):
+def mock_external_services(monkeypatch, request):
+    if request.node.get_closest_marker("integration"):
+        yield
+        return
+
     def _blocked_post(*args, **kwargs):
         raise AssertionError("Real HTTP requests are blocked in the safe pytest suite")
 
@@ -109,3 +113,4 @@ def mock_external_services(monkeypatch):
     monkeypatch.setattr("FuxiYu_CtrKernel.services.container_tasks.container_starting_status_heartbeat", _fake_thread)
     monkeypatch.setattr("FuxiYu_CtrKernel.services.container_tasks.container_stopping_status_heartbeat", _fake_thread)
     monkeypatch.setattr("FuxiYu_CtrKernel.services.container_tasks.container_restart_status_heartbeat", _fake_thread)
+    yield

@@ -1,0 +1,25 @@
+[run]
+source =
+    blueprints
+    repositories
+    schemas
+    services
+    utils
+omit =
+    test/*
+    */__pycache__/*
+    */migrations/*
+
+[report]
+show_missing = True
+skip_covered = False
+fail_under = 60
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+
+[html]
+directory = reports/htmlcov
+
+[xml]
+output = reports/coverage.xml

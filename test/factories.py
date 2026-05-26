@@ -12,6 +12,11 @@ from ..models.user import User
 from ..models.usercontainer import UserContainer
 from ..repositories import machine_permission_repo
 
+DEFAULT_TEST_USERNAME = "test_user"
+DEFAULT_TEST_OPERATOR = "test_operator"
+DEFAULT_TEST_MACHINE_NAME = "test_machine"
+DEFAULT_TEST_CONTAINER_NAME = "test_container"
+
 
 _ids = count(1)
 
