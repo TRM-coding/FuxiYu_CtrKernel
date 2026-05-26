@@ -357,6 +357,11 @@ class container_bref_information(BaseModel):
     long_term_container_can_enable: bool = True
     long_term_container_blocked_user_ids: list[int] = Field(default_factory=list)
     long_term_container_remaining_by_user: dict[int, int] = Field(default_factory=dict)
+    last_ssh_login_time: str | None = None
+    cleanup_after_days: int | None = None
+    cleanup_at: str | None = None
+    seconds_until_cleanup: int | None = None
+    cleanup_status: str | None = None
 
 class container_detail_information(BaseModel):
     container_id: int # 与上方结构对称
@@ -650,6 +655,24 @@ def build_container_restore_snapshot(container_id: int, cleanup_context: dict | 
         "cleanup_context": cleanup_context or {},
     }
     return snapshot
+
+
+def get_container_root_owner_emails(container_id: int) -> list[str]:
+    bindings = get_container_bindings(container_id) or []
+    emails = []
+    seen = set()
+    for binding in bindings:
+        if _binding_role_value(binding).upper() != ROLE.ROOT.value:
+            continue
+        user_id = binding.get("user_id")
+        if user_id is None:
+            continue
+        user = user_repo.get_by_id(int(user_id))
+        email = getattr(user, "email", None)
+        if email and email not in seen:
+            emails.append(email)
+            seen.add(email)
+    return emails
 
 
 def _get_long_term_container_limit() -> int:
@@ -1237,6 +1260,17 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
 
         bindings = get_container_bindings(container.id) or []
         long_term_state = _build_long_term_container_state(container.id, bindings)
+        ssh_record = container_ssh_login_repo.get_by_machine_container(container.machine_id, container.id)
+        cleanup_days = 7
+        try:
+            from flask import current_app
+            cleanup_days = int(current_app.config.get("CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
+        except Exception:
+            pass
+        cleanup_info = build_cleanup_info(
+            ssh_record.last_ssh_login_time if ssh_record else None,
+            cleanup_days,
+        )
         info = container_bref_information(
             container_id=container.id,
             container_name=container.name,
@@ -1248,6 +1282,11 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
                 {"user_id": binding.get('user_id'), "username": binding.get("username"), "role": (ROLE(binding.get('role')).value if binding.get('role') is not None else None)}
                 for binding in bindings
             ],
+            last_ssh_login_time=ssh_record.last_ssh_login_time if ssh_record else None,
+            cleanup_after_days=cleanup_info.get("cleanup_after_days"),
+            cleanup_at=cleanup_info.get("cleanup_at"),
+            seconds_until_cleanup=cleanup_info.get("seconds_until_cleanup"),
+            cleanup_status=cleanup_info.get("cleanup_status"),
             **long_term_state,
         )
         res.append(info)

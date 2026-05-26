@@ -58,6 +58,8 @@ class AppConfig(SqlConfig, KeyConfig):
     CONTAINER_CLEANUP_AFTER_DAYS = int(os.getenv("CONTAINER_CLEANUP_AFTER_DAYS", "7"))
     # 每个用户最多可设置的长期容器数量。
     LONG_TERM_CONTAINER_LIMIT = int(os.getenv("LONG_TERM_CONTAINER_LIMIT", "1"))
+    # 容器清理前邮件提醒节点，单位小时，逗号分隔。
+    CONTAINER_CLEANUP_REMINDER_HOURS = os.getenv("CONTAINER_CLEANUP_REMINDER_HOURS", "72,24,12")
 
 
 def get_config(env: str | None = None):

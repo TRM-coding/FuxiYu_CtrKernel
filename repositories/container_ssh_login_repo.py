@@ -7,6 +7,10 @@ def get_by_machine_container(machine_id: int, container_id: int) -> ContainerSSH
     return ContainerSSHLogin.query.filter_by(machine_id=machine_id, container_id=container_id).first()
 
 
+def get_by_container(container_id: int) -> ContainerSSHLogin | None:
+    return ContainerSSHLogin.query.filter_by(container_id=container_id).first()
+
+
 def upsert_last_ssh_login_time(
     machine_id: int,
     container_id: int,
@@ -27,4 +31,3 @@ def upsert_last_ssh_login_time(
     else:
         db.session.flush()
     return record
-
