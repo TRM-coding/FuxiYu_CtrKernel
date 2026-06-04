@@ -10,7 +10,7 @@ class SqlConfig:
     SQLNAME = "fuxi"
     SQLURL = "127.0.0.1"
     SQLPORT = "3306"
-    SQLUSER = "root"
+    SQLUSER = "fuxi_app"
 
 
 class KeyConfig:

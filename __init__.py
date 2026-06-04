@@ -1,6 +1,9 @@
 # yourapp/__init__.py
+from pathlib import Path
 from dotenv import load_dotenv
-load_dotenv()
+
+_DOTENV_PATH = Path(__file__).resolve().parent / ".env"
+load_dotenv(_DOTENV_PATH, override=True)
 
 import os
 from flask import Flask
@@ -14,7 +17,8 @@ from .utils.logging_config import configure_daily_logging
 
 
 def create_app(config: str | None = None, overrides: dict | None = None):
-    load_dotenv()
+    if not overrides:
+        load_dotenv(_DOTENV_PATH, override=True)
     app = Flask(__name__)
     app.config.from_object(get_config(config))
     if overrides:
