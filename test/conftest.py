@@ -104,6 +104,7 @@ def mock_external_services(monkeypatch, request):
     monkeypatch.setattr("smtplib.SMTP_SSL", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Real SMTP_SSL is blocked in the safe pytest suite")))
     monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail.send", _mail_send)
     monkeypatch.setattr("FuxiYu_CtrKernel.services.user_tasks.send_mail", _mail_send)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.announcement_tasks.send_mail", _mail_send)
     monkeypatch.setattr("FuxiYu_CtrKernel.schemas.container_cleanup_task.send_mail", _mail_send)
     monkeypatch.setattr("FuxiYu_CtrKernel.utils.heartbeat.start_machine_maintenance_transition_heartbeat", _fake_thread)
     monkeypatch.setattr("FuxiYu_CtrKernel.utils.heartbeat.container_starting_status_heartbeat", _fake_thread)

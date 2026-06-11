@@ -7,3 +7,4 @@ from .container_ssh_login import ContainerSSHLogin  # noqa: F401
 from .container_cleanup_reminder import ContainerCleanupReminder  # noqa: F401
 
 from .registration_code import RegistrationCode  # noqa: F401
+from .announcement import Announcement, AnnouncementTemplate, AnnouncementDraft  # noqa: F401
