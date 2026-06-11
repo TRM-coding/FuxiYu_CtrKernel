@@ -27,7 +27,7 @@ if __name__ == "__main__":
 		else:
 			# fallback to an auto-generated certificate (not for production)
 			ssl_ctx = 'adhoc'
-		app.run(host="0.0.0.0", port=5000, debug=True, ssl_context=ssl_ctx)
+		app.run(host="0.0.0.0", port=5000, debug=True, ssl_context=ssl_ctx, threaded=True)
 	else:
-		app.run(host="0.0.0.0", port=5000, debug=True)
+		app.run(host="0.0.0.0", port=5000, debug=True, threaded=True)
 

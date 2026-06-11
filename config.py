@@ -60,6 +60,12 @@ class AppConfig(SqlConfig, KeyConfig):
     LONG_TERM_CONTAINER_LIMIT = int(os.getenv("LONG_TERM_CONTAINER_LIMIT", "1"))
     # 容器清理前邮件提醒节点，单位小时，逗号分隔。
     CONTAINER_CLEANUP_REMINDER_HOURS = os.getenv("CONTAINER_CLEANUP_REMINDER_HOURS", "72,24,12")
+    # NodeKernel 并发请求线程池大小上限。
+    NODE_REQUEST_POOL_SIZE = int(os.getenv("NODE_REQUEST_POOL_SIZE", "8"))
+    # 并发化开关，通过环境变量可独立开关。
+    NODE_PARALLEL_ENABLED_MACHINES = os.getenv("NODE_PARALLEL_ENABLED_MACHINES", "true").lower() == "true"
+    NODE_PARALLEL_ENABLED_CONTAINERS = os.getenv("NODE_PARALLEL_ENABLED_CONTAINERS", "true").lower() == "true"
+    NODE_PARALLEL_ENABLED_SSH_REFRESH = os.getenv("NODE_PARALLEL_ENABLED_SSH_REFRESH", "true").lower() == "true"
 
 
 def get_config(env: str | None = None):

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from ..config import CommsConfig
 from ..constant import *
+from ..utils.parallel import parallel_node_calls
 from sqlalchemy.exc import IntegrityError
 from ..repositories import containers_repo, machine_repo, machine_permission_repo, user_repo, long_term_container_repo
 from ..repositories import containers_repo as container_repo
@@ -1183,6 +1184,23 @@ def get_container_detail_information(container_id:int)->container_detail_informa
 
 
 #返回一页容器的概要信息
+def _node_probe_container(container, machine_ip: str, _app=None) -> dict | None:
+    """封装单次 NodeKernel /container_status 查询。
+
+    等同于原 for 循环内 ``get_container_status(machine_ip, container.name)``，
+    抽取为独立函数以适配 ``parallel_node_calls``。
+
+    *_app* 可选传入 Flask app 实例，用于线程池内推送 app context。
+    """
+    try:
+        if _app is not None:
+            with _app.app_context():
+                return get_container_status(machine_ip, container.name)
+        return get_container_status(machine_ip, container.name)
+    except Exception:
+        return None
+
+
 def list_all_container_bref_information(machine_id:int, request_user_id:int, page_number:int, page_size:int, user_id:int = None)->dict:
     # 非管理员用户必须先通过机器权限表过滤可见机器
     if not _is_operator_user(request_user_id):
@@ -1199,10 +1217,25 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
         containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=user_id)
     else:
         containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=None)
-    res = []
+    # --- Phase A: 预过滤，分离需要 NodeKernel 查询的容器 ---
+    try:
+        from flask import current_app
+        use_parallel = current_app.config.get("NODE_PARALLEL_ENABLED_CONTAINERS", True)
+        _app = current_app._get_current_object()
+    except RuntimeError:
+        use_parallel = True
+        _app = None
+
+    _probe_results: dict[int, dict | None] = {}  # container_id → result
+    _deleted: set[int] = set()                     # 404 已删除的容器
+
+    # 预过滤：收集所有容器，确定哪些需要调用 NodeKernel
+    _need_check: list[tuple] = []   # [(container, machine_ip), ...]
+    _skip: list = []                # [container, ...]
+    _container_ip: dict[int, str] = {}
+
     for container in containers:
         machine_ip = ""
-        # For information calls: if machine is offline or maintenance, skip node checks for containers on that machine
         do_node_check = True
         try:
             m = machine_repo.get_by_id(container.machine_id)
@@ -1220,42 +1253,73 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
             except Exception:
                 machine_ip = None
 
-        st = None
-        if do_node_check:
-            if machine_ip:
-                st = get_container_status(machine_ip, container.name)
-                # If Node reports 404, delete local record (existing behavior)
-                if isinstance(st, dict) and st.get('status_code') == 404:
-                    try:
-                        remove_binding(0, container.id, all=True)
-                    except Exception as e:
-                        print(f"Warning: failed to remove bindings for {container.id}: {e}")
-                    try:
-                        delete_container(container.id)
-                    except Exception as e:
-                        print(f"Warning: failed to delete container {container.id} from DB: {e}")
-                    # skip adding this container to result
-                    continue
-                else:
-                    # If Node returned a status payload (not 404), persist container_status to DB when possible
-                    try:
-                        if st and isinstance(st, dict) and st.get('status_code') is None or (isinstance(st, dict) and st.get('status_code') != 404):
-                            status_str = st.get('container_status')
-                            if status_str:
+        _container_ip[container.id] = machine_ip
+        if do_node_check and machine_ip:
+            _need_check.append((container, machine_ip))
+        else:
+            _skip.append(container)
+
+    # --- Phase B: 并发查询 NodeKernel ---
+    if _need_check:
+        if use_parallel and _app is not None:
+            _callables = [
+                lambda c=c, ip=ip, a=_app: _node_probe_container(c, ip, _app=a)
+                for c, ip in _need_check
+            ]
+            _raw = parallel_node_calls(_callables, timeout_per_call=12.0)
+            for (c, _), r in zip(_need_check, _raw):
+                _probe_results[c.id] = r if isinstance(r, (dict, type(None))) else None
+        else:
+            for c, ip in _need_check:
+                _probe_results[c.id] = _node_probe_container(c, ip)
+
+    # --- Phase C: 逐条处理结果（串行，避免 DB session 竞争） ---
+    res = []
+    _all_containers = _skip + [c for c, _ in _need_check]
+    # 按原始顺序重建
+    _id_order = {c.id: idx for idx, c in enumerate(containers)}
+    _all_containers.sort(key=lambda c: _id_order.get(c.id, 99999))
+
+    for container in _all_containers:
+        if container.id in _deleted:
+            continue
+        machine_ip = _container_ip.get(container.id, "")
+        st = _probe_results.get(container.id)
+        if st is None and container in _need_check:
+            # probe 返回 None 表示异常/超时，保持原逻辑（不更新状态）
+            pass
+        elif st is not None:
+            # If Node reports 404, delete local record
+            if isinstance(st, dict) and st.get('status_code') == 404:
+                try:
+                    remove_binding(0, container.id, all=True)
+                except Exception as e:
+                    print(f"Warning: failed to remove bindings for {container.id}: {e}")
+                try:
+                    delete_container(container.id)
+                except Exception as e:
+                    print(f"Warning: failed to delete container {container.id} from DB: {e}")
+                _deleted.add(container.id)
+                continue
+            else:
+                try:
+                    if st and isinstance(st, dict) and st.get('status_code') is None or (isinstance(st, dict) and st.get('status_code') != 404):
+                        status_str = st.get('container_status')
+                        if status_str:
+                            try:
+                                new_status = ContainerStatus(status_str)
+                            except Exception:
                                 try:
-                                    new_status = ContainerStatus(status_str)
-                                except Exception:
-                                    try:
-                                        new_status = next(s for s in ContainerStatus if s.value.lower() == str(status_str).lower())
-                                    except StopIteration:
-                                        new_status = None
-                                if new_status:
-                                    try:
-                                        update_container(container.id, container_status=new_status)
-                                    except Exception as e:
-                                        print(f"Warning: failed to update container status for {container.id}: {e}")
-                    except Exception as e:
-                        print(f"list_all_container_bref_information: ignored error while persisting status for {container.name}: {e}")
+                                    new_status = next(s for s in ContainerStatus if s.value.lower() == str(status_str).lower())
+                                except StopIteration:
+                                    new_status = None
+                            if new_status:
+                                try:
+                                    update_container(container.id, container_status=new_status)
+                                except Exception as e:
+                                    print(f"Warning: failed to update container status for {container.id}: {e}")
+                except Exception as e:
+                    print(f"list_all_container_bref_information: ignored error while persisting status for {container.name}: {e}")
 
         bindings = get_container_bindings(container.id) or []
         long_term_state = _build_long_term_container_state(container.id, bindings)

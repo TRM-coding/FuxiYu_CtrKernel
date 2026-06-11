@@ -1,7 +1,10 @@
+from flask import current_app
+
 from ..repositories.machine_repo import *
 from pydantic import BaseModel
 from typing import Optional
 from ..utils.heartbeat import send, start_machine_maintenance_transition_heartbeat
+from ..utils.parallel import parallel_node_calls
 from ..repositories.containers_repo import update_container, list_containers as repo_list_containers
 from ..repositories import machine_permission_repo, user_repo
 from ..constant import ContainerStatus, MachineStatus
@@ -257,6 +260,23 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
 #######################################
 
 #######################################
+def _node_probe_machine(machine_id: int, _app=None) -> bool:
+    """封装单次 NodeKernel /machine_status 可达性检查。
+
+    等同于原 for 循环内的 ``is_machine_online_remote(machine_id, timeout=2.0)``，
+    抽取为独立函数以适配 ``parallel_node_calls``。
+
+    *_app* 可选传入 Flask app 实例，用于线程池内推送 app context。
+    """
+    try:
+        if _app is not None:
+            with _app.app_context():
+                return is_machine_online_remote(machine_id, timeout=2.0)
+        return is_machine_online_remote(machine_id, timeout=2.0)
+    except Exception:
+        return False
+
+
 # 获取一批机器的概要信息
 def List_all_machine_bref_information(
     page_number: int, 
@@ -315,16 +335,35 @@ def List_all_machine_bref_information(
     # 分页查询（offset从0开始）
     machines = machines_query.limit(page_size).offset(page_number * page_size).all()
     
-    # 4. 组装返回结果
+    # 4. 并发可达性检查（Phase A），然后逐条同步状态（Phase B）
     res = []
-    for machine in machines:
-        # 最朴素的节点可达性检查：单次请求 /machine_status
-        try:
-            try:
-                online = is_machine_online_remote(machine.id, timeout=2.0)
-            except Exception:
-                online = False
 
+    # --- Phase A: 并发探活 ---
+    try:
+        use_parallel = current_app.config.get("NODE_PARALLEL_ENABLED_MACHINES", True)
+        _app = current_app._get_current_object()
+    except RuntimeError:
+        use_parallel = True
+        _app = None
+    _probe_results: dict[int, bool] = {}
+    if machines:
+        if use_parallel and _app is not None:
+            _callables = [
+                lambda mid=m.id, a=_app: _node_probe_machine(mid, _app=a)
+                for m in machines
+            ]
+            _raw = parallel_node_calls(_callables, timeout_per_call=3.0)
+            for m, r in zip(machines, _raw):
+                _probe_results[m.id] = r if isinstance(r, bool) else False
+        else:
+            for m in machines:
+                _probe_results[m.id] = _node_probe_machine(m.id)
+
+    # --- Phase B: 逐条同步（串行，避免 DB session 竞争） ---
+    for machine in machines:
+        online = _probe_results.get(machine.id, False)
+
+        try:
             try:
                 current_status_val = machine.machine_status.value.lower() if hasattr(machine.machine_status, 'value') else str(machine.machine_status).lower()
             except Exception:
@@ -368,7 +407,6 @@ def List_all_machine_bref_information(
                         pass
                     _mark_containers_offline(machine)
         except Exception:
-            # ignore and continue
             pass
         latest = get_by_id(machine.id) or machine
         info = machine_bref_information(
