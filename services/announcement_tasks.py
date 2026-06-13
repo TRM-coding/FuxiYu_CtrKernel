@@ -16,7 +16,7 @@ from ..models.machine_permission import MachinePermission
 from ..models.user import User
 from ..models.usercontainer import UserContainer
 from ..repositories import announcement_repo
-from ..utils.mail import send as send_mail
+from ..utils.mail import send as send_mail, send_batch
 
 # ══════════════════════════════════════════════════════════════════════
 # Pydantic 数据模型
@@ -159,7 +159,7 @@ def send_draft_service(
     """将单条草稿发送给 targets 指定的收件人集合。
 
     内部流程：查草稿 → 解析收件人 → 创建公告(SENDING) →
-    逐个 send_mail → 更新状态+计数 → 删除草稿。
+    send_batch 批量发送（复用连接）→ 更新状态+计数 → 删除草稿。
 
     元素快填在编辑时已完成，此处不再做变量渲染。
     """
@@ -191,12 +191,17 @@ def send_draft_service(
         source_draft_id=draft.id,
     )
 
-    # 5. 逐个发送邮件
+    # 5. 批量发送邮件（复用 SMTP 连接）
+    messages = [
+        {"to": r.email, "subject": announcement.title, "content": announcement.content}
+        for r in resolve_result.recipients
+    ]
+    results = send_batch(messages)
     success = 0
     fail = 0
     failures: list[dict] = []
-    for recipient in resolve_result.recipients:
-        result = send_mail(to=recipient.email, subject=announcement.title, content=announcement.content)
+    for i, result in enumerate(results):
+        recipient = resolve_result.recipients[i]
         if result.get("ok"):
             success += 1
         else:
@@ -318,12 +323,17 @@ def resend_announcement_service(announcement_id: int) -> SendResult:
     targets = [TargetEntry(**t) for t in raw_targets]
     resolve_result = resolve_recipients(targets)
 
-    # 发送
+    # 发送（复用 SMTP 连接）
+    messages = [
+        {"to": r.email, "subject": ann.title, "content": ann.content}
+        for r in resolve_result.recipients
+    ]
+    results = send_batch(messages)
     success = 0
     fail = 0
     failures: list[dict] = []
-    for recipient in resolve_result.recipients:
-        result = send_mail(to=recipient.email, subject=ann.title, content=ann.content)
+    for i, result in enumerate(results):
+        recipient = resolve_result.recipients[i]
         if result.get("ok"):
             success += 1
         else:

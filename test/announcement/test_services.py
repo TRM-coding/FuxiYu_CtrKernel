@@ -143,14 +143,19 @@ def test_s11_send_draft_partial_failure(db_session, monkeypatch):
 
     call_count = [0]
 
-    def _mock_send(*args, **kwargs):
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return {"ok": True, "to": kwargs.get("to", "")}
-        return {"ok": False, "error": "simulated failure", "to": kwargs.get("to", "")}
+    def _mock_send_batch(messages, **kwargs):
+        results = []
+        for i, m in enumerate(messages):
+            to = m.get("to", "")
+            recips = [to] if isinstance(to, str) else list(to)
+            if i == 0:
+                results.append({"ok": True, "to": recips})
+            else:
+                results.append({"ok": False, "error": "simulated failure", "to": recips})
+        return results
 
     monkeypatch.setattr(
-        "FuxiYu_CtrKernel.services.announcement_tasks.send_mail", _mock_send
+        "FuxiYu_CtrKernel.services.announcement_tasks.send_batch", _mock_send_batch
     )
 
     result = send_draft_service(
@@ -168,8 +173,8 @@ def test_s12_send_draft_all_failure(db_session, monkeypatch):
     draft = announcement_repo.save_draft(title="通知", content="正文", created_by=u1.id)
 
     monkeypatch.setattr(
-        "FuxiYu_CtrKernel.services.announcement_tasks.send_mail",
-        lambda **kw: {"ok": False, "error": "fail"},
+        "FuxiYu_CtrKernel.services.announcement_tasks.send_batch",
+        lambda messages, **kw: [{"ok": False, "error": "fail", "to": [m["to"]] if isinstance(m["to"], str) else m["to"]} for m in messages],
     )
 
     result = send_draft_service(draft.id, targets=[TargetEntry(type="user", id=u1.id)])

@@ -92,6 +92,14 @@ def mock_external_services(monkeypatch, request):
         recipients = [to] if isinstance(to, str) else list(to or [])
         return {"ok": True, "to": recipients, "mode": "pytest-mock"}
 
+    def _mail_send_batch(messages, **kwargs):
+        results = []
+        for m in messages:
+            to = m.get("to", "")
+            recips = [to] if isinstance(to, str) else list(to)
+            results.append({"ok": True, "to": recips, "mode": "pytest-mock"})
+        return results
+
     def _fake_thread(*args, **kwargs):
         class _Thread:
             def is_alive(self):
@@ -103,8 +111,10 @@ def mock_external_services(monkeypatch, request):
     monkeypatch.setattr("smtplib.SMTP", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Real SMTP is blocked in the safe pytest suite")))
     monkeypatch.setattr("smtplib.SMTP_SSL", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Real SMTP_SSL is blocked in the safe pytest suite")))
     monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail.send", _mail_send)
+    monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail.send_batch", _mail_send_batch)
     monkeypatch.setattr("FuxiYu_CtrKernel.services.user_tasks.send_mail", _mail_send)
     monkeypatch.setattr("FuxiYu_CtrKernel.services.announcement_tasks.send_mail", _mail_send)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.announcement_tasks.send_batch", _mail_send_batch)
     monkeypatch.setattr("FuxiYu_CtrKernel.schemas.container_cleanup_task.send_mail", _mail_send)
     monkeypatch.setattr("FuxiYu_CtrKernel.utils.heartbeat.start_machine_maintenance_transition_heartbeat", _fake_thread)
     monkeypatch.setattr("FuxiYu_CtrKernel.utils.heartbeat.container_starting_status_heartbeat", _fake_thread)
