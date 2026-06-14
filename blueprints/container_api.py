@@ -397,6 +397,26 @@ def update_role_api():
         return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
     return jsonify({"success":1,"message":"Role updated successfully"}),200
 
+@api_bp.post("/containers/unpause_container")
+def unpause_container_api():
+    token = request.headers.get("token", "")
+    if (not authentications_repo.is_token_valid(token)):
+        return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
+    data = request.get_json() or {}
+    container_id = data.get("container_id", 0)
+    operator_user_id = authentications_repo.get_user_id_by_token(token)
+    try:
+        if container_service.unpause_container(container_id=container_id, operator_user_id=operator_user_id):
+            return jsonify({"success": 1, "message": "Container unpaused"}), 200
+        else:
+            return jsonify({"success": 0, "message": "Failed to unpause container", "error_reason": "unpause_failed"}), 500
+    except container_service.NodeServiceError as e:
+        status = REASON_STATUS_MAP.get(getattr(e, 'reason', None), 500)
+        return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), status
+    except Exception as e:
+        return jsonify({"success": 0, "message": f"Internal error: {str(e)}"}), 500
+
+
 @api_bp.post("/containers/get_container_detail_information")
 def get_container_detail_information_api():
     '''
@@ -519,6 +539,9 @@ def refresh_last_ssh_login_time_api():
         last_time = container_service.get_container_last_ssh_login_time(container.id)
         cleanup_days = int(current_app.config.get("CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
         cleanup_info = container_service.build_cleanup_info(last_time, cleanup_days)
+        # 顺便刷新磁盘用量（异步，不阻塞 SSH 刷新返回）
+        import threading
+        threading.Thread(target=lambda: _refresh_disk_async(container.id), daemon=True).start()
     except container_service.NodeServiceError as e:
         reason = getattr(e, "reason", None)
         status = REASON_STATUS_MAP.get(reason, 500)
@@ -625,3 +648,35 @@ def list_all_containers_bref_information_api():
         payload["long_term_container_remaining"] = long_term_container_remaining
         payload["long_term_container_limit"] = long_term_container_limit
     return jsonify(payload),200
+
+
+def _refresh_disk_async(container_id: int):
+    """异步拉取单个容器的磁盘用量并落库（不阻塞前端请求）。"""
+    try:
+        from flask import current_app
+        app = current_app._get_current_object()
+        with app.app_context():
+            du = container_service.get_container_disk_usage(container_id, timeout=20.0)
+            if isinstance(du, dict) and du.get("container"):
+                from ..repositories import containers_repo as repo, machine_repo as mrepo
+                from datetime import datetime
+                c = repo.get_by_id(container_id)
+                if not c:
+                    return
+                cd = du["container"]
+                overlay = int(cd.get("overlay_rw_bytes") or 0)
+                bind = int(cd.get("bind_mount_bytes") or 0)
+                total = int(cd.get("total_bytes") or 0)
+                limit = 0
+                try:
+                    m = mrepo.get_by_id(c.machine_id)
+                    dg = getattr(m, 'disk_size_gb', 0) or 0
+                    limit = int(dg * 1024**3)
+                except Exception:
+                    pass
+                repo.update_container(c.id, commit=True,
+                    disk_overlay_rw_bytes=overlay, disk_bind_mount_bytes=bind,
+                    disk_total_bytes=total, disk_limit_bytes=limit,
+                    disk_checked_at=datetime.utcnow())
+    except Exception as e:
+        print(f"[ssh-refresh] async disk refresh failed for container {container_id}: {e}")

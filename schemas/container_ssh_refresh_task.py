@@ -79,9 +79,10 @@ def start_container_ssh_refresh_scheduler(
     stop_event = threading.Event()
 
     def _worker():
-        # 启动后先跑一次，避免冷启动后长时间没有数据
+        # 启动后先跑一次 SSH，磁盘检测并行
         with app.app_context():
             refresh_all_containers_last_ssh_login_time_once()
+            threading.Thread(target=_run_disk_check, args=(app,), daemon=True).start()
 
         while not stop_event.is_set():
             time.sleep(interval_seconds)
@@ -90,6 +91,8 @@ def start_container_ssh_refresh_scheduler(
             try:
                 with app.app_context():
                     refresh_all_containers_last_ssh_login_time_once()
+                # 磁盘检测独立线程并行，不阻塞 SSH 刷新
+                threading.Thread(target=_run_disk_check, args=(app,), daemon=True).start()
             except Exception as e:
                 print(f"[ssh-refresh] periodic run failed: {e}")
 
@@ -98,3 +101,13 @@ def start_container_ssh_refresh_scheduler(
 
     app.extensions[key] = {"thread": t, "stop_event": stop_event}
     return t
+
+
+def _run_disk_check(app):
+    """在独立线程内执行一次磁盘检测（只读/评估/响应）。"""
+    try:
+        with app.app_context():
+            from .container_disk_check_task import check_all_containers_disk_usage_once
+            check_all_containers_disk_usage_once()
+    except Exception as e:
+        print(f"[ssh-refresh] disk check failed: {e}")

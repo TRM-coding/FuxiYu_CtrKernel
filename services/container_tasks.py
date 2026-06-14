@@ -342,6 +342,98 @@ def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -
 
     return last_time
 
+
+def unpause_container(container_id: int, operator_user_id: int | None = None) -> bool:
+    """解冻因磁盘超限被 pause 的容器。"""
+    try:
+        container_id = int(container_id)
+    except Exception:
+        return False
+
+    container = containers_repo.get_by_id(container_id)
+    if not container:
+        return False
+
+    machine_id = container.machine_id
+    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
+        raise NodeServiceError(f'Machine {machine_id} not accessible', reason='machine_permission_denied')
+
+    machine_ip = get_machine_ip_by_id(machine_id)
+    url = get_full_url(machine_ip, "/pause_container")
+    payload = json.dumps({"config": {"container_name": container.name, "action": "unpause"}})
+    try:
+        sig = signature(payload)
+        enc = encryption(payload)
+        res = send(enc, sig, url, timeout=10.0)
+    except Exception as e:
+        print(f"unpause_container send error: {e}")
+        return False
+
+    _raise_on_node_error(res, 'unpause')
+    if res.get('success') == 1:
+        # 更新本地状态为 online
+        try:
+            update_container(container.id, container_status=ContainerStatus.ONLINE)
+        except Exception:
+            pass
+        return True
+    return False
+
+
+def get_container_disk_usage(container_id: int, timeout: float = 20.0) -> dict | None:
+    """
+    通过 Node 查询容器磁盘使用情况（只读）。
+    入参: container_id
+    返回: dict 包含 machine_disk 和 container 信息，或 None
+    """
+    try:
+        container_id = int(container_id)
+    except Exception:
+        print(f"Invalid container id for disk usage query: {container_id}")
+        return None
+
+    try:
+        container = containers_repo.get_by_id(container_id)
+    except Exception:
+        print(f"Error querying container info for id={container_id}: {traceback.format_exc()}")
+        return None
+
+    if not container:
+        return None
+    try:
+        machine_id = container.machine_id
+        machine_ip = get_machine_ip_by_id(machine_id)
+        url = get_full_url(machine_ip, "/check_disk_usage")
+    except Exception:
+        print(f"Error retrieving machine info for container id={container_id}: {traceback.format_exc()}")
+        return None
+
+    container_name = getattr(container, 'name', None)
+    payload = json.dumps({"config": {"container_name": container_name}})
+    try:
+        sig = signature(payload)
+        enc = encryption(payload)
+        res = send(enc, sig, url, timeout=timeout)
+    except Exception as e:
+        print(f"Error sending disk check request to {url}: {e}")
+        return None
+
+    if not isinstance(res, dict):
+        print(f"get_container_disk_usage: unexpected response type: {type(res)}")
+        return None
+
+    _raise_on_node_error(res, 'check_disk')
+    if res.get('success') != 1:
+        print(f"get_container_disk_usage: Node returned failure: {res}")
+        return None
+
+    cd = res.get("container", {})
+    print(f"[disk-check] ctrl received: container={container_name} "
+          f"overlay={cd.get('overlay_rw_bytes')}B bind={cd.get('bind_mount_bytes')}B "
+          f"total={cd.get('total_bytes')}B")
+    return res
+
+
 ####################################################
 
 #API Definition
@@ -363,6 +455,9 @@ class container_bref_information(BaseModel):
     cleanup_at: str | None = None
     seconds_until_cleanup: int | None = None
     cleanup_status: str | None = None
+    disk_total_gb: float | None = None
+    disk_limit_gb: float | None = None
+    disk_usage_percent: float | None = None
 
 class container_detail_information(BaseModel):
     container_id: int # 与上方结构对称
@@ -375,13 +470,14 @@ class container_detail_information(BaseModel):
     shared_gb:int
     gpu_number:int
     cpu_number:int
-    port:int 
+    port:int
     owners:list[str]
     accounts:list[(str,ROLE)]
     is_long_term: bool = False
     long_term_container_can_enable: bool = True
     long_term_container_blocked_user_ids: list[int] = Field(default_factory=list)
     long_term_container_remaining_by_user: dict[int, int] = Field(default_factory=dict)
+    disk_usage: dict | None = None
 ####################################################
 
 
@@ -1156,7 +1252,25 @@ def get_container_detail_information(container_id:int)->container_detail_informa
 
     owener_bindings= get_container_bindings(container_id)
     long_term_state = _build_long_term_container_state(container.id, owener_bindings)
-    res={ 
+
+    # 附加磁盘用量（从 DB 快照）
+    disk_usage = None
+    try:
+        d_total = getattr(container, 'disk_total_bytes', None)
+        if d_total is not None and d_total >= 0:
+            limit_bytes = getattr(container, 'disk_limit_bytes', None) or 0
+            limit_gb = limit_bytes / (1024**3) if limit_bytes else 0.0
+            disk_usage = {
+                "overlay_rw_gb": round((getattr(container, 'disk_overlay_rw_bytes', None) or 0) / (1024**3), 1),
+                "bind_mount_gb": round((getattr(container, 'disk_bind_mount_bytes', None) or 0) / (1024**3), 1),
+                "total_gb": round(d_total / (1024**3), 1),
+                "limit_gb": round(limit_gb, 1),
+                "usage_percent": round((d_total / limit_bytes * 100) if limit_bytes > 0 else 0, 1),
+            }
+    except Exception as e:
+        print(f"Warning: failed to read DB disk snapshot for container {container.id}: {e}")
+
+    res={
         "container_id": container.id,
         "container_name": container.name,
         "container_image": container.image,
@@ -1169,6 +1283,7 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         "cpu_number": container.cpu_number,
         "port": container.port,
         **long_term_state,
+        "disk_usage": disk_usage,
         # 备忘：owners才是系统对应的用户名列表
         "owners": [get_name_by_id(binding['user_id']) for binding in owener_bindings],
         # 这里的变动是为了
@@ -1334,6 +1449,13 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
             ssh_record.last_ssh_login_time if ssh_record else None,
             cleanup_days,
         )
+        # 磁盘用量（从 DB 快照，不实时查 Node）
+        d_total = getattr(container, 'disk_total_bytes', None)
+        d_limit = getattr(container, 'disk_limit_bytes', None) or 0
+        disk_total_gb = round(d_total / (1024**3), 1) if d_total is not None else None
+        disk_limit_gb = round(d_limit / (1024**3), 1) if d_limit else None
+        disk_usage_percent = round((d_total / d_limit * 100) if (d_total is not None and d_limit > 0) else 0, 1)
+
         info = container_bref_information(
             container_id=container.id,
             container_name=container.name,
@@ -1349,6 +1471,9 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
             cleanup_after_days=cleanup_info.get("cleanup_after_days"),
             cleanup_at=cleanup_info.get("cleanup_at"),
             seconds_until_cleanup=cleanup_info.get("seconds_until_cleanup"),
+            disk_total_gb=disk_total_gb,
+            disk_limit_gb=disk_limit_gb,
+            disk_usage_percent=disk_usage_percent,
             cleanup_status=cleanup_info.get("cleanup_status"),
             **long_term_state,
         )

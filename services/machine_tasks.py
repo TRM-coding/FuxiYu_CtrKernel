@@ -223,10 +223,16 @@ def Update_machine(machine_id: int, **fields) -> bool:
     if str(current_status).lower() == MachineStatus.ONLINE.value and str(requested_status).lower() == MachineStatus.MAINTENANCE.value:
         passthrough_fields = dict(fields)
         passthrough_fields.pop('machine_status', None)
+        if 'disk_size' in passthrough_fields:
+            passthrough_fields['disk_size_gb'] = passthrough_fields.pop('disk_size')
         if passthrough_fields:
             update_machine(machine_id, **passthrough_fields)
         start_machine_maintenance_transition_heartbeat(machine_id)
         return True
+
+    # 字段名翻译: 前端 disk_size → 模型 disk_size_gb
+    if 'disk_size' in fields:
+        fields['disk_size_gb'] = fields.pop('disk_size')
 
     update_machine(machine_id, **fields)
     return True    

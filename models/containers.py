@@ -28,6 +28,13 @@ class Container(db.Model):
     gpu_number: int = db.Column(db.Integer, nullable=False)
     cpu_number: int = db.Column(db.Integer, nullable=False)
 
+    # 磁盘用量快照（bytes），定期检测时更新
+    disk_overlay_rw_bytes: int = db.Column(db.BigInteger, nullable=True)
+    disk_bind_mount_bytes: int = db.Column(db.BigInteger, nullable=True)
+    disk_total_bytes: int = db.Column(db.BigInteger, nullable=True)
+    disk_limit_bytes: int = db.Column(db.BigInteger, nullable=True)
+    disk_checked_at = db.Column(db.DateTime, nullable=True)
+
     users = db.relationship(
         "User",
         secondary="user_container",
