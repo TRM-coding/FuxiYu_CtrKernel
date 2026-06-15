@@ -187,7 +187,7 @@ def _handle_soft_limit(container, usage: dict, app) -> None:
     limit_gb = _get_limit_gb(container, app)
     usage_pct = (total_gb / limit_gb * 100) if limit_gb > 0 else 0
 
-    subject = f"[Fuxi] 容器 {container.name} 磁盘使用接近上限"
+    subject = f"伏羲平台 - 容器 {container.name} 磁盘使用接近上限"
     content = (
         f"容器: {container.name}\n"
         f"磁盘用量: {total_gb:.1f}GB / {limit_gb:.1f}GB ({usage_pct:.0f}%)\n"
@@ -206,16 +206,6 @@ def _handle_soft_limit(container, usage: dict, app) -> None:
 
 def _handle_hard_limit(container, usage: dict, app) -> None:
     """超限时 docker pause 容器 + 发邮件。"""
-    # 已 pause / offline 的容器不再发邮件
-    try:
-        status = getattr(container, 'container_status', None)
-        status_val = status.value if hasattr(status, 'value') else str(status)
-        if str(status_val).lower() in ('paused', 'offline'):
-            print(f"[disk-check] hard limit: container {container.id} is {status_val}, skipping email")
-            return
-    except Exception:
-        pass
-
     from ..utils.mail import send as send_mail
 
     try:
@@ -228,34 +218,36 @@ def _handle_hard_limit(container, usage: dict, app) -> None:
     limit_gb = _get_limit_gb(container, app)
     usage_pct = (total_gb / limit_gb * 100) if limit_gb > 0 else 0
 
-    # 冷却: 同一容器 6 小时内不重复发 hard limit 邮件
+    # 冷却: 同一容器 6 小时内不重复发邮件
     last_key = f"_hard_limit_last_sent_{container.id}"
     now_ts = time.time()
     last_sent = getattr(app, '_disk_check_cache', {}) if app else {}
     if not isinstance(last_sent, dict):
         last_sent = {}
     if now_ts - last_sent.get(last_key, 0) < 6 * 3600:
-        print(f"[disk-check] hard limit: cooldown active, skipping email for container {container.id}")
-        return
-
-    subject = f"[Fuxi] 容器 {container.name} 磁盘超限已冻结"
-    content = (
-        f"容器: {container.name}\n"
-        f"磁盘用量: {total_gb:.1f}GB / {limit_gb:.1f}GB ({usage_pct:.0f}%)\n"
-        f"\n容器已被冻结（docker pause），请联系管理员清理后恢复。\n"
-    )
-    for email in emails:
-        try:
-            send_mail(to=email, subject=subject, content=content)
-            print(f"[disk-check] hard limit email sent to {email} for container {container.id}")
-        except Exception as e:
-            print(f"[disk-check] hard limit email failed to {email}: {e}")
-    last_sent[last_key] = now_ts
-    if app:
-        app._disk_check_cache = last_sent
+        # 仍在冷却中，但容器仍可能需 pause（首次之后的状态检查）
+        pass
+    else:
+        subject = f"伏羲平台 - 容器 {container.name} 磁盘超限已冻结"
+        content = (
+            f"容器: {container.name}\n"
+            f"磁盘用量: {total_gb:.1f}GB / {limit_gb:.1f}GB ({usage_pct:.0f}%)\n"
+            f"\n容器已被冻结（docker pause），请联系管理员清理后恢复。\n"
+        )
+        for e in emails:
+            try:
+                send_mail(to=e, subject=subject, content=content)
+                print(f"[disk-check] hard limit email sent to {e} for container {container.id}")
+            except Exception as ex:
+                print(f"[disk-check] hard limit email failed to {e}: {ex}")
+        last_sent[last_key] = now_ts
+        if app:
+            app._disk_check_cache = last_sent
 
     # docker pause — 仅在线容器执行
     try:
+        status = getattr(container, 'container_status', None)
+        status_val = status.value if hasattr(status, 'value') else str(status)
         if str(status_val).lower() not in ('online',):
             print(f"[disk-check] pause skipped for container {container.id}: status={status_val}")
             return

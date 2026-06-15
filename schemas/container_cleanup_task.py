@@ -73,7 +73,7 @@ def _send_cleanup_reminders_if_needed(container_id: int, info: dict, app: Flask)
             return
 
         label = _format_hours(hours)
-        subject = f"伏羲系统容器清理提醒：{snapshot.get('container_name')} 剩余约{label}"
+        subject = f"伏羲平台 - 容器清理提醒：{snapshot.get('container_name')} 剩余约{label}"
         content = (
             f"你的容器即将因 SSH 长时间未登录被自动清理。\n\n"
             f"容器ID：{container_id}\n"
