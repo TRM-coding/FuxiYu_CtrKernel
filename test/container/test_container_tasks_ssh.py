@@ -142,7 +142,8 @@ def test_get_last_ssh_time_not_found_does_not_overwrite(
     mock_node_send(NODE_LAST_SSH_NOT_FOUND)
     last_time = container_tasks.get_container_last_ssh_login_time(container.id)
 
-    assert last_time is None
+    # Node 返回 not_found，但 DB 已有初始值 → 兜底返回 DB 值
+    assert last_time == initial_time
     record = container_ssh_login_repo.get_by_machine_container(machine.id, container.id)
     # 数据库里的值没有被 None 覆写
     assert record.last_ssh_login_time == initial_time

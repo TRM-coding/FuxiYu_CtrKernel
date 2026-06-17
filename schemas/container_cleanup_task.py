@@ -96,6 +96,17 @@ def _send_cleanup_reminders_if_needed(container_id: int, info: dict, app: Flask)
             if result.get("ok"):
                 if container_cleanup_reminder_repo.mark_sent(container_id, reminder_key, cleanup_at, email):
                     print(f"[container-cleanup] reminder sent container_id={container_id} threshold={reminder_key} to={email}")
+                    from ..repositories.operation_log_repo import write as write_op_log
+                    write_op_log(
+                        operation="send_cleanup_reminder",
+                        target_type="container",
+                        target_id=container_id,
+                        detail={
+                            "recipient": email,
+                            "threshold": reminder_key,
+                            "cleanup_at": cleanup_at.isoformat() if cleanup_at else None,
+                        },
+                    )
                 else:
                     print(f"[container-cleanup] reminder duplicate container_id={container_id} threshold={reminder_key} to={email} (already recorded)")
             else:

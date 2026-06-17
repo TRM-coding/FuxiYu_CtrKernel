@@ -294,7 +294,9 @@ def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -
         res = send(enc, sig, url, timeout=timeout)
     except Exception as e:
         print(f"Error sending request to {url}: {e}")
-        return None
+        # Node 不可达时，以 DB 已有记录兜底
+        record = container_ssh_login_repo.get_by_machine_container(machine_id, container.id)
+        return record.last_ssh_login_time if record else None
     #print(f"DEBUG: get_container_last_ssh_login_time: sent request to {url} with payload {payload}")
     #print(f"get_container_last_ssh_login_time: NODE response: {res}")
 
@@ -347,6 +349,12 @@ def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -
         except Exception as e:
             print(f"Warning: failed to persist last ssh login time for container {container.id}: {e}")
 
+    # Node 返回空值时，以 DB 已有记录兜底
+    if last_time is None:
+        record = container_ssh_login_repo.get_by_machine_container(machine_id, container.id)
+        if record and record.last_ssh_login_time:
+            last_time = record.last_ssh_login_time
+
     return last_time
 
 
@@ -383,6 +391,10 @@ def unpause_container(container_id: int, operator_user_id: int | None = None) ->
             update_container(container.id, container_status=ContainerStatus.ONLINE)
         except Exception:
             pass
+        from ..repositories.operation_log_repo import write as write_op_log
+        write_op_log(operator_user_id=operator_user_id, operation="unpause_container",
+                     target_type="container", target_id=container.id,
+                     detail={"name": container.name, "machine_id": machine_id})
         return True
     return False
 
@@ -646,6 +658,22 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
         return False
 
     if Key:
+        from ..repositories.operation_log_repo import write as write_op_log
+        write_op_log(
+            operator_user_id=operator_user_id,
+            operation="create_container",
+            target_type="container",
+            target_id=container_id,
+            detail={
+                "name": container.NAME,
+                "machine_id": machine_id,
+                "image": container.image,
+                "port": free_port,
+                "memory_gb": container.MEMORY,
+                "cpu_number": container.CPU_NUMBER,
+                "gpu_number": gpu_count,
+            },
+        )
         return True
     return False
 
@@ -706,6 +734,24 @@ def remove_container(container_id:int, debug=False, operator_user_id:int|None=No
             raise Exception(f"远程调用失败: {res['error']}")
         Key=True
     
+    # 记录操作日志（删前写，保留容器名称等信息）
+    try:
+        container = containers_repo.get_by_id(container_id)
+    except Exception:
+        container = None
+    from ..repositories.operation_log_repo import write as write_op_log
+    write_op_log(
+        operator_user_id=operator_user_id,
+        operation="delete_container",
+        target_type="container",
+        target_id=container_id,
+        detail={
+            "name": getattr(container, 'name', '?') if container else '?',
+            "machine_id": machine_id,
+            "trigger": "api" if operator_user_id else "cleanup",
+        },
+    )
+
     # 移除所有绑定并删除容器
     remove_binding(0, container_id, all=True)
     delete_container(container_id)
@@ -868,6 +914,11 @@ def set_long_term_container(container_id: int, is_long_term: bool, operator_user
         long_term_container_repo.remove(container_id)
 
     long_term_state = _build_long_term_container_state(container_id, bindings)
+    from ..repositories.operation_log_repo import write as write_op_log
+    write_op_log(operator_user_id=operator_user_id,
+                 operation="set_long_term",
+                 target_type="container", target_id=container_id,
+                 detail={"is_long_term": is_long_term})
     return {
         "container_id": container_id,
         **long_term_state,
@@ -945,6 +996,10 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False, operat
                 role=role)
     
     if Key:
+        from ..repositories.operation_log_repo import write as write_op_log
+        write_op_log(operator_user_id=operator_user_id, operation="add_collaborator",
+                     target_type="container", target_id=container_id,
+                     detail={"user_id": user_id, "role": role.value if hasattr(role, 'value') else str(role)})
         return True
     return False
 #从container_id中移除user_id对应的用户访问权
@@ -1019,8 +1074,12 @@ def remove_collaborator(container_id:int,user_id:int,debug=False, operator_user_
         Key=True
     # 仅删除绑定
     remove_binding(user_id,container_id)
-    
+
     if Key:
+        from ..repositories.operation_log_repo import write as write_op_log
+        write_op_log(operator_user_id=operator_user_id, operation="remove_collaborator",
+                     target_type="container", target_id=container_id,
+                     detail={"user_id": user_id})
         return True
     return False
 
@@ -1094,8 +1153,12 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False, oper
 
     # 更新绑定时同时传入 username 和 role，确保数据库中的 username 在变更为 ROOT 时被设置为 'root'
     update_binding(user_id, container_id, username=username, role=updated_role)
-    
+
     if Key:
+        from ..repositories.operation_log_repo import write as write_op_log
+        write_op_log(operator_user_id=operator_user_id, operation="update_collaborator_role",
+                     target_type="container", target_id=container_id,
+                     detail={"user_id": user_id, "new_role": updated_role.value if hasattr(updated_role, 'value') else str(updated_role)})
         return True
     return False
 
@@ -1129,6 +1192,10 @@ def start_container(container_id:int, debug=False, operator_user_id:int|None=Non
             container_starting_status_heartbeat(machine_ip, container_name, container_id=container_id)
         except Exception as e:
             print(f"Failed to start start-heartbeat: {e}")
+        from ..repositories.operation_log_repo import write as write_op_log
+        write_op_log(operator_user_id=operator_user_id, operation="start_container",
+                     target_type="container", target_id=container_id,
+                     detail={"name": container_name})
         return True
     # Treat other responses as failure
     raise NodeServiceError(f"NODE start returned failure: {res}", reason=res.get('error_reason') or 'start_failed')
@@ -1161,6 +1228,10 @@ def stop_container(container_id:int, debug=False, operator_user_id:int|None=None
             container_stopping_status_heartbeat(machine_ip, container_name, container_id=container_id)
         except Exception as e:
             print(f"Failed to start stop-heartbeat: {e}")
+        from ..repositories.operation_log_repo import write as write_op_log
+        write_op_log(operator_user_id=operator_user_id, operation="stop_container",
+                     target_type="container", target_id=container_id,
+                     detail={"name": container_name})
         return True
     raise NodeServiceError(f"NODE stop returned failure: {res}", reason=res.get('error_reason') or 'stop_failed')
 
@@ -1197,6 +1268,10 @@ def restart_container(container_id:int, debug=False, operator_user_id:int|None=N
             container_restart_status_heartbeat(machine_ip, container_name, container_id=container_id)
         except Exception as e:
             print(f"Failed to start restart-heartbeat: {e}")
+        from ..repositories.operation_log_repo import write as write_op_log
+        write_op_log(operator_user_id=operator_user_id, operation="restart_container",
+                     target_type="container", target_id=container_id,
+                     detail={"name": container_name})
         return True
     raise NodeServiceError(f"NODE restart returned failure: {res}", reason=res.get('error_reason') or 'restart_failed')
 

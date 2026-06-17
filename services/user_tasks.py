@@ -138,6 +138,9 @@ def Register(username: str, email: str, password: str, graduation_year):
         password_hash=generate_password_hash(password),
         graduation_year=graduation_year
     )
+    from ..repositories.operation_log_repo import write as write_op_log
+    write_op_log(operation="register_user", target_type="user", target_id=new_user.id,
+                 detail={"username": username, "email": email})
     return True, new_user, None
 #####################################
 
@@ -170,6 +173,9 @@ def Change_password(user: User, old_password: str, new_password: str) -> bool:
         print(f"Error updating password in database: {e}")
         return False
     print("Password changed successfully.")
+    from ..repositories.operation_log_repo import write as write_op_log
+    write_op_log(operator_user_id=user.id, operation="change_password",
+                 target_type="user", target_id=user.id)
     return True
 
 #####################################
@@ -190,6 +196,8 @@ def Delete_user(user_id: int) -> bool:
 
     # 最终删除用户
     if delete_user(user_id=user_id):
+        from ..repositories.operation_log_repo import write as write_op_log
+        write_op_log(operation="delete_user", target_type="user", target_id=user_id)
         return True
 
     return False
@@ -323,6 +331,8 @@ def Reset_password(user_id:int)->str|None:
         return None
     new_password=f"{user.graduation_year}{user.username}"
     update_user(user_id,password_hash=generate_password_hash(new_password))
+    from ..repositories.operation_log_repo import write as write_op_log
+    write_op_log(operation="reset_password", target_type="user", target_id=user_id)
     return new_password
 #####################################
 

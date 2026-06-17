@@ -46,11 +46,19 @@ def Add_machine_permission(machine_id: int, user_id: int) -> bool:
     if not user:
         raise ValueError('user_not_found')
     machine_permission_repo.add_permission(machine_id, user_id)
+    from ..repositories.operation_log_repo import write as write_op_log
+    write_op_log(operation="add_machine_permission", target_type="machine",
+                 target_id=machine_id, detail={"user_id": user_id})
     return True
 
 
 def Remove_machine_permission(machine_id: int, user_id: int) -> bool:
-    return machine_permission_repo.remove_permission(machine_id, user_id)
+    result = machine_permission_repo.remove_permission(machine_id, user_id)
+    if result:
+        from ..repositories.operation_log_repo import write as write_op_log
+        write_op_log(operation="remove_machine_permission", target_type="machine",
+                     target_id=machine_id, detail={"user_id": user_id})
+    return result
 
 
 def List_machine_permissions(machine_id: int) -> list[int]:
@@ -158,6 +166,9 @@ def Add_machine(machine_name:str,
          max_gpu_number=max_gpu_number,
          max_cpu_core_number=max_cpu_core_number
     )
+    from ..repositories.operation_log_repo import write as write_op_log
+    write_op_log(operation="add_machine", target_type="machine", target_id=0,
+                 detail={"name": machine_name, "ip": machine_ip})
     return True
 
 #######################################
@@ -168,6 +179,9 @@ def Add_machine(machine_name:str,
 def Remove_machine(machine_id:list[int])->bool:
     for id in machine_id:
         delete_machine(id)
+    from ..repositories.operation_log_repo import write as write_op_log
+    write_op_log(operation="remove_machine", target_type="machine", target_id=machine_id[0] if len(machine_id)==1 else 0,
+                 detail={"ids": machine_id})
     return True
 #######################################
 
@@ -235,7 +249,10 @@ def Update_machine(machine_id: int, **fields) -> bool:
         fields['disk_size_gb'] = fields.pop('disk_size')
 
     update_machine(machine_id, **fields)
-    return True    
+    from ..repositories.operation_log_repo import write as write_op_log
+    write_op_log(operation="update_machine", target_type="machine", target_id=machine_id,
+                 detail={k: str(v) for k, v in fields.items()})
+    return True
 #######################################
 
 

@@ -264,6 +264,10 @@ def _handle_hard_limit(container, usage: dict, app) -> None:
         if isinstance(res, dict) and res.get("success") == 1:
             containers_repo.update_container(container.id, commit=True,
                 container_status=ContainerStatus.PAUSED)
+        from ..repositories.operation_log_repo import write as write_op_log
+        write_op_log(operation="pause_container", target_type="container",
+                     target_id=container.id,
+                     detail={"reason": "disk_hard_limit", "usage": f"{total_gb:.1f}GB/{limit_gb:.1f}GB"})
     except Exception as e:
         print(f"[disk-check] pause failed for container {container.id}: {e}")
 
