@@ -60,6 +60,10 @@ def _send_cleanup_reminders_if_needed(container_id: int, info: dict, app: Flask)
     if not eligible_hours:
         return
 
+    # 清理旧的提醒记录（用户重新 SSH 后 cleanup_at 已变，旧记录无意义）
+    if cleanup_at:
+        container_cleanup_reminder_repo.clear_stale(container_id, cleanup_at)
+
     # If an earlier scan was missed, send the nearest reminder that is still relevant.
     for hours in [min(eligible_hours)]:
 
@@ -90,8 +94,10 @@ def _send_cleanup_reminders_if_needed(container_id: int, info: dict, app: Flask)
                 continue
             result = send_mail(to=email, subject=subject, content=content)
             if result.get("ok"):
-                container_cleanup_reminder_repo.mark_sent(container_id, reminder_key, cleanup_at, email)
-                print(f"[container-cleanup] reminder sent container_id={container_id} threshold={reminder_key} to={email}")
+                if container_cleanup_reminder_repo.mark_sent(container_id, reminder_key, cleanup_at, email):
+                    print(f"[container-cleanup] reminder sent container_id={container_id} threshold={reminder_key} to={email}")
+                else:
+                    print(f"[container-cleanup] reminder duplicate container_id={container_id} threshold={reminder_key} to={email} (already recorded)")
             else:
                 print(f"[container-cleanup] reminder failed container_id={container_id} threshold={reminder_key} to={email}: {result}")
 

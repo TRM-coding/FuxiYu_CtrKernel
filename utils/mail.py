@@ -11,6 +11,7 @@ import os
 import smtplib
 import socket
 import ssl
+import time
 from dataclasses import dataclass
 from email.message import EmailMessage
 from pathlib import Path
@@ -336,6 +337,8 @@ def send_batch(
                 continue
 
             try:
+                if i > 0:
+                    time.sleep(0.8)  # 同一连接内间隔，避免被服务商限速
                 smtp.send_message(msg, from_addr=cfg.sender, to_addrs=all_recips)
                 logger.info("[mail] %s → ok", recips)
                 results[i] = {"ok": True, "to": recips}

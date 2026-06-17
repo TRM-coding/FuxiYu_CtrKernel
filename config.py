@@ -47,6 +47,11 @@ class AppConfig(SqlConfig, KeyConfig):
         auth = f":{SQLPASSWORD}" if SQLPASSWORD else ""
         SQLALCHEMY_DATABASE_URI = f"mysql+pymysql://{SQLUSER}{auth}@{SQLURL}:{SQLPORT}/{SQLNAME}?charset=utf8mb4"
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    # 锁死 MySQL session 时区为 UTC，不受系统时区切换影响（SQLite 跳过以兼容测试）
+    _connect_args = {}
+    if SQLALCHEMY_DATABASE_URI and "mysql" in SQLALCHEMY_DATABASE_URI:
+        _connect_args["init_command"] = "SET time_zone = '+00:00'"
+    SQLALCHEMY_ENGINE_OPTIONS = {"connect_args": _connect_args}
     SECRET_KEY = os.getenv("SECRET_KEY", "dev")
     # SSL / HTTPS (development toggle)
     # Set ENABLE_SSL=false to disable HTTPS in development. 默认开了启，除非明确设置为 false（字符串）。--- IGNORE ---

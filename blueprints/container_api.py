@@ -536,12 +536,13 @@ def refresh_last_ssh_login_time_api():
         return jsonify({"success": 0, "message": "Container not found", "error_reason": "container_not_found"}), 404
 
     try:
-        last_time = container_service.get_container_last_ssh_login_time(container.id)
+        cid = container.id  # 提前取值，防止 commit 后 session 过期导致后台线程崩溃
+        last_time = container_service.get_container_last_ssh_login_time(cid)
         cleanup_days = int(current_app.config.get("CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
         cleanup_info = container_service.build_cleanup_info(last_time, cleanup_days)
         # 顺便刷新磁盘用量（异步，不阻塞 SSH 刷新返回）
         import threading
-        threading.Thread(target=lambda: _refresh_disk_async(container.id), daemon=True).start()
+        threading.Thread(target=lambda: _refresh_disk_async(cid), daemon=True).start()
     except container_service.NodeServiceError as e:
         reason = getattr(e, "reason", None)
         status = REASON_STATUS_MAP.get(reason, 500)

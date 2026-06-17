@@ -252,6 +252,7 @@ def _handle_hard_limit(container, usage: dict, app) -> None:
             print(f"[disk-check] pause skipped for container {container.id}: status={status_val}")
             return
         from ..repositories.machine_repo import get_machine_ip_by_id
+        from ..constant import ContainerStatus
         machine_ip = get_machine_ip_by_id(container.machine_id)
         url = container_tasks.get_full_url(machine_ip, "/pause_container")
         payload = json.dumps({"config": {"container_name": container.name, "action": "pause"}})
@@ -259,6 +260,10 @@ def _handle_hard_limit(container, usage: dict, app) -> None:
         enc = container_tasks.encryption(payload)
         res = container_tasks.send(enc, sig, url, timeout=10.0)
         print(f"[disk-check] pause result for container {container.id}: {res}")
+        # 更新 DB 状态为 paused，防止并行检查重复 pause
+        if isinstance(res, dict) and res.get("success") == 1:
+            containers_repo.update_container(container.id, commit=True,
+                container_status=ContainerStatus.PAUSED)
     except Exception as e:
         print(f"[disk-check] pause failed for container {container.id}: {e}")
 

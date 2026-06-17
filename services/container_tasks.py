@@ -307,7 +307,7 @@ def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -
     status_code = res.get("status_code")
     err_reason = res.get("error_reason")
 
-    # 这类 404 通常是 Node 尚未部署该接口（返回 HTML 404），不是“容器没有SSH记录”
+    # 这类 404 通常是 Node 尚未部署该接口（返回 HTML 404），不是"容器没有SSH记录"
     if status_code == 404 and not err_reason:
         txt = str(res.get("text") or "")
         if "<!doctype html" in txt.lower() or "not found" in txt.lower():
@@ -316,7 +316,7 @@ def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -
                 reason="node_endpoint_not_found",
             )
 
-    # 节点明确声明“未找到SSH登录记录”才返回空值
+    # 节点明确声明"未找到SSH登录记录"才返回空值
     if err_reason == "not_found":
         last_time = None
     elif res.get("success") in (1, True):
@@ -330,15 +330,22 @@ def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -
             reason=err_reason or "NODE_error",
         )
 
-    # 记录请求结果（包括空值）
-    try:
-        container_ssh_login_repo.upsert_last_ssh_login_time(
-            machine_id=machine_id,
-            container_id=container.id,
-            last_ssh_login_time=last_time,
-        )
-    except Exception as e:
-        print(f"Warning: failed to persist last ssh login time for container {container.id}: {e}")
+    # 归一化为 ISO 8601 UTC 格式存储（Node 现已用 TZ=UTC，无需再减 8h）
+    if last_time is not None:
+        parsed = _parse_last_ssh_time(last_time)
+        if parsed is not None:
+            last_time = parsed.strftime('%Y-%m-%dT%H:%M:%S')
+
+    # 记录请求结果（空值不覆写，保护初始创建时间，使从未 SSH 的容器也可被清理）
+    if last_time is not None:
+        try:
+            container_ssh_login_repo.upsert_last_ssh_login_time(
+                machine_id=machine_id,
+                container_id=container.id,
+                last_ssh_login_time=last_time,
+            )
+        except Exception as e:
+            print(f"Warning: failed to persist last ssh login time for container {container.id}: {e}")
 
     return last_time
 
@@ -428,9 +435,10 @@ def get_container_disk_usage(container_id: int, timeout: float = 20.0) -> dict |
         return None
 
     cd = res.get("container", {})
+    _errs = {k: cd[k] for k in ("overlay_rw_error", "bind_mount_error", "bind_mount_path") if k in cd}
     print(f"[disk-check] ctrl received: container={container_name} "
           f"overlay={cd.get('overlay_rw_bytes')}B bind={cd.get('bind_mount_bytes')}B "
-          f"total={cd.get('total_bytes')}B")
+          f"total={cd.get('total_bytes')}B errs={_errs}")
     return res
 
 
@@ -621,7 +629,14 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
                 public_key=public_key,
                 username='root', # 强制使用 root 作为用户名
                 role=ROLE.ROOT) # 这里在创建时，自动变成 ROOT
-    
+
+    # 写入初始 SSH 登录记录，以创建时间作为 last_ssh_login_time，防止无法清退
+    container_ssh_login_repo.upsert_last_ssh_login_time(
+        machine_id=machine_id,
+        container_id=container_id,
+        last_ssh_login_time=datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
+    )
+
     # start heartbeat in background (non-blocking)
     try:
         container_starting_status_heartbeat(machine_ip, container.NAME, container_id=container_id,

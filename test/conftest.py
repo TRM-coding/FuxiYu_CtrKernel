@@ -13,6 +13,7 @@ TEST_CONFIG_OVERRIDES = {
     "DISABLE_BACKGROUND_TASKS": True,
     "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
     "SQLALCHEMY_TRACK_MODIFICATIONS": False,
+    "SQLALCHEMY_ENGINE_OPTIONS": {},  # 清除 MySQL 专属的 init_command
     "WTF_CSRF_ENABLED": False,
 }
 
