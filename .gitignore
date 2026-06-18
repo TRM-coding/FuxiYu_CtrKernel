@@ -11,3 +11,5 @@ certs/*.key
 
 /logs/*
 !/logs/.gitkeep
+
+docs/audit/*
