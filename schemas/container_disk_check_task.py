@@ -134,6 +134,17 @@ def _evaluate_limits(container, usage: dict) -> None:
 
     response_enabled = _app.config.get("CONTAINER_DISK_RESPONSE_ENABLED", False) if _app else False
 
+    # 非持久容器只做检测，不接受容量响应（不 pause / 不发邮件）。
+    # 此检查先于全局 CONTAINER_DISK_RESPONSE_ENABLED 判断，
+    # 方便在关闭响应的情况下从日志验证行为，无影响上线。
+    from ..repositories.long_term_container_repo import is_long_term
+    if not is_long_term(container.id):
+        print(
+            f"[disk-check] container {container.id} "
+            f"({getattr(container, 'name', '?')}) is not long-term, skip response"
+        )
+        response_enabled = False
+
     if usage_percent >= hard_limit:
         print(f"[disk-check] HARD LIMIT exceeded: {log_msg}")
         if response_enabled:
