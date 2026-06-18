@@ -54,7 +54,8 @@ def update_container(container_id: int, *, commit: bool = True, **fields) -> Con
 		return None
 	allowed = {"name", "image", "machine_id", "container_status",
 	           "disk_overlay_rw_bytes", "disk_bind_mount_bytes", "disk_total_bytes",
-	           "disk_limit_bytes", "disk_checked_at"}
+	           "disk_limit_bytes", "disk_checked_at",
+	           "bind_mount_path"}
 	dirty = False
 	for k, v in fields.items():
 		if k not in allowed or v is None:

@@ -87,6 +87,16 @@ class AppConfig(SqlConfig, KeyConfig):
     CONTAINER_DISK_FREEZE_RESET_PERCENT = int(
         os.getenv("CONTAINER_DISK_FREEZE_RESET_PERCENT", "95")
     )
+    # 已删除容器 mount 清理配置（Phase 8）
+    CONTAINER_MOUNT_CLEANUP_ENABLED = os.getenv(
+        "CONTAINER_MOUNT_CLEANUP_ENABLED", "false"
+    ).lower() == "true"
+    CONTAINER_MOUNT_CLEANUP_INTERVAL_SECONDS = int(
+        os.getenv("CONTAINER_MOUNT_CLEANUP_INTERVAL_SECONDS", "86400")
+    )
+    CONTAINER_MOUNT_CLEANUP_AFTER_DAYS = int(
+        os.getenv("CONTAINER_MOUNT_CLEANUP_AFTER_DAYS", "14")
+    )
     # 公告系统配置
     ANNOUNCEMENT_MAX_RECIPIENTS = int(os.getenv("ANNOUNCEMENT_MAX_RECIPIENTS", "200"))
     ANNOUNCEMENT_SEND_COOLDOWN_SECONDS = int(os.getenv("ANNOUNCEMENT_SEND_COOLDOWN_SECONDS", "60"))

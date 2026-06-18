@@ -13,6 +13,7 @@ from .config import get_config, CORSHeaderConfig
 from .blueprints import register_blueprints
 from .schemas.container_ssh_refresh_task import start_container_ssh_refresh_scheduler
 from .schemas.container_cleanup_task import start_container_cleanup_scheduler
+from .schemas.container_mount_cleanup_task import start_mount_cleanup_scheduler
 from .utils.logging_config import configure_daily_logging
 
 
@@ -49,5 +50,7 @@ def create_app(config: str | None = None, overrides: dict | None = None):
         start_container_ssh_refresh_scheduler(app, interval_seconds=300)
         # 启动容器定时清理任务（每20分钟扫描一次到期容器并释放）
         start_container_cleanup_scheduler(app, interval_seconds=1200)
+        # 启动已删除容器 mount 清理任务（每天一次）
+        start_mount_cleanup_scheduler(app)
 
     return app

@@ -114,6 +114,7 @@ def _evaluate_limits(container, usage: dict) -> None:
 
     # 持久化磁盘用量到 DB
     try:
+        bind_mount_path = container_data.get("bind_mount_path")
         containers_repo.update_container(
             container.id,
             commit=True,
@@ -122,6 +123,7 @@ def _evaluate_limits(container, usage: dict) -> None:
             disk_total_bytes=int(total_bytes),
             disk_limit_bytes=int(limit_bytes),
             disk_checked_at=datetime.utcnow(),
+            bind_mount_path=bind_mount_path,
         )
     except Exception as e:
         print(f"[disk-check] failed to persist disk usage for container {container.id}: {e}")
@@ -421,9 +423,61 @@ def _handle_freeze_escalation(container, usage: dict, app, days_frozen: int) -> 
                 "usage": f"{total_gb:.1f}GB/{limit_gb:.1f}GB",
             },
         )
+
+        # 升级删除：立刻清理 mount（宽限期已是最后机会）
+        _clean_mount_immediately(container)
     except Exception as e:
         print(
             f"[disk-check] escalation remove failed for container {container.id}: {e}"
+        )
+
+
+def _clean_mount_immediately(container) -> None:
+    """冻结升级后立刻清理宿主机 mount 目录。
+
+    记录 MountCleanup（escalation=True, cleaned_at=now），
+    并向 NodeKernel 发送清理请求。
+    """
+    bind_mount = getattr(container, 'bind_mount_path', None)
+    if not bind_mount:
+        print(
+            f"[disk-check] escalation: no bind_mount_path for container "
+            f"{getattr(container, 'id', '?')}, skip mount cleanup"
+        )
+        return
+
+    try:
+        from ..repositories.container_mount_cleanup_repo import insert as insert_mount_cleanup
+        from datetime import datetime as dt
+
+        insert_mount_cleanup(
+            container_id=container.id,
+            container_name=container.name,
+            machine_id=container.machine_id,
+            mount_path=bind_mount,
+            escalation=True,
+            removed_at=dt.utcnow(),
+            cleaned_at=dt.utcnow(),
+        )
+    except Exception as e:
+        print(f"[disk-check] escalation: failed to record mount cleanup for {container.id}: {e}")
+
+    try:
+        from ..repositories.machine_repo import get_machine_ip_by_id
+        machine_ip = get_machine_ip_by_id(container.machine_id)
+        url = container_tasks.get_full_url(machine_ip, "/clean_mount")
+        payload = json.dumps({"config": {"mount_path": bind_mount}})
+        sig = container_tasks.signature(payload)
+        enc = container_tasks.encryption(payload)
+        res = container_tasks.send(enc, sig, url, timeout=10.0)
+        print(
+            f"[disk-check] escalation mount cleanup for container {container.id} "
+            f"path={bind_mount}: {res}"
+        )
+    except Exception as e:
+        print(
+            f"[disk-check] escalation mount cleanup failed for container "
+            f"{container.id} path={bind_mount}: {e}"
         )
 
 

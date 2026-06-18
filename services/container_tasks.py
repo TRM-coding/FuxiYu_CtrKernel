@@ -776,7 +776,29 @@ def remove_container(container_id:int, debug=False, operator_user_id:int|None=No
 
     # 移除所有绑定并删除容器
     remove_binding(0, container_id, all=True)
+
+    # 记录 mount 清理信息（删前捕获路径）
+    _bind_mount = getattr(container, 'bind_mount_path', None) if container else None
+    _container_name = getattr(container, 'name', '?') if container else '?'
+
     delete_container(container_id)
+
+    # 插入 mount 清理追踪（14 天后由定期任务清理）
+    if _bind_mount:
+        try:
+            from ..repositories.container_mount_cleanup_repo import insert as insert_mount_cleanup
+            from datetime import datetime as dt
+            insert_mount_cleanup(
+                container_id=container_id,
+                container_name=_container_name,
+                machine_id=machine_id,
+                mount_path=_bind_mount,
+                escalation=False,
+                removed_at=dt.utcnow(),
+            )
+            print(f"remove_container: mount cleanup recorded for container {container_id} path={_bind_mount}")
+        except Exception as e:
+            print(f"remove_container: failed to record mount cleanup for {container_id}: {e}")
 
     if Key:
         return True

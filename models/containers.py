@@ -35,6 +35,10 @@ class Container(db.Model):
     disk_limit_bytes: int = db.Column(db.BigInteger, nullable=True)
     disk_checked_at = db.Column(db.DateTime, nullable=True)
 
+    # 宿主机 bind mount 路径，磁盘检测时由 NodeKernel 返回并持久化
+    # 示例: /home/alice/containers/test_container/
+    bind_mount_path: str = db.Column(db.String(512), nullable=True)
+
     users = db.relationship(
         "User",
         secondary="user_container",

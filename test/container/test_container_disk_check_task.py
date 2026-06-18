@@ -1152,3 +1152,151 @@ class TestFreezeObservability:
 
         # freeze state should still exist (short-term doesn't clear it)
         assert container_disk_freeze_state_repo.get(container.id) is not None
+
+
+# ============================================================================
+# Phase 8: mount 路径持久化 & 升级立刻清理
+# ============================================================================
+
+class TestBindMountPathPersistence:
+    """bind_mount_path 在磁盘检测时持久化到 Container。"""
+
+    def test_bind_mount_path_persisted_during_disk_check(self, app, db_session, monkeypatch):
+        """磁盘检测时 NodeKernel 返回 bind_mount_path → Container 表记录更新。"""
+        _root, machine, container = create_container_graph()
+        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
+
+        mount_path = "/home/alice/containers/test_mount/"
+        usage = _usage_below_soft_limit()
+        usage["container"]["bind_mount_path"] = mount_path
+
+        with app.app_context():
+            container_disk_check_task._evaluate_limits(container, usage)
+            c = db.session.get(Container, container.id)
+            assert c.bind_mount_path == mount_path
+
+    def test_bind_mount_path_none_persisted(self, app, db_session, monkeypatch):
+        """NodeKernel 不返回 bind_mount_path → 不报错，正常跳过。"""
+        _root, machine, container = create_container_graph()
+        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
+
+        usage = _usage_below_soft_limit()
+        # no bind_mount_path in usage
+        with app.app_context():
+            container_disk_check_task._evaluate_limits(container, usage)
+
+        c = db.session.get(Container, container.id)
+        # should not crash, value is None (update_container skips None)
+
+
+class TestEscalationMountCleanup:
+    """升级删除时立刻清理 mount。"""
+
+    def test_clean_mount_immediately_inserts_record(self, app, db_session, monkeypatch):
+        """升级删除 → MountCleanup 记录写入，escalation=True, cleaned_at 立刻非空。"""
+        from ...models.container_mount_cleanup import ContainerMountCleanup
+
+        _root, machine, container = create_container_graph()
+        container.bind_mount_path = "/home/test/containers/test_esc/"
+        db.session.commit()
+
+        monkeypatch.setattr(
+            container_disk_check_task.container_tasks, "remove_container",
+            lambda cid: True
+        )
+        monkeypatch.setattr(
+            container_disk_check_task.container_tasks,
+            "get_container_root_owner_emails",
+            lambda cid: []
+        )
+        # mock send to avoid real HTTP
+        monkeypatch.setattr(
+            container_disk_check_task.container_tasks, "send",
+            lambda enc, sig, url, timeout: {"success": 1}
+        )
+        monkeypatch.setattr(
+            container_disk_check_task.container_tasks, "signature",
+            lambda p: b"sig"
+        )
+        monkeypatch.setattr(
+            container_disk_check_task.container_tasks, "encryption",
+            lambda p: b"enc"
+        )
+        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
+
+        usage = _usage_exceeding_hard_limit()
+        with app.app_context():
+            container_disk_check_task._handle_freeze_escalation(
+                container, usage, app, days_frozen=8
+            )
+
+        row = db.session.query(ContainerMountCleanup).filter_by(
+            container_id=container.id,
+            escalation=True,
+        ).first()
+        assert row is not None
+        assert row.mount_path == "/home/test/containers/test_esc/"
+        assert row.cleaned_at is not None
+
+    def test_clean_mount_immediately_sends_to_node(self, app, db_session, monkeypatch):
+        """升级删除 → NodeKernel /api/clean_mount 被调用。"""
+        _root, machine, container = create_container_graph()
+        container.bind_mount_path = "/home/test/containers/test_esc2/"
+        db.session.commit()
+
+        monkeypatch.setattr(
+            container_disk_check_task.container_tasks, "remove_container",
+            lambda cid: True
+        )
+        monkeypatch.setattr(
+            container_disk_check_task.container_tasks,
+            "get_container_root_owner_emails",
+            lambda cid: []
+        )
+
+        sent_calls = []
+        monkeypatch.setattr(
+            container_disk_check_task.container_tasks, "send",
+            lambda enc, sig, url, timeout: sent_calls.append(url) or {"success": 1}
+        )
+        monkeypatch.setattr(
+            container_disk_check_task.container_tasks, "signature",
+            lambda p: b"sig"
+        )
+        monkeypatch.setattr(
+            container_disk_check_task.container_tasks, "encryption",
+            lambda p: b"enc"
+        )
+        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
+
+        usage = _usage_exceeding_hard_limit()
+        with app.app_context():
+            container_disk_check_task._handle_freeze_escalation(
+                container, usage, app, days_frozen=8
+            )
+
+        assert len(sent_calls) == 1
+        assert "/clean_mount" in sent_calls[0]
+
+    def test_clean_mount_immediately_skips_without_path(self, app, db_session, monkeypatch):
+        """容器无 bind_mount_path → 升级删除不崩溃，跳过清理。"""
+        _root, machine, container = create_container_graph()
+        # bind_mount_path is None
+
+        monkeypatch.setattr(
+            container_disk_check_task.container_tasks, "remove_container",
+            lambda cid: True
+        )
+        monkeypatch.setattr(
+            container_disk_check_task.container_tasks,
+            "get_container_root_owner_emails",
+            lambda cid: []
+        )
+        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
+
+        usage = _usage_exceeding_hard_limit()
+        with app.app_context():
+            # should not raise
+            container_disk_check_task._handle_freeze_escalation(
+                container, usage, app, days_frozen=8
+            )
