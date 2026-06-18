@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+from datetime import datetime, timedelta
 from flask import Flask, current_app
 
 from ..repositories import containers_repo
@@ -113,7 +114,6 @@ def _evaluate_limits(container, usage: dict) -> None:
 
     # 持久化磁盘用量到 DB
     try:
-        from datetime import datetime
         containers_repo.update_container(
             container.id,
             commit=True,
@@ -145,11 +145,27 @@ def _evaluate_limits(container, usage: dict) -> None:
         )
         response_enabled = False
 
+    # ── 重置检查（所有容器，不区分长期/短期）──
+    from ..repositories import container_disk_freeze_state_repo as freeze_state_repo
+    reset_pct = _app.config.get("CONTAINER_DISK_FREEZE_RESET_PERCENT", 95)
+    if usage_percent < reset_pct:
+        if freeze_state_repo.reset(container.id):
+            print(
+                f"[disk-check] freeze state reset: container {container.id} "
+                f"({getattr(container, 'name', '?')}) "
+                f"usage {usage_percent:.1f}% < {reset_pct}%"
+            )
+            print(f"[disk-check] OK: {log_msg}")
+            return  # 有冻结记录且容量回落，重置后不进入任何超限判断
+        # 无冻结记录 → 继续正常流程（仍可能触发 soft limit）
+
     if usage_percent >= hard_limit:
         print(f"[disk-check] HARD LIMIT exceeded: {log_msg}")
         if response_enabled:
-            _handle_hard_limit(container, usage, _app)
+            _handle_hard_limit_with_escalation(container, usage, _app)
         else:
+            # 短期容器：不做动作，但检查是否有遗留冻结状态（来自曾是长期的时期）
+            _log_freeze_state_if_exists(container)
             print(f"[disk-check] response disabled, skip action for container {container.id}")
     elif usage_percent >= soft_limit:
         print(f"[disk-check] SOFT LIMIT exceeded: {log_msg}")
@@ -202,7 +218,8 @@ def _handle_soft_limit(container, usage: dict, app) -> None:
     content = (
         f"容器: {container.name}\n"
         f"磁盘用量: {total_gb:.1f}GB / {limit_gb:.1f}GB ({usage_pct:.0f}%)\n"
-        f"请及时清理不必要的文件，避免达到上限后被冻结。\n"
+        f"请及时联系管理员。并清理不必要的文件，避免达到上限后被冻结；\n"
+        f"或转为短期容器（取消勾选长期容器）。\n"
     )
     for email in emails:
         try:
@@ -243,7 +260,8 @@ def _handle_hard_limit(container, usage: dict, app) -> None:
         content = (
             f"容器: {container.name}\n"
             f"磁盘用量: {total_gb:.1f}GB / {limit_gb:.1f}GB ({usage_pct:.0f}%)\n"
-            f"\n容器已被冻结（docker pause），请联系管理员清理后恢复。\n"
+            f"\n容器已被冻结（docker pause）。\n"
+            f"请及时清理不必要的文件；或转为短期容器（取消勾选长期容器）。\n"
         )
         for e in emails:
             try:
@@ -281,6 +299,132 @@ def _handle_hard_limit(container, usage: dict, app) -> None:
                      detail={"reason": "disk_hard_limit", "usage": f"{total_gb:.1f}GB/{limit_gb:.1f}GB"})
     except Exception as e:
         print(f"[disk-check] pause failed for container {container.id}: {e}")
+
+
+def _handle_hard_limit_with_escalation(container, usage: dict, app) -> None:
+    """长期容器 hard limit 响应：冻结记录 + 宽限判断 + 升级判断。
+
+    状态追踪（upsert、宽限、升级天数）总是执行；
+    动作（pause / remove）仅在 response_enabled 时执行。
+    """
+    from ..repositories import container_disk_freeze_state_repo as freeze_state_repo
+
+    # 记录/确认冻结状态（首次设 first_frozen_at，后续不动）
+    freeze_state = freeze_state_repo.upsert_first_frozen(container.id)
+
+    # ── 宽限期检查 ──
+    if freeze_state.grace_until and datetime.utcnow() < freeze_state.grace_until:
+        print(
+            f"[disk-check] in grace period until {freeze_state.grace_until}, "
+            f"skip action for container {container.id} "
+            f"({getattr(container, 'name', '?')})"
+        )
+        return
+
+    # 宽限期已过期，清除
+    if freeze_state.grace_until:
+        freeze_state_repo.clear_grace(container.id)
+        print(
+            f"[disk-check] grace period expired for container {container.id} "
+            f"({getattr(container, 'name', '?')})"
+        )
+
+    # ── 升级判断 ──
+    days_frozen = (datetime.utcnow() - freeze_state.first_frozen_at).days
+    escalation_days = app.config.get("CONTAINER_DISK_FREEZE_ESCALATION_DAYS", 7)
+    if days_frozen >= escalation_days:
+        _handle_freeze_escalation(container, usage, app, days_frozen)
+    else:
+        _handle_hard_limit(container, usage, app)
+
+
+def _log_freeze_state_if_exists(container) -> None:
+    """短期容器超 hard limit 时：不做动作，但记录是否存在遗留冻结状态。"""
+    from ..repositories import container_disk_freeze_state_repo as freeze_state_repo
+
+    existing = freeze_state_repo.get(container.id)
+    if existing is None:
+        return
+
+    days_frozen = (datetime.utcnow() - existing.first_frozen_at).days
+    grace_info = ""
+    if existing.grace_until:
+        if datetime.utcnow() < existing.grace_until:
+            grace_info = ", grace active"
+        else:
+            grace_info = ", grace expired"
+    print(
+        f"[disk-check] container {container.id} "
+        f"({getattr(container, 'name', '?')}) has legacy freeze state "
+        f"(frozen {days_frozen}d ago{grace_info}) "
+        f"but is not long-term, skip action"
+    )
+
+
+def _handle_freeze_escalation(container, usage: dict, app, days_frozen: int) -> None:
+    """冻结满 N 天仍超限 → remove_container + 通知邮件。"""
+    from ..utils.mail import send as send_mail
+
+    container_data = usage.get("container", {})
+    total_gb = (container_data.get("total_bytes") or 0) / (1024**3)
+    limit_gb = _get_limit_gb(container, app)
+    usage_pct = (total_gb / limit_gb * 100) if limit_gb > 0 else 0
+
+    # 冷却: 同一容器 24 小时内不重复发送升级邮件
+    last_key = f"_escalation_last_sent_{container.id}"
+    now_ts = time.time()
+    last_sent = getattr(app, '_disk_check_cache', {}) if app else {}
+    if not isinstance(last_sent, dict):
+        last_sent = {}
+
+    if now_ts - last_sent.get(last_key, 0) < 24 * 3600:
+        pass  # 仍在冷却中，但仍执行 remove
+    else:
+        try:
+            emails = container_tasks.get_container_root_owner_emails(container.id)
+        except Exception:
+            emails = []
+
+        if emails:
+            subject = f"伏羲平台 - 容器 {container.name} 因磁盘超限已被清除"
+            content = (
+                f"容器: {container.name}\n"
+                f"磁盘用量: {total_gb:.1f}GB / {limit_gb:.1f}GB ({usage_pct:.0f}%)\n"
+                f"已冻结天数: {days_frozen} 天\n"
+                f"\n容器已被清除。如有疑问请联系管理员。\n"
+            )
+            for e in emails:
+                try:
+                    send_mail(to=e, subject=subject, content=content)
+                    print(f"[disk-check] escalation email sent to {e} for container {container.id}")
+                except Exception as ex:
+                    print(f"[disk-check] escalation email failed to {e}: {ex}")
+            last_sent[last_key] = now_ts
+            if app:
+                app._disk_check_cache = last_sent
+
+    # ── 删除容器 ──
+    try:
+        container_tasks.remove_container(container.id)
+        print(
+            f"[disk-check] escalation: removed container {container.id} "
+            f"({getattr(container, 'name', '?')}) after {days_frozen}d frozen"
+        )
+        from ..repositories.operation_log_repo import write as write_op_log
+        write_op_log(
+            operation="remove_container",
+            target_type="container",
+            target_id=container.id,
+            detail={
+                "reason": "disk_freeze_escalation",
+                "days_frozen": days_frozen,
+                "usage": f"{total_gb:.1f}GB/{limit_gb:.1f}GB",
+            },
+        )
+    except Exception as e:
+        print(
+            f"[disk-check] escalation remove failed for container {container.id}: {e}"
+        )
 
 
 def _get_limit_gb(container, app) -> float:

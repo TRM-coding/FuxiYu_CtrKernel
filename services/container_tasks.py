@@ -395,6 +395,23 @@ def unpause_container(container_id: int, operator_user_id: int | None = None) ->
         write_op_log(operator_user_id=operator_user_id, operation="unpause_container",
                      target_type="container", target_id=container.id,
                      detail={"name": container.name, "machine_id": machine_id})
+
+        # 磁盘超限冻结宽限期：管理员解冻后给予宽限
+        try:
+            from ..repositories import container_disk_freeze_state_repo
+            freeze_state = container_disk_freeze_state_repo.get(container_id)
+            if freeze_state is not None:
+                from flask import current_app
+                grace_days = current_app.config.get("CONTAINER_DISK_FREEZE_GRACE_DAYS", 3)
+                container_disk_freeze_state_repo.set_grace(container_id, grace_days)
+                print(
+                    f"[disk-check] grace period set for container {container_id} "
+                    f"({getattr(container, 'name', '?')}) "
+                    f"({grace_days} days, until {freeze_state.grace_until})"
+                )
+        except Exception as e:
+            print(f"[disk-check] failed to set grace for container {container_id}: {e}")
+
         return True
     return False
 
@@ -478,6 +495,10 @@ class container_bref_information(BaseModel):
     disk_total_gb: float | None = None
     disk_limit_gb: float | None = None
     disk_usage_percent: float | None = None
+    freeze_first_frozen_at: str | None = None
+    freeze_grace_until: str | None = None
+    freeze_days_frozen: int | None = None
+    freeze_escalation_days: int | None = None
 
 class container_detail_information(BaseModel):
     container_id: int # 与上方结构对称
@@ -498,6 +519,7 @@ class container_detail_information(BaseModel):
     long_term_container_blocked_user_ids: list[int] = Field(default_factory=list)
     long_term_container_remaining_by_user: dict[int, int] = Field(default_factory=dict)
     disk_usage: dict | None = None
+    freeze_state: dict | None = None
 ####################################################
 
 
@@ -1360,6 +1382,25 @@ def get_container_detail_information(container_id:int)->container_detail_informa
     except Exception as e:
         print(f"Warning: failed to read DB disk snapshot for container {container.id}: {e}")
 
+    # 冻结升级状态
+    freeze_state_val = None
+    try:
+        from ..repositories import container_disk_freeze_state_repo
+        fs = container_disk_freeze_state_repo.get(container.id)
+        if fs:
+            from datetime import datetime
+            days_frozen = (datetime.utcnow() - fs.first_frozen_at).days if fs.first_frozen_at else 0
+            escalation_days = int(current_app.config.get("CONTAINER_DISK_FREEZE_ESCALATION_DAYS", 7) or 7)
+            freeze_state_val = {
+                "is_frozen": True,
+                "first_frozen_at": fs.first_frozen_at.isoformat() if fs.first_frozen_at else None,
+                "grace_until": fs.grace_until.isoformat() if fs.grace_until else None,
+                "days_frozen": days_frozen,
+                "escalation_days": escalation_days,
+            }
+    except Exception as e:
+        print(f"Warning: failed to read freeze state for container {container.id}: {e}")
+
     res={
         "container_id": container.id,
         "container_name": container.name,
@@ -1374,6 +1415,7 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         "port": container.port,
         **long_term_state,
         "disk_usage": disk_usage,
+        "freeze_state": freeze_state_val,
         # 备忘：owners才是系统对应的用户名列表
         "owners": [get_name_by_id(binding['user_id']) for binding in owener_bindings],
         # 这里的变动是为了
@@ -1528,6 +1570,21 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
 
         bindings = get_container_bindings(container.id) or []
         long_term_state = _build_long_term_container_state(container.id, bindings)
+        # 冻结升级状态
+        from ..repositories import container_disk_freeze_state_repo
+        freeze_state = container_disk_freeze_state_repo.get(container.id)
+        freeze_first_frozen_at = freeze_state.first_frozen_at.isoformat() if (freeze_state and freeze_state.first_frozen_at) else None
+        freeze_grace_until = freeze_state.grace_until.isoformat() if (freeze_state and freeze_state.grace_until) else None
+        freeze_days_frozen = None
+        freeze_escalation_days = None
+        if freeze_state and freeze_state.first_frozen_at:
+            from datetime import datetime
+            freeze_days_frozen = (datetime.utcnow() - freeze_state.first_frozen_at).days
+            try:
+                from flask import current_app
+                freeze_escalation_days = int(current_app.config.get("CONTAINER_DISK_FREEZE_ESCALATION_DAYS", 7) or 7)
+            except Exception:
+                freeze_escalation_days = 7
         ssh_record = container_ssh_login_repo.get_by_machine_container(container.machine_id, container.id)
         cleanup_days = 7
         try:
@@ -1565,6 +1622,10 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
             disk_limit_gb=disk_limit_gb,
             disk_usage_percent=disk_usage_percent,
             cleanup_status=cleanup_info.get("cleanup_status"),
+            freeze_first_frozen_at=freeze_first_frozen_at,
+            freeze_grace_until=freeze_grace_until,
+            freeze_days_frozen=freeze_days_frozen,
+            freeze_escalation_days=freeze_escalation_days,
             **long_term_state,
         )
         res.append(info)
