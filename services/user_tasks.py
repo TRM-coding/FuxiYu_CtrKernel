@@ -337,7 +337,7 @@ def Reset_password(user_id:int)->str|None:
 #####################################
 
 
-ALLOWED_REGISTRATION_EMAIL_DOMAINS = {'bjtu.edu.cn', 'tsinghua.edu.cn', 'bupt.edu.cn', 'mails.tsinghua.edu.cn'}
+ALLOWED_REGISTRATION_EMAIL_DOMAINS = {'bjtu.edu.cn', 'tsinghua.edu.cn', 'bupt.edu.cn', 'mails.tsinghua.edu.cn', 'mail.tsinghua.edu.cn'}
 
 
 def _get_email_domain(email: str) -> str | None:
