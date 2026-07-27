@@ -1,6 +1,8 @@
 **/.pytest_cache/
 **/__pycache__/
 
+venv/
+
 # ignore locally-generated TLS certs (mkcert)
 certs/*.pem
 certs/*-key.pem
