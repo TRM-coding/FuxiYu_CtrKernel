@@ -3,6 +3,8 @@ import uuid
 import random
 from http import HTTPStatus
 
+pytestmark = pytest.mark.legacy
+
 from .. import create_app
 from ..extensions import db
 from ..models.user import User
@@ -202,4 +204,3 @@ def test_list_all_containers_bref_information_success(client, monkeypatch, token
     assert data.get("success") == 1
     assert isinstance(data.get("containers_info"), list)
     assert captured.get("user_id") == 7
-

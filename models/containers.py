@@ -24,9 +24,20 @@ class Container(db.Model):
     port: int = db.Column(db.Integer, nullable=False, index=True)
 
     memory_gb: int = db.Column(db.Integer, nullable=False)
-    swap_gb: int = db.Column(db.Integer, nullable=False)
+    shared_gb: int = db.Column(db.Integer, nullable=False)
     gpu_number: int = db.Column(db.Integer, nullable=False)
     cpu_number: int = db.Column(db.Integer, nullable=False)
+
+    # 磁盘用量快照（bytes），定期检测时更新
+    disk_overlay_rw_bytes: int = db.Column(db.BigInteger, nullable=True)
+    disk_bind_mount_bytes: int = db.Column(db.BigInteger, nullable=True)
+    disk_total_bytes: int = db.Column(db.BigInteger, nullable=True)
+    disk_limit_bytes: int = db.Column(db.BigInteger, nullable=True)
+    disk_checked_at = db.Column(db.DateTime, nullable=True)
+
+    # 宿主机 bind mount 路径，磁盘检测时由 NodeKernel 返回并持久化
+    # 示例: /home/alice/containers/test_container/
+    bind_mount_path: str = db.Column(db.String(512), nullable=True)
 
     users = db.relationship(
         "User",

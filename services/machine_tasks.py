@@ -1,7 +1,10 @@
+from flask import current_app
+
 from ..repositories.machine_repo import *
 from pydantic import BaseModel
 from typing import Optional
 from ..utils.heartbeat import send, start_machine_maintenance_transition_heartbeat
+from ..utils.parallel import parallel_node_calls
 from ..repositories.containers_repo import update_container, list_containers as repo_list_containers
 from ..repositories import machine_permission_repo, user_repo
 from ..constant import ContainerStatus, MachineStatus
@@ -23,7 +26,7 @@ class machine_detail_information(BaseModel):
     gpu_number:int
     gpu_type: Optional[str] # 部分sql数据会出现此字段是NULL的情况，因此暂时用这个方法解决
     memory_size_gb:int
-    max_swap_gb:int
+    max_shared_gb:int
     max_cpu_core_number:int
     max_gpu_number:int
     max_memory_gb:int
@@ -43,11 +46,19 @@ def Add_machine_permission(machine_id: int, user_id: int) -> bool:
     if not user:
         raise ValueError('user_not_found')
     machine_permission_repo.add_permission(machine_id, user_id)
+    from ..repositories.operation_log_repo import write as write_op_log
+    write_op_log(operation="add_machine_permission", target_type="machine",
+                 target_id=machine_id, detail={"user_id": user_id})
     return True
 
 
 def Remove_machine_permission(machine_id: int, user_id: int) -> bool:
-    return machine_permission_repo.remove_permission(machine_id, user_id)
+    result = machine_permission_repo.remove_permission(machine_id, user_id)
+    if result:
+        from ..repositories.operation_log_repo import write as write_op_log
+        write_op_log(operation="remove_machine_permission", target_type="machine",
+                     target_id=machine_id, detail={"user_id": user_id})
+    return result
 
 
 def List_machine_permissions(machine_id: int) -> list[int]:
@@ -82,7 +93,10 @@ def is_machine_online_remote(machine_id: int, timeout: float = 2.0) -> bool:
     if not machine_ip:
         return False
 
-    j = send(machine_ip, "/machine_status", {"config": {}}, timeout=timeout)
+    try:
+        j = send(machine_ip, "/machine_status", {"config": {}}, timeout=timeout)
+    except Exception:
+        return False
     if isinstance(j, dict) and j.get('success') in (1, True):
         ms = (j.get('machine_status') or '').lower()
         return ms == 'online'
@@ -99,7 +113,7 @@ def Add_machine(machine_name:str,
                    gpu_number:int,
                    gpu_type:str,
                    memory_size:int,
-                   max_swap_size:int,
+                   max_shared_gb:int,
                    disk_size:int,
                    max_memory_gb:int,
                    max_gpu_number:int,
@@ -112,20 +126,32 @@ def Add_machine(machine_name:str,
     if machine_type and len(str(machine_type)) > 255:
         raise ValueError(f"machine_type too long (max 255): length={len(str(machine_type))}")
 
-    # max_swap_size defensive check: must be non-negative integer and <= 8 (GB)
-    if max_swap_size is not None:
+    # max_shared_gb defensive check: must be non-negative integer and <= 8 (GB)
+    if max_shared_gb is not None:
         try:
-            ss = int(max_swap_size)
+            ss = int(max_shared_gb)
         except Exception:
-            e = ValueError(f"max_swap_size must be an integer: {max_swap_size}")
+            e = ValueError(f"max_shared_gb must be an integer: {max_shared_gb}")
             setattr(e, 'error_reason', 'create_failed')
             raise e
-        if ss < 0 or ss > 8:
-            e = ValueError(f"swap_size out of range (0-8 GB): {ss}")
+        if ss <= 0:
+            e = ValueError(f"shared size out of range (0-8 GB): {ss}")
             setattr(e, 'error_reason', 'create_failed')
             raise e
 
-    create_machine(
+        # ensure machine max_shared does not exceed machine max_memory
+        try:
+            mm = int(max_memory_gb) if max_memory_gb is not None else None
+        except Exception:
+            e = ValueError(f"max_memory_gb must be an integer: {max_memory_gb}")
+            setattr(e, 'error_reason', 'create_failed')
+            raise e
+        if mm is not None and ss > mm:
+            e = ValueError(f"max_shared_gb ({ss}) cannot be greater than max_memory_gb ({mm})")
+            setattr(e, 'error_reason', 'create_failed')
+            raise e
+
+        create_machine(
          machinename=machine_name,
          machine_ip=machine_ip,
          machine_type=machine_type,
@@ -134,12 +160,15 @@ def Add_machine(machine_name:str,
          gpu_number=gpu_number,
          gpu_type=gpu_type,
          memory_size=memory_size,
-         max_swap_size=max_swap_size,
+            max_shared_gb=max_shared_gb,
          disk_size=disk_size,
          max_memory_gb=max_memory_gb,
          max_gpu_number=max_gpu_number,
          max_cpu_core_number=max_cpu_core_number
     )
+    from ..repositories.operation_log_repo import write as write_op_log
+    write_op_log(operation="add_machine", target_type="machine", target_id=0,
+                 detail={"name": machine_name, "ip": machine_ip})
     return True
 
 #######################################
@@ -150,6 +179,9 @@ def Add_machine(machine_name:str,
 def Remove_machine(machine_id:list[int])->bool:
     for id in machine_id:
         delete_machine(id)
+    from ..repositories.operation_log_repo import write as write_op_log
+    write_op_log(operation="remove_machine", target_type="machine", target_id=machine_id[0] if len(machine_id)==1 else 0,
+                 detail={"ids": machine_id})
     return True
 #######################################
 
@@ -161,19 +193,41 @@ def Update_machine(machine_id: int, **fields) -> bool:
     if not machine:
         return False
 
-    # validate swap_size when provided: must be integer and <= 8 GB
-    if 'swap_size' in fields:
-        ss_val = fields.get('swap_size')
+    # validate shared_size when provided: must be integer and <= 8 GB
+    if 'shared_size' in fields or 'shared_gb' in fields or 'max_shared_gb' in fields:
+        # prefer explicit max_shared_gb field when present
+        ss_val = None
+        if 'max_shared_gb' in fields:
+            ss_val = fields.get('max_shared_gb')
+        else:
+            ss_val = fields.get('shared_size') if 'shared_size' in fields else fields.get('shared_gb')
         try:
             ss = int(ss_val) if ss_val is not None else None
         except Exception:
-            e = ValueError(f"swap_size must be an integer: {ss_val}")
+            e = ValueError(f"shared_size must be an integer: {ss_val}")
             setattr(e, 'error_reason', 'update_failed')
             raise e
         if ss is not None and (ss < 0 or ss > 8):
-            e = ValueError(f"swap_size out of range (0-8 GB): {ss}")
+            e = ValueError(f"shared_size out of range (0-8 GB): {ss}")
             setattr(e, 'error_reason', 'update_failed')
             raise e
+
+        # if max_shared_gb provided, ensure it does not exceed updated or current max_memory_gb
+        if 'max_shared_gb' in fields:
+            try:
+                target_max_mem = None
+                if 'max_memory_gb' in fields:
+                    target_max_mem = int(fields.get('max_memory_gb')) if fields.get('max_memory_gb') is not None else None
+                else:
+                    target_max_mem = int(getattr(machine, 'max_memory_gb', None)) if getattr(machine, 'max_memory_gb', None) is not None else None
+            except Exception:
+                e = ValueError(f"max_memory_gb must be an integer when validating max_shared_gb")
+                setattr(e, 'error_reason', 'update_failed')
+                raise e
+            if target_max_mem is not None and ss is not None and ss > target_max_mem:
+                e = ValueError(f"max_shared_gb ({ss}) cannot be greater than max_memory_gb ({target_max_mem})")
+                setattr(e, 'error_reason', 'update_failed')
+                raise e
 
     requested_status = fields.get('machine_status', None)
     current_status = machine.machine_status.value if hasattr(machine.machine_status, 'value') else str(machine.machine_status)
@@ -183,13 +237,22 @@ def Update_machine(machine_id: int, **fields) -> bool:
     if str(current_status).lower() == MachineStatus.ONLINE.value and str(requested_status).lower() == MachineStatus.MAINTENANCE.value:
         passthrough_fields = dict(fields)
         passthrough_fields.pop('machine_status', None)
+        if 'disk_size' in passthrough_fields:
+            passthrough_fields['disk_size_gb'] = passthrough_fields.pop('disk_size')
         if passthrough_fields:
             update_machine(machine_id, **passthrough_fields)
         start_machine_maintenance_transition_heartbeat(machine_id)
         return True
 
+    # 字段名翻译: 前端 disk_size → 模型 disk_size_gb
+    if 'disk_size' in fields:
+        fields['disk_size_gb'] = fields.pop('disk_size')
+
     update_machine(machine_id, **fields)
-    return True    
+    from ..repositories.operation_log_repo import write as write_op_log
+    write_op_log(operation="update_machine", target_type="machine", target_id=machine_id,
+                 detail={k: str(v) for k, v in fields.items()})
+    return True
 #######################################
 
 
@@ -209,7 +272,7 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
         gpu_number=machine.gpu_number,
         gpu_type=machine.gpu_type,
         memory_size_gb=machine.memory_size_gb,
-        max_swap_gb=machine.max_swap_gb,
+        max_shared_gb=machine.max_shared_gb,
         max_cpu_core_number=machine.max_cpu_core_number,
         max_gpu_number=machine.max_gpu_number,
         max_memory_gb=machine.max_memory_gb,
@@ -220,6 +283,23 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
 #######################################
 
 #######################################
+def _node_probe_machine(machine_id: int, _app=None) -> bool:
+    """封装单次 NodeKernel /machine_status 可达性检查。
+
+    等同于原 for 循环内的 ``is_machine_online_remote(machine_id, timeout=2.0)``，
+    抽取为独立函数以适配 ``parallel_node_calls``。
+
+    *_app* 可选传入 Flask app 实例，用于线程池内推送 app context。
+    """
+    try:
+        if _app is not None:
+            with _app.app_context():
+                return is_machine_online_remote(machine_id, timeout=2.0)
+        return is_machine_online_remote(machine_id, timeout=2.0)
+    except Exception:
+        return False
+
+
 # 获取一批机器的概要信息
 def List_all_machine_bref_information(
     page_number: int, 
@@ -278,16 +358,35 @@ def List_all_machine_bref_information(
     # 分页查询（offset从0开始）
     machines = machines_query.limit(page_size).offset(page_number * page_size).all()
     
-    # 4. 组装返回结果
+    # 4. 并发可达性检查（Phase A），然后逐条同步状态（Phase B）
     res = []
-    for machine in machines:
-        # 最朴素的节点可达性检查：单次请求 /machine_status
-        try:
-            try:
-                online = is_machine_online_remote(machine.id, timeout=2.0)
-            except Exception:
-                online = False
 
+    # --- Phase A: 并发探活 ---
+    try:
+        use_parallel = current_app.config.get("NODE_PARALLEL_ENABLED_MACHINES", True)
+        _app = current_app._get_current_object()
+    except RuntimeError:
+        use_parallel = True
+        _app = None
+    _probe_results: dict[int, bool] = {}
+    if machines:
+        if use_parallel and _app is not None:
+            _callables = [
+                lambda mid=m.id, a=_app: _node_probe_machine(mid, _app=a)
+                for m in machines
+            ]
+            _raw = parallel_node_calls(_callables, timeout_per_call=3.0)
+            for m, r in zip(machines, _raw):
+                _probe_results[m.id] = r if isinstance(r, bool) else False
+        else:
+            for m in machines:
+                _probe_results[m.id] = _node_probe_machine(m.id)
+
+    # --- Phase B: 逐条同步（串行，避免 DB session 竞争） ---
+    for machine in machines:
+        online = _probe_results.get(machine.id, False)
+
+        try:
             try:
                 current_status_val = machine.machine_status.value.lower() if hasattr(machine.machine_status, 'value') else str(machine.machine_status).lower()
             except Exception:
@@ -331,7 +430,6 @@ def List_all_machine_bref_information(
                         pass
                     _mark_containers_offline(machine)
         except Exception:
-            # ignore and continue
             pass
         latest = get_by_id(machine.id) or machine
         info = machine_bref_information(
@@ -348,4 +446,3 @@ def List_all_machine_bref_information(
     
     return res, total_pages
 #######################################
-

@@ -6,6 +6,7 @@ api_bp = Blueprint("api", __name__, url_prefix="/api")
 from . import user_api
 from . import machine_api
 from . import container_api
+from . import announcement_api
 
 
 def register_blueprints(app):

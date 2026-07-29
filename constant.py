@@ -17,6 +17,7 @@ class ContainerStatus(Enum):
     STARTING = "starting"
     STOPPING = "stopping"
     FAILED = "failed"
+    PAUSED = "paused"
 
 
 
@@ -28,3 +29,21 @@ class ROLE(Enum):
 class PERMISSION(Enum):
     USER="user"
     OPERATOR="operator"
+
+
+class AnnouncementStatus(Enum):
+    SENDING = "sending"
+    SENT = "sent"
+    PARTIAL = "partial"
+    FAILED = "failed"
+
+
+class AnnouncementTargetType(Enum):
+    MACHINE = "machine"
+    CONTAINER = "container"
+    USER = "user"
+
+
+class AnnouncementTemplateCategory(Enum):
+    SYSTEM = "system"
+    CUSTOM = "custom"

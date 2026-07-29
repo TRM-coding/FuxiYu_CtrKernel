@@ -19,9 +19,13 @@ def _parse(path: Path) -> dict[str, str]:
 
 def load_dotenv(dotenv_path: str | None = None, *args, **kwargs) -> bool:
     path = Path(dotenv_path or ".env")
+    override = bool(kwargs.get("override", False))
     loaded = False
     for key, value in _parse(path).items():
-        os.environ.setdefault(key, value)
+        if override:
+            os.environ[key] = value
+        else:
+            os.environ.setdefault(key, value)
         loaded = True
     return loaded
 

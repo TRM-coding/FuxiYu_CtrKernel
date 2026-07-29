@@ -1,5 +1,8 @@
 #user_tasks.py 单元测试
 import pytest
+
+pytestmark = pytest.mark.legacy
+
 from ..services.user_tasks import Login, Register
 from ..models.user import User
 from ..extensions import db

@@ -5,7 +5,7 @@ from ..extensions import db
 from ..repositories.user_repo import *
 from ..repositories import authentications_repo
 from ..repositories import registration_code_repo
-from ..repositories import usercontainer_repo, containers_repo
+from ..repositories import usercontainer_repo, containers_repo, long_term_container_repo
 from ..utils.mail import send as send_mail
 from ..constant import ROLE, ContainerStatus
 from pydantic import BaseModel
@@ -24,6 +24,7 @@ class user_bref_information(BaseModel):
     amount_of_container: int
     amount_of_functional_container:int
     amount_of_managed_container:int
+    amount_of_long_term_container:int
 
 class user_detail_information(BaseModel):
     user_id:int
@@ -35,6 +36,7 @@ class user_detail_information(BaseModel):
     amount_of_container: int = 0
     amount_of_functional_container: int = 0
     amount_of_managed_container: int = 0
+    amount_of_long_term_container: int = 0
     
 #####################################
 
@@ -136,6 +138,9 @@ def Register(username: str, email: str, password: str, graduation_year):
         password_hash=generate_password_hash(password),
         graduation_year=graduation_year
     )
+    from ..repositories.operation_log_repo import write as write_op_log
+    write_op_log(operation="register_user", target_type="user", target_id=new_user.id,
+                 detail={"username": username, "email": email})
     return True, new_user, None
 #####################################
 
@@ -168,6 +173,9 @@ def Change_password(user: User, old_password: str, new_password: str) -> bool:
         print(f"Error updating password in database: {e}")
         return False
     print("Password changed successfully.")
+    from ..repositories.operation_log_repo import write as write_op_log
+    write_op_log(operator_user_id=user.id, operation="change_password",
+                 target_type="user", target_id=user.id)
     return True
 
 #####################################
@@ -188,6 +196,8 @@ def Delete_user(user_id: int) -> bool:
 
     # 最终删除用户
     if delete_user(user_id=user_id):
+        from ..repositories.operation_log_repo import write as write_op_log
+        write_op_log(operation="delete_user", target_type="user", target_id=user_id)
         return True
 
     return False
@@ -221,6 +231,7 @@ def Get_user_detail_information(user_id: int)->user_detail_information:
         amount_of_container=counts.get('total', 0),
         amount_of_functional_container=counts.get('functional', 0),
         amount_of_managed_container=counts.get('managed', 0),
+        amount_of_long_term_container=long_term_container_repo.count_by_user(user.id),
     )
 #####################################
 
@@ -257,6 +268,7 @@ def List_all_user_bref_information(page_number:int, page_size:int)->list[user_br
             amount_of_container=total,
             amount_of_functional_container=functional,
             amount_of_managed_container=managed,
+            amount_of_long_term_container=long_term_container_repo.count_by_user(u.id),
         ))
     return result
 #####################################
@@ -319,11 +331,13 @@ def Reset_password(user_id:int)->str|None:
         return None
     new_password=f"{user.graduation_year}{user.username}"
     update_user(user_id,password_hash=generate_password_hash(new_password))
+    from ..repositories.operation_log_repo import write as write_op_log
+    write_op_log(operation="reset_password", target_type="user", target_id=user_id)
     return new_password
 #####################################
 
 
-ALLOWED_REGISTRATION_EMAIL_DOMAINS = {'bjtu.edu.cn', 'tsinghua.edu.cn', 'bupt.edu.cn'}
+ALLOWED_REGISTRATION_EMAIL_DOMAINS = {'bjtu.edu.cn', 'tsinghua.edu.cn', 'bupt.edu.cn', 'mails.tsinghua.edu.cn', 'mail.tsinghua.edu.cn'}
 
 
 def _get_email_domain(email: str) -> str | None:
@@ -364,6 +378,5 @@ def Register_with_code(username: str, email: str, password: str, graduation_year
         return False, 'registration_code_invalid', None
 
     return Register(username, email, password, graduation_year)
-
 
 
