@@ -38,7 +38,6 @@ def create_container_api():
     通信数据格式：
     发送格式：
     {
-        "token",
         "user_name",
         "machine_id",
         "container":{
@@ -57,7 +56,7 @@ def create_container_api():
         ["error_reason": "xxxx"]
     }
     '''
-    token = request.headers.get("token", "")
+    token = request.cookies.get("auth_token", "")
     if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json() or {}
@@ -124,7 +123,6 @@ def delete_container_api():
     通信数据格式：
     发送格式：
     {
-        "token",
         "container_id"
     }
     返回格式：
@@ -134,7 +132,7 @@ def delete_container_api():
         ["error_reason": "xxxx"]
     }
     '''
-    token = request.headers.get("token", "")
+    token = request.cookies.get("auth_token", "")
     if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json() or {}
@@ -159,7 +157,7 @@ def delete_container_api():
 
 @api_bp.post("/containers/set_long_term_container")
 def set_long_term_container_api():
-    token = request.headers.get("token", "")
+    token = request.cookies.get("auth_token", "")
     if not authentications_repo.is_token_valid(token):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
 
@@ -200,9 +198,9 @@ def set_long_term_container_api():
 def start_container_api():
     '''
     请求格式：
-    { "token", "container_id" }
+    {"container_id" }
     '''
-    token = request.headers.get("token", "")
+    token = request.cookies.get("auth_token", "")
     if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json() or {}
@@ -228,9 +226,9 @@ def start_container_api():
 def stop_container_api():
     '''
     请求格式：
-    { "token", "container_id" }
+    { "container_id" }
     '''
-    token = request.headers.get("token", "")
+    token = request.cookies.get("auth_token", "")
     if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json() or {}
@@ -255,9 +253,9 @@ def stop_container_api():
 def restart_container_api():
     '''
     请求格式：
-    { "token", "container_id" }
+    { "container_id" }
     '''
-    token = request.headers.get("token", "")
+    token = request.cookies.get("auth_token", "")
     if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json() or {}
@@ -283,7 +281,6 @@ def add_collaborator_api():
     通信数据格式：
     发送格式：
     {
-        "token",
         "user_id",
         "container_id",
         "role"
@@ -295,7 +292,7 @@ def add_collaborator_api():
         ["error_reason": "xxxx"]
     }
     '''
-    token = request.headers.get("token","")
+    token = request.cookies.get("auth_token", "")
     if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success":0,"message":"invalid or missing token", "error_reason": "invalid_token"}),401
     data=request.get_json() or {}
@@ -325,7 +322,6 @@ def remove_collaborator_api():
     通信数据格式：
     发送格式：
     {
-        "token",
         "container_id",
         "user_id"
     }
@@ -336,7 +332,7 @@ def remove_collaborator_api():
         ["error_reason": "xxxx"]
     }
     '''
-    token = request.headers.get("token", "")
+    token = request.cookies.get("auth_token", "")
     if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success":0,"message":"invalid or missing token", "error_reason": "invalid_token"}),401
     data=request.get_json() or {}
@@ -363,7 +359,6 @@ def update_role_api():
     通信数据格式：
     发送格式：
     {
-        "token",
         "container_id",
         "user_id",
         "updated_role"
@@ -375,7 +370,7 @@ def update_role_api():
         ["error_reason": "xxxx"]
     }
     '''
-    token = request.headers.get("token", "")
+    token = request.cookies.get("auth_token", "")
     if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success":0,"message":"invalid or missing token", "error_reason": "invalid_token"}),401
     data=request.get_json() or {}
@@ -399,7 +394,7 @@ def update_role_api():
 
 @api_bp.post("/containers/unpause_container")
 def unpause_container_api():
-    token = request.headers.get("token", "")
+    token = request.cookies.get("auth_token", "")
     if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json() or {}
@@ -423,7 +418,6 @@ def get_container_detail_information_api():
     通信数据格式：
     发送格式：
     {
-        "token",
         "container_id"
     }
     返回格式：
@@ -448,7 +442,7 @@ def get_container_detail_information_api():
         }
     }
     '''
-    if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
+    if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
         return jsonify({"success":0,"message":"invalid or missing token", "error_reason": "invalid_token"}),401
     data=request.get_json() or {}
     container_id=data.get("container_id",0)
@@ -465,7 +459,6 @@ def container_status_api():
     通信数据格式：
     发送格式：
     { 
-        "token",
         "machine_id": <id>, 
         "container_name": "name" 
     }
@@ -474,7 +467,7 @@ def container_status_api():
         "container_status": "CREATING"|"ONLINE"|... 
     }
     '''
-    if (not authentications_repo.is_token_valid(request.headers.get("token",""))):
+    if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
         return jsonify({"success":0, "message":"invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json() or {}
     container_name = data.get('container_name', '')
@@ -508,10 +501,6 @@ def refresh_last_ssh_login_time_api():
     {
         "container_id": <int>
     }
-    header:
-    {
-        "token": "xxxx"
-    }
     返回格式：
     {
         "success": 0|1,
@@ -520,7 +509,7 @@ def refresh_last_ssh_login_time_api():
         "last_ssh_login_time": "<time or null>"
     }
     '''
-    token = request.headers.get("token", "")
+    token = request.cookies.get("auth_token", "")
     if not authentications_repo.is_token_valid(token):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
 
@@ -573,7 +562,6 @@ def list_all_containers_bref_information_api():
     通信数据格式：
     发送格式：
     {
-        "token",
         "machine_id",
         "user_id",
         "page_number",
@@ -594,7 +582,7 @@ def list_all_containers_bref_information_api():
         }],
     }
     '''
-    token = request.headers.get("token","")
+    token = request.cookies.get("auth_token", "")
     if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success":0,"message":"invalid or missing token", "error_reason": "invalid_token"}),401
     data=request.get_json() or {}

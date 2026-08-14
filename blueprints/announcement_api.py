@@ -18,8 +18,8 @@ from . import api_bp
 
 
 def _get_token() -> str:
-    """从请求中提取 token（优先 header，兼容 cookie）。"""
-    return request.headers.get("token", "") or request.cookies.get("auth_token", "")
+    """从请求中提取 token（cookie）。"""
+    return request.cookies.get("auth_token", "")
 
 
 def _require_operator():

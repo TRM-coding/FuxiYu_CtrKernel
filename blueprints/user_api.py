@@ -1,4 +1,4 @@
-from flask import jsonify, request, make_response
+from flask import jsonify, request, make_response, current_app
 from . import api_bp
 from ..services import user_tasks
 from ..repositories import user_repo, authentications_repo
@@ -102,6 +102,7 @@ def login():
 	{
 		"username":"xxxx",
 		"password":"xxxx"
+		"remember":"[True|False]
 	}
 	返回格式：
 	{
@@ -112,7 +113,6 @@ def login():
 		"username": "xxxx",
 		"email": "xxxx",
 		"permission": "[user|operator]",
-		"token": "xxxx"
 	}
 	'''
 	"""用户登录 API"""
@@ -123,14 +123,18 @@ def login():
 	# 直接读取明文字段
 	username = recived_data.get("username")
 	password = recived_data.get("password")
+	remember = recived_data.get("remember")
 	
 	if not username or not password:
 		return jsonify({"success": 0, "message": "username and password required"}), 400
 	
 	# 调用 Login 函数，返回结果和错误原因
-	success, user_or_reason, token = user_tasks.Login(username, password)
+	success, user_or_reason, token = user_tasks.Login(username, password, remember)
 	
 	if success:
+		max_age = None
+		if remember:
+			max_age = 24*3600*30
 		# 创建响应
 		response = make_response(jsonify({
 			"success": 1,
@@ -139,16 +143,15 @@ def login():
 			"username": user_or_reason.username,
 			"email": user_or_reason.email,
 			"permission": user_or_reason.permission.value,
-			"token": token,
 		}), 200)
 		
 		# 设置 cookies
 		response.set_cookie(
 			'auth_token',
 			token,
-			max_age=24*3600,  # 24小时
+			max_age=max_age,  # 不记住：None，关浏览器就丢 | 记住：24小时*30
 			httponly=True,
-			secure=False,  # 内网环境
+			secure=current_app.config.get("SSL_ENABLED", True),  # 跟随 ENABLE_SSL：HTTPS 时阻止 cookie 走明文
 			samesite='Lax'
 		)
 		
@@ -178,7 +181,6 @@ def get_user_detail_information_api():
 	通信数据格式：
 	发送格式：
 	{
-		"token",
 		"user_id"
 	}
 	返回格式：
@@ -198,7 +200,7 @@ def get_user_detail_information_api():
     }
 	'''
 	# require valid token
-	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+	if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
 		return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
 
 	data = request.get_json(silent=True) or {}
@@ -225,7 +227,6 @@ def list_all_user_bref_information_api():
 	通信数据格式：
 	发送格式：
 	{
-		"token",
 		"page_number",
 		"page_size"
 	}
@@ -244,7 +245,7 @@ def list_all_user_bref_information_api():
 	}
 	'''
 	# require valid token
-	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+	if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
 		return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
 
 	data = request.get_json(silent=True) or {}
@@ -272,7 +273,6 @@ def change_password_user():
 	通讯数据格式：
 	发送格式：
 	{
-		"token",
 		"user_id",
 		"old_password",
 		"new_password"
@@ -284,7 +284,7 @@ def change_password_user():
 		["error_reason": "xxxx"]
 	}
 	'''
-	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+	if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
 		return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
 
 	data = request.get_json(silent=True) or {}
@@ -318,7 +318,6 @@ def delete_user_api():
 	通讯数据格式：
 	发送格式：
 	{
-		"token",
 		"user_id"
 	}
 	返回格式：
@@ -329,7 +328,7 @@ def delete_user_api():
 		"wild_containers": [...]  # 可选字段，仅在存在无主容器阻止删除时返回
 	}
 	'''
-	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+	if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
 		return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
 
 	data = request.get_json(silent=True) or {}
@@ -358,7 +357,6 @@ def update_user_api():
 	通讯数据格式：
 	发送格式：
 	{
-		"token",
 		"user_id",
 		"fields": {
 			"username": "newname",
@@ -374,7 +372,7 @@ def update_user_api():
 		"user": { ... updated user data ... }
 	}
 	'''
-	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+	if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
 		return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
 
 	data = request.get_json(silent=True) or {}
@@ -405,7 +403,6 @@ def reset_password_api():
 	通讯数据格式：
 	发送格式：
 	{
-		"token",
 		"user_id"
 	}
 	返回格式：
@@ -416,7 +413,7 @@ def reset_password_api():
 		"new_password": "xxxx"
 	}
 	'''
-	if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+	if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
 		return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
 
 	data = request.get_json(silent=True) or {}

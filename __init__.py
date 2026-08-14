@@ -8,7 +8,7 @@ load_dotenv(_DOTENV_PATH, override=True)
 import os
 from flask import Flask
 from flask_cors import CORS
-from .extensions import db, migrate, login_manager
+from .extensions import db
 from .config import get_config, CORSHeaderConfig
 from .blueprints import register_blueprints
 from .schemas.container_ssh_refresh_task import start_container_ssh_refresh_scheduler
@@ -34,9 +34,10 @@ def create_app(config: str | None = None, overrides: dict | None = None):
     CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": origins}})
 
     db.init_app(app)
-    migrate.init_app(app, db)
-    # cache.init_app(app)
-    login_manager.init_app(app)
+    with app.app_context():
+        from . import models
+        db.create_all()
+
 
     register_blueprints(app)
 

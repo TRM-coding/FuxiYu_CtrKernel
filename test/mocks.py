@@ -9,7 +9,7 @@ from ..constant import PERMISSION
 def mock_auth_token(monkeypatch, module, *, user_id: int = 1, valid: bool = True, token: str = TEST_AUTH_TOKEN):
     monkeypatch.setattr(module.authentications_repo, "is_token_valid", lambda provided_token: valid)
     monkeypatch.setattr(module.authentications_repo, "get_user_id_by_token", lambda provided_token: user_id)
-    return {"token": token}
+    return {}
 
 
 def mock_operator_token(monkeypatch, module, *, user_id: int = 1, valid: bool = True, token: str = TEST_OPERATOR_TOKEN):
@@ -64,7 +64,7 @@ def auth_token_factory(user=None, *, expired: bool = False, token: str = TEST_AU
     user = user or create_user()
     expires_at = datetime.utcnow() - timedelta(seconds=1) if expired else datetime.utcnow() + timedelta(hours=1)
     create_auth(user, token=token, expires_at=expires_at)
-    return token, {"token": token}
+    return token
 
 
 def operator_user_factory(**overrides):

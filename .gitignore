@@ -15,3 +15,5 @@ certs/*.key
 !/logs/.gitkeep
 
 docs/audit/*
+
+*.db

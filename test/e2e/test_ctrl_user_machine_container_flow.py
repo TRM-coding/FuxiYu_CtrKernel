@@ -22,8 +22,6 @@ def test_ctrl_e2e_user_login_machine_permission_container_create_and_list(
     machine_permission_repo.add_permission(machine.id, user.id)
 
     login_resp = client.post("/api/login", json={"username": "e2e_user", "password": "Password_123"})
-    token = login_resp.get_json()["token"]
-    headers = {"token": token}
     mocks.mock_node_response(monkeypatch, container_tasks, {"success": 1})
     mocks.mock_container_crypto(monkeypatch, container_tasks)
     monkeypatch.setattr(container_tasks, "is_machine_online_remote", lambda machine_id: True)
@@ -47,8 +45,7 @@ def test_ctrl_e2e_user_login_machine_permission_container_create_and_list(
                 "NAME": "e2e_container",
                 "image": "ubuntu:22.04",
             },
-        },
-        headers=headers,
+        }
     )
 
     assert create_resp.status_code == 200
@@ -59,8 +56,7 @@ def test_ctrl_e2e_user_login_machine_permission_container_create_and_list(
     monkeypatch.setattr(container_tasks, "get_container_status", lambda *args, **kwargs: {"success": 1, "container_status": "creating"})
     list_resp = client.post(
         "/api/containers/list_all_container_bref_information",
-        json={"user_id": user.id, "page_number": 0, "page_size": 10},
-        headers=headers,
+        json={"user_id": user.id, "page_number": 0, "page_size": 10}
     )
 
     assert list_resp.status_code == 200
@@ -73,13 +69,12 @@ def test_ctrl_e2e_set_long_term_then_list_reflects_long_term_state(client, db_se
     root, _machine, container = create_container_graph()
     token = "e2e-long-term-token"
     create_auth(root, token=token)
-    headers = {"token": token}
     monkeypatch.setattr(container_tasks, "get_container_status", lambda *args, **kwargs: {"success": 1, "container_status": "online"})
 
     set_resp = client.post(
         "/api/containers/set_long_term_container",
         json={"container_id": container.id, "is_long_term": True},
-        headers=headers,
+        environ_base={"HTTP_COOKIE": f"auth_token={token}"}
     )
 
     assert set_resp.status_code == 200
@@ -87,7 +82,7 @@ def test_ctrl_e2e_set_long_term_then_list_reflects_long_term_state(client, db_se
     list_resp = client.post(
         "/api/containers/list_all_container_bref_information",
         json={"user_id": root.id, "page_number": 0, "page_size": 10},
-        headers=headers,
+        environ_base={"HTTP_COOKIE": f"auth_token={token}"}
     )
 
     assert list_resp.status_code == 200
@@ -102,17 +97,16 @@ def test_ctrl_e2e_operator_can_set_long_term_but_limit_still_applies(client, db_
     operator = create_user(permission=PERMISSION.OPERATOR)
     token = "e2e-operator-token"
     create_auth(operator, token=token)
-    headers = {"token": token}
 
     first = client.post(
         "/api/containers/set_long_term_container",
         json={"container_id": container.id, "is_long_term": True},
-        headers=headers,
+        environ_base={"HTTP_COOKIE": f"auth_token={token}"}
     )
     second_resp = client.post(
         "/api/containers/set_long_term_container",
         json={"container_id": second.id, "is_long_term": True},
-        headers=headers,
+        environ_base={"HTTP_COOKIE": f"auth_token={token}"}
     )
 
     assert first.status_code == 200

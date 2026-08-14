@@ -121,10 +121,6 @@ def cleanup_expired_containers_once(cleanup_after_days: int) -> None:
     if cleanup_after_days <= 0:
         cleanup_after_days = 1
 
-    try:
-        container_cleanup_reminder_repo.ensure_table()
-    except Exception as e:
-        print(f"[container-cleanup] failed to ensure reminder table: {e}")
 
     records = ContainerSSHLogin.query.all()
     for rec in records:

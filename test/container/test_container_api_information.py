@@ -17,7 +17,7 @@ def test_get_container_detail_api_not_found(client, monkeypatch):
         lambda **kwargs: (_ for _ in ()).throw(ValueError("missing")),
     )
 
-    resp = client.post("/api/containers/get_container_detail_information", json={"container_id": 1}, headers={"token": "t"})
+    resp = client.post("/api/containers/get_container_detail_information", json={"container_id": 1} )
 
     assert resp.status_code == 404
 
@@ -30,7 +30,7 @@ def test_get_container_detail_api_success(client, monkeypatch):
         lambda **kwargs: {"container_id": 1, "container_name": "c"},
     )
 
-    resp = client.post("/api/containers/get_container_detail_information", json={"container_id": 1}, headers={"token": "t"})
+    resp = client.post("/api/containers/get_container_detail_information", json={"container_id": 1} )
 
     assert resp.status_code == 200
     assert resp.get_json()["container_info"]["container_name"] == "c"
@@ -39,7 +39,7 @@ def test_get_container_detail_api_success(client, monkeypatch):
 def test_container_status_api_missing_fields_returns_none(client, monkeypatch):
     _auth(monkeypatch)
 
-    resp = client.post("/api/containers/container_status", json={}, headers={"token": "t"})
+    resp = client.post("/api/containers/container_status", json={} )
 
     assert resp.status_code == 200
     assert resp.get_json()["container_status"] is None
@@ -52,7 +52,7 @@ def test_container_status_api_success(client, monkeypatch, db_session):
     resp = client.post(
         "/api/containers/container_status",
         json={"machine_id": container.machine_id, "container_name": container.name},
-        headers={"token": "t"},
+        ,
     )
 
     assert resp.status_code == 200
@@ -71,7 +71,7 @@ def test_refresh_last_ssh_login_time_api_node_endpoint_missing_returns_502(clien
     resp = client.post(
         "/api/containers/refresh_last_ssh_login_time",
         json={"container_id": container.id},
-        headers={"token": "t"},
+        ,
     )
 
     assert resp.status_code == 502
@@ -85,7 +85,7 @@ def test_refresh_last_ssh_login_time_api_success(client, monkeypatch, db_session
     resp = client.post(
         "/api/containers/refresh_last_ssh_login_time",
         json={"container_id": container.id},
-        headers={"token": "t"},
+        ,
     )
 
     assert resp.status_code == 200
@@ -108,7 +108,7 @@ def test_list_container_bref_api_includes_long_term_limit_when_user_filter_prese
     resp = client.post(
         "/api/containers/list_all_container_bref_information",
         json={"user_id": 1, "page_number": 0, "page_size": 10},
-        headers={"token": "t"},
+        ,
     )
 
     assert resp.status_code == 200

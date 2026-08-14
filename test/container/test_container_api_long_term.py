@@ -10,7 +10,7 @@ def _auth(monkeypatch, *, valid=True, user_id=1):
 def test_set_long_term_api_validates_required_fields(client, monkeypatch):
     _auth(monkeypatch)
 
-    resp = client.post("/api/containers/set_long_term_container", json={"container_id": 1}, headers={"token": "t"})
+    resp = client.post("/api/containers/set_long_term_container", json={"container_id": 1} )
 
     assert resp.status_code == 400
 
@@ -26,7 +26,7 @@ def test_set_long_term_api_maps_limit_to_409(client, monkeypatch):
     resp = client.post(
         "/api/containers/set_long_term_container",
         json={"container_id": 1, "is_long_term": True},
-        headers={"token": "t"},
+        ,
     )
 
     assert resp.status_code == 409
@@ -44,7 +44,7 @@ def test_set_long_term_api_success(client, monkeypatch):
     resp = client.post(
         "/api/containers/set_long_term_container",
         json={"container_id": 1, "is_long_term": True},
-        headers={"token": "t"},
+        ,
     )
 
     assert resp.status_code == 200

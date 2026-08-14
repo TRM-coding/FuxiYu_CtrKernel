@@ -42,12 +42,13 @@ class user_detail_information(BaseModel):
 
 #####################################
 #登录验证
-def Login(username: str, password: str):
+def Login(username: str, password: str, *, remember: bool = False):
     """用户登录验证并生成认证 token
     
     Args:
         username: 用户名
         password: 密码
+        remember: 是否长期 - 默认False，控制cookeis生命周期
         
     Returns:
         tuple: (是否成功, User对象或错误原因, token或None)
@@ -67,6 +68,8 @@ def Login(username: str, password: str):
     # 登录成功，生成 token
     token = secrets.token_urlsafe(32)
     expires_at = datetime.utcnow() + timedelta(hours=24)
+    if remember: 
+        expires_at = datetime.utcnow() + timedelta(days=30)
     auth = authentications_repo.create_auth(token, user.id, expires_at)
     
     return True, user, auth.token

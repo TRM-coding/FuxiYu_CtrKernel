@@ -22,8 +22,7 @@ def test_create_container_api_rejects_invalid_payload(client, monkeypatch):
 
     resp = client.post(
         "/api/containers/create_container",
-        json={"container": {"CPU_NUMBER": "bad"}},
-        headers={"token": "t"},
+        json={"container": {"CPU_NUMBER": "bad"}}
     )
 
     assert resp.status_code == 400
@@ -37,8 +36,7 @@ def test_create_container_api_duplicate_returns_409(client, monkeypatch):
 
     resp = client.post(
         "/api/containers/create_container",
-        json={"user_name": "u", "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}},
-        headers={"token": "t"},
+        json={"user_name": "u", "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
     )
 
     assert resp.status_code == 409
@@ -54,8 +52,7 @@ def test_create_container_api_machine_permission_denied_returns_403(client, monk
 
     resp = client.post(
         "/api/containers/create_container",
-        json={"user_name": "u", "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}},
-        headers={"token": "t"},
+        json={"user_name": "u", "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
     )
 
     assert resp.status_code == 403
@@ -67,8 +64,7 @@ def test_create_container_api_success(client, monkeypatch):
 
     resp = client.post(
         "/api/containers/create_container",
-        json={"user_name": "u", "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}},
-        headers={"token": "t"},
+        json={"user_name": "u", "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
     )
 
     assert resp.status_code == 200
@@ -83,7 +79,7 @@ def test_delete_container_api_not_found_returns_404(client, monkeypatch):
 
     monkeypatch.setattr(container_api.container_service, "remove_container", _raise)
 
-    resp = client.post("/api/containers/delete_container", json={"container_id": 1}, headers={"token": "t"})
+    resp = client.post("/api/containers/delete_container", json={"container_id": 1} )
 
     assert resp.status_code == 404
 
@@ -92,7 +88,7 @@ def test_delete_container_api_success(client, monkeypatch):
     _auth(monkeypatch)
     monkeypatch.setattr(container_api.container_service, "remove_container", lambda **kwargs: True)
 
-    resp = client.post("/api/containers/delete_container", json={"container_id": 1}, headers={"token": "t"})
+    resp = client.post("/api/containers/delete_container", json={"container_id": 1} )
 
     assert resp.status_code == 200
 
@@ -104,5 +100,5 @@ def test_start_stop_restart_api_success(client, monkeypatch):
     monkeypatch.setattr(container_api.container_service, "restart_container", lambda **kwargs: True)
 
     for endpoint in ("start_container", "stop_container", "restart_container"):
-        resp = client.post(f"/api/containers/{endpoint}", json={"container_id": 1}, headers={"token": "t"})
+        resp = client.post(f"/api/containers/{endpoint}", json={"container_id": 1} )
         assert resp.status_code == 200
