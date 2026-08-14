@@ -151,20 +151,20 @@ def Add_machine(machine_name:str,
             setattr(e, 'error_reason', 'create_failed')
             raise e
 
-        create_machine(
-         machinename=machine_name,
-         machine_ip=machine_ip,
-         machine_type=machine_type,
-         machine_description=machine_description,
-         cpu_core_number=cpu_core_number,
-         gpu_number=gpu_number,
-         gpu_type=gpu_type,
-         memory_size=memory_size,
-            max_shared_gb=max_shared_gb,
-         disk_size=disk_size,
-         max_memory_gb=max_memory_gb,
-         max_gpu_number=max_gpu_number,
-         max_cpu_core_number=max_cpu_core_number
+    create_machine(
+        machinename=machine_name,
+        machine_ip=machine_ip,
+        machine_type=machine_type,
+        machine_description=machine_description,
+        cpu_core_number=cpu_core_number,
+        gpu_number=gpu_number,
+        gpu_type=gpu_type,
+        memory_size=memory_size,
+        max_shared_gb=max_shared_gb,
+        disk_size=disk_size,
+        max_memory_gb=max_memory_gb,
+        max_gpu_number=max_gpu_number,
+        max_cpu_core_number=max_cpu_core_number,
     )
     from ..repositories.operation_log_repo import write as write_op_log
     write_op_log(operation="add_machine", target_type="machine", target_id=0,

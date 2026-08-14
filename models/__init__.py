@@ -10,3 +10,5 @@ from .container_mount_cleanup import ContainerMountCleanup  # noqa: F401
 
 from .registration_code import RegistrationCode  # noqa: F401
 from .announcement import Announcement, AnnouncementTemplate, AnnouncementDraft  # noqa: F401
+from .authentications import Authentication  # noqa: F401
+from .operation_log import OperationLog  # noqa: F401
