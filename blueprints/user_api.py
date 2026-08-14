@@ -129,7 +129,7 @@ def login():
 		return jsonify({"success": 0, "message": "username and password required"}), 400
 	
 	# 调用 Login 函数，返回结果和错误原因
-	success, user_or_reason, token = user_tasks.Login(username, password, remember)
+	success, user_or_reason, token = user_tasks.Login(username, password, remember=remember)
 	
 	if success:
 		max_age = None

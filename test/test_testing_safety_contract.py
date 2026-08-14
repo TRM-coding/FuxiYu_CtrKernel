@@ -132,7 +132,8 @@ def test_no_tests_import_requests_without_integration_marker():
 
 def test_no_tests_call_create_app_without_testing_config():
     for path in (ROOT / "test").rglob("test_*.py"):
-        if str(path.relative_to(ROOT)) in OLD_TEST_FILES:
+        # as_posix 统一分隔符，Windows 下 backslash 路径不会漏判
+        if path.relative_to(ROOT).as_posix() in OLD_TEST_FILES:
             continue
         text = path.read_text(encoding="utf-8")
         if "create_app(" not in text:

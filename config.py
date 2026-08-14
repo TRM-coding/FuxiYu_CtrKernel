@@ -1,9 +1,21 @@
 """应用配置模块
 
 提供不同环境的配置类，支持通过环境变量覆盖默认值。
+网络配置采用三仓库统一键名：只填裸 IP 与端口，其余自动组装。
 """
 
 import os
+
+
+def _env_int(name: str, default: int) -> int:
+    """读取整数型环境变量，空值/非法值回退默认。"""
+    raw = os.getenv(name, "")
+    if raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 
 class SqlConfig:
@@ -20,13 +32,29 @@ class KeyConfig:
 
 
 class CommsConfig:
-    NODE_URL_MIDDLE = ":5789/api"
+    # Node 端口（统一键名 NODE_PORT）；Ctrl 组装各宿主机 URL 时拼接
+    NODE_PORT = _env_int("NODE_PORT", 5789)
+    NODE_URL_MIDDLE = f":{NODE_PORT}/api"
 
 
-class CORSHeaderConfig:
-    # Allow both localhost and 127.0.0.1 origins used in development
-    # 这里列出允许的前端地址，前端开发时可能会用 localhost 或230
-    ALLOW_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173,http://192.168.5.230:5173,http://192.168.5.230:4173,http://192.168.5.230:5173,https://localhost:5173,https://127.0.0.1:5173,https://192.168.5.230:5173,https://192.168.5.230:4173,https://192.168.5.230:5173"
+class NetConfig:
+    """三仓库统一网络键名。分发时只改这几个值。"""
+    CTRL_IP = os.getenv("CTRL_IP", "127.0.0.1")
+    CTRL_PORT = _env_int("CTRL_PORT", 5000)
+    WEB_IP = os.getenv("WEB_IP", "127.0.0.1")
+    WEB_PORT = _env_int("WEB_PORT", 5173)
+
+
+def build_allowed_origins() -> list[str]:
+    """统一生成 CORS 允许列表。
+
+    - 只枚举 https 变体（Web 强制 https，http 由部署层 301 重定向）
+    - 同时放行 WEB_IP、127.0.0.1、localhost 三种写法（分发机 IP 与本地开发并存）
+    - 尾斜杠归一化：Origin 有时带尾斜杠，生成时统一去掉，避免精确匹配漏判
+    """
+    ips = sorted({NetConfig.WEB_IP, "127.0.0.1", "localhost"})
+    origins = [f"https://{ip}:{NetConfig.WEB_PORT}" for ip in ips]
+    return [o.rstrip("/") for o in origins]
 
 
 class AppConfig(SqlConfig, KeyConfig):

@@ -9,7 +9,7 @@ import os
 from flask import Flask
 from flask_cors import CORS
 from .extensions import db
-from .config import get_config, CORSHeaderConfig
+from .config import get_config, build_allowed_origins
 from .blueprints import register_blueprints
 from .schemas.container_ssh_refresh_task import start_container_ssh_refresh_scheduler
 from .schemas.container_cleanup_task import start_container_cleanup_scheduler
@@ -25,12 +25,10 @@ def create_app(config: str | None = None, overrides: dict | None = None):
     if overrides:
         app.config.update(overrides)
     configure_daily_logging(app)
-    # Configure CORS for API routes. FRONTEND_ORIGINS can be a comma-separated
-    # list of allowed origins (e.g. "http://localhost:5173,http://127.0.0.1:5173").
+    # Configure CORS for API routes. 统一由 build_allowed_origins() 生成：
+    # 只枚举 https 变体 + WEB_IP/127.0.0.1/localhost 三种写法，尾斜杠归一化。
     # When credentials are used, do NOT set origins to * — specify exact origins.
-    # Use origins defined in config.CORSHeaderConfig
-    frontend_origins = CORSHeaderConfig.ALLOW_ORIGINS
-    origins = [o.strip() for o in frontend_origins.split(",") if o.strip()]
+    origins = build_allowed_origins()
     CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": origins}})
 
     db.init_app(app)

@@ -68,7 +68,7 @@ def test_a02_user_permission(client, monkeypatch):
     """A-02: USER 权限 → 403。"""
     mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.blueprints.announcement_api", fromlist=[""]),
                         user_id=1, valid=False)
-    resp = client.get("/api/announcements/templates", headers=headers)
+    resp = client.get("/api/announcements/templates")
     assert resp.status_code in (401, 403)
 
 

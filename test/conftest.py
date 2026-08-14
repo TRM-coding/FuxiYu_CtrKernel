@@ -27,10 +27,6 @@ def _assert_sqlite_database_uri(app):
         raise RuntimeError(f"Refusing to run tests against non-SQLite database URI: {uri}")
 
 @pytest.fixture(scope="session", autouse=True)
-def _ensure_db():
-    db.create_all()
-
-@pytest.fixture(scope="session", autouse=True)
 def _safe_test_environment():
     with tempfile.TemporaryDirectory(prefix="fuxiyu-ctrl-test-") as tmpdir:
         old_env = {}

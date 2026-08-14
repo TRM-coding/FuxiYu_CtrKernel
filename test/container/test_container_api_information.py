@@ -52,7 +52,6 @@ def test_container_status_api_success(client, monkeypatch, db_session):
     resp = client.post(
         "/api/containers/container_status",
         json={"machine_id": container.machine_id, "container_name": container.name},
-        ,
     )
 
     assert resp.status_code == 200
@@ -70,8 +69,7 @@ def test_refresh_last_ssh_login_time_api_node_endpoint_missing_returns_502(clien
 
     resp = client.post(
         "/api/containers/refresh_last_ssh_login_time",
-        json={"container_id": container.id},
-        ,
+        json={"container_id": container.id}
     )
 
     assert resp.status_code == 502
@@ -84,8 +82,7 @@ def test_refresh_last_ssh_login_time_api_success(client, monkeypatch, db_session
 
     resp = client.post(
         "/api/containers/refresh_last_ssh_login_time",
-        json={"container_id": container.id},
-        ,
+        json={"container_id": container.id}
     )
 
     assert resp.status_code == 200
@@ -107,8 +104,7 @@ def test_list_container_bref_api_includes_long_term_limit_when_user_filter_prese
 
     resp = client.post(
         "/api/containers/list_all_container_bref_information",
-        json={"user_id": 1, "page_number": 0, "page_size": 10},
-        ,
+        json={"user_id": 1, "page_number": 0, "page_size": 10}
     )
 
     assert resp.status_code == 200

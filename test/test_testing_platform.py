@@ -40,16 +40,15 @@ def test_container_factory_creates_root_binding_by_default(db_session):
 def test_auth_token_factory_creates_valid_token(db_session):
     user = create_user()
 
-    token, headers = mocks.auth_token_factory(user, token=TEST_AUTH_TOKEN)
+    token = mocks.auth_token_factory(user, token=TEST_AUTH_TOKEN)
 
-    assert headers == {"token": TEST_AUTH_TOKEN}
     assert authentications_repo.is_token_valid(token) is True
 
 
 def test_auth_token_factory_can_create_expired_token(db_session):
     user = create_user()
 
-    token, _headers = mocks.auth_token_factory(user, expired=True, token="expired-platform-token")
+    token = mocks.auth_token_factory(user, expired=True, token="expired-platform-token")
 
     assert authentications_repo.is_token_valid(token) is False
 

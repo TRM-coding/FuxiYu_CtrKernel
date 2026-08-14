@@ -145,15 +145,15 @@ def get_verified_msg(recived_message:dict)->dict:
         # 提取加密消息和签名
         encrypted_msg = recived_message.get("message")
         signature_data = recived_message.get("signature")
-        
+
         if not encrypted_msg or not signature_data:
             return {}
-        
-        # 确保是 bytes 类型
+
+        # 与 Node 端保持一致：wire 格式是 base64 字符串，先解码再处理
         if isinstance(encrypted_msg, str):
-            encrypted_msg = encrypted_msg.encode()
+            encrypted_msg = base64.b64decode(encrypted_msg)
         if isinstance(signature_data, str):
-            signature_data = signature_data.encode()
+            signature_data = base64.b64decode(signature_data)
         
         # 解密消息
         decrypted_msg = decryption(encrypted_msg)

@@ -71,10 +71,12 @@ def test_ctrl_e2e_set_long_term_then_list_reflects_long_term_state(client, db_se
     create_auth(root, token=token)
     monkeypatch.setattr(container_tasks, "get_container_status", lambda *args, **kwargs: {"success": 1, "container_status": "online"})
 
+    # Werkzeug 新版 test client 忽略 environ_base 里的 HTTP_COOKIE，必须走 cookie jar
+    client.set_cookie("auth_token", token)
+
     set_resp = client.post(
         "/api/containers/set_long_term_container",
         json={"container_id": container.id, "is_long_term": True},
-        environ_base={"HTTP_COOKIE": f"auth_token={token}"}
     )
 
     assert set_resp.status_code == 200
@@ -82,7 +84,6 @@ def test_ctrl_e2e_set_long_term_then_list_reflects_long_term_state(client, db_se
     list_resp = client.post(
         "/api/containers/list_all_container_bref_information",
         json={"user_id": root.id, "page_number": 0, "page_size": 10},
-        environ_base={"HTTP_COOKIE": f"auth_token={token}"}
     )
 
     assert list_resp.status_code == 200
@@ -98,15 +99,16 @@ def test_ctrl_e2e_operator_can_set_long_term_but_limit_still_applies(client, db_
     token = "e2e-operator-token"
     create_auth(operator, token=token)
 
+    # Werkzeug 新版 test client 忽略 environ_base 里的 HTTP_COOKIE，必须走 cookie jar
+    client.set_cookie("auth_token", token)
+
     first = client.post(
         "/api/containers/set_long_term_container",
         json={"container_id": container.id, "is_long_term": True},
-        environ_base={"HTTP_COOKIE": f"auth_token={token}"}
     )
     second_resp = client.post(
         "/api/containers/set_long_term_container",
         json={"container_id": second.id, "is_long_term": True},
-        environ_base={"HTTP_COOKIE": f"auth_token={token}"}
     )
 
     assert first.status_code == 200

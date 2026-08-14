@@ -26,7 +26,6 @@ def test_set_long_term_api_maps_limit_to_409(client, monkeypatch):
     resp = client.post(
         "/api/containers/set_long_term_container",
         json={"container_id": 1, "is_long_term": True},
-        ,
     )
 
     assert resp.status_code == 409
@@ -44,7 +43,6 @@ def test_set_long_term_api_success(client, monkeypatch):
     resp = client.post(
         "/api/containers/set_long_term_container",
         json={"container_id": 1, "is_long_term": True},
-        ,
     )
 
     assert resp.status_code == 200
