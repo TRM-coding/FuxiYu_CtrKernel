@@ -485,7 +485,7 @@ def List_all_machine_bref_information(
                 """状态真正变化时记一条系统日志（前→后），未变化不记。"""
                 if before is not None and str(before).lower() == str(after).lower():
                     return
-                write_op_log(success=True, operator_user_id=None, operation=OperationType.UPDATE_MACHINE,
+                write_op_log(success=True, operator_user_id=None, operation=OperationType.MACHINE_STATUS_TRANSITION,
                              target_type="machine", target_id=mid,
                              detail={"before": {"machine_status": before}, "after": {"machine_status": after}})
 

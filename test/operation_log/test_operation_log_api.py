@@ -85,7 +85,7 @@ def test_stats_requires_operator(client, monkeypatch):
 def test_stats_shape(client, monkeypatch):
     _auth(monkeypatch)
     monkeypatch.setattr(operation_log_tasks, "operation_log_stats",
-                        lambda start=None, end=None: {
+                        lambda start=None, end=None, tz_offset_minutes=None: {
                             "total": 5, "succeeded": 4, "failed": 1,
                             "by_operation": {"create_container": 2},
                             "by_target_type": {"container": 3},

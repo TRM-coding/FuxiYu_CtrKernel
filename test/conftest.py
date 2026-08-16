@@ -1,3 +1,4 @@
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -39,6 +40,9 @@ def _safe_test_environment():
             old_env[key] = os.environ.get(key)
             os.environ[key] = value
         yield
+        # Windows：app 的 FileHandler 会一直持有 ctrl.log，先关掉全部日志
+        # 句柄再删临时目录，否则清理阶段报 PermissionError。
+        logging.shutdown()
         for key, old_value in old_env.items():
             if old_value is None:
                 os.environ.pop(key, None)

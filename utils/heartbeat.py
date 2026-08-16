@@ -26,7 +26,7 @@ def _log_machine_status_transition(mid: int, new_status: MachineStatus) -> None:
     new_str = new_status.value if hasattr(new_status, 'value') else str(new_status)
     if old_str is not None and str(old_str).lower() == str(new_str).lower():
         return
-    write_operation_log(success=True, operator_user_id=None, operation=OperationType.UPDATE_MACHINE,
+    write_operation_log(success=True, operator_user_id=None, operation=OperationType.MACHINE_STATUS_TRANSITION,
                         target_type="machine", target_id=mid,
                         detail={"before": {"machine_status": old_str}, "after": {"machine_status": new_str}})
 

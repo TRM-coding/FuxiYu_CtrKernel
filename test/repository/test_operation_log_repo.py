@@ -78,6 +78,8 @@ def test_serialize_shape(db_session):
 
 
 def test_stats_aggregation(db_session):
+    from datetime import datetime
+
     _seed()
     s = operation_log_repo.stats()
     assert s["total"] == 3
@@ -86,3 +88,8 @@ def test_stats_aggregation(db_session):
     assert s["by_operation"]["create_container"] == 1
     assert s["by_operation"]["pause_container"] == 1
     assert s["by_target_type"]["container"] == 3
+
+    # 按天聚合（时间轴用）
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    assert s["by_day"][today]["success"] == 2
+    assert s["by_day"][today]["failed"] == 1

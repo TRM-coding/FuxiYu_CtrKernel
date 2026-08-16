@@ -27,6 +27,17 @@ def test_login_user_not_found(db_session):
     assert token is None
 
 
+def test_login_with_email(db_session):
+    """登录字段允许填邮箱：用户名查不到时按 email 回退。"""
+    user = create_user(username="email_login_user", password="Password_123")
+
+    success, login_user, token = user_tasks.Login(user.email, "Password_123")
+
+    assert success is True
+    assert login_user.id == user.id
+    assert token
+
+
 def test_login_wrong_password_does_not_create_token(db_session):
     create_user(username="wrong_password_user", password="Password_123")
 

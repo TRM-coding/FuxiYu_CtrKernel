@@ -57,8 +57,10 @@ def Login(username: str, password: str, *, remember: bool = False):
                - 密码错误: (False, "password_incorrect", None)
                - 登录成功: (True, User对象, token)
     """
-    # 检查用户是否存在
+    # 检查用户是否存在：用户名优先；用户名规则不含 @，可无歧义地回退按邮箱查
     user = User.query.filter_by(username=username).first()
+    if not user:
+        user = User.query.filter_by(email=username).first()
     if not user:
         return False, "user_not_found", None
     

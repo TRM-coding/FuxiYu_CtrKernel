@@ -32,7 +32,9 @@ def list_operation_logs_api():
     """操作日志查询（operator-only）。
 
     query 参数：page / page_size / operation / target_type /
-    operator_user_id / success(true|false) / start / end
+    operator_user_id / success(true|false) / start / end /
+    tz_offset_minutes（分钟；start/end 按前端本地时间原样传，
+    由后端按该偏移解析成库内 naive UTC 口径）
     """
     denied = _require_operator()
     if denied:
@@ -48,6 +50,7 @@ def list_operation_logs_api():
             success=parse_bool(request.args.get("success")),
             start=request.args.get("start") or None,
             end=request.args.get("end") or None,
+            tz_offset_minutes=_int_or_none("tz_offset_minutes"),
         )
     except Exception as e:
         return jsonify({"success": 0, "message": f"query failed: {e}", "error_reason": "list_failed"}), 500
@@ -57,7 +60,11 @@ def list_operation_logs_api():
 
 @api_bp.get("/admin/operation_logs/stats")
 def operation_log_stats_api():
-    """操作日志统计（operator-only）。query 参数：start / end。"""
+    """操作日志统计（operator-only）。query 参数：start / end / tz_offset_minutes。
+
+    tz_offset_minutes 同时影响窗口解析与 by_day 分桶日（本地日），
+    使绿墙日期轴与前端 UTC+8 渲染一致。
+    """
     denied = _require_operator()
     if denied:
         return denied
@@ -66,6 +73,7 @@ def operation_log_stats_api():
         result = operation_log_tasks.operation_log_stats(
             start=request.args.get("start") or None,
             end=request.args.get("end") or None,
+            tz_offset_minutes=_int_or_none("tz_offset_minutes"),
         )
     except Exception as e:
         return jsonify({"success": 0, "message": f"stats failed: {e}", "error_reason": "list_failed"}), 500

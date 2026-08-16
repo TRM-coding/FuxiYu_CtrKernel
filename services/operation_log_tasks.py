@@ -1,11 +1,13 @@
 """操作日志服务层：蓝图 → service → repo 的分层入口。"""
 
+from ..repositories import machine_repo, user_repo, containers_repo, usercontainer_repo
 from ..repositories.operation_log_repo import (
     list_logs as _repo_list,
     serialize,
     stats as _repo_stats,
     write as _repo_write,
 )
+from ..constant import ROLE
 
 # TODO
 def _maybe_raise_alert(
@@ -77,8 +79,12 @@ def list_operation_logs(
     success: bool | None = None,
     start: str | None = None,
     end: str | None = None,
+    tz_offset_minutes: int | None = None,
 ) -> dict:
-    """分页查询 + 序列化，返回 {"logs": [...], "total_pages": n}。"""
+    """分页查询 + 序列化 + 目标关联，返回 {"logs": [...], "total_pages": n}。
+
+    start/end 按前端本地时间原样传，配合 tz_offset_minutes 由 repo 层解析。
+    """
     rows, total_pages = _repo_list(
         page=page,
         page_size=page_size,
@@ -88,13 +94,62 @@ def list_operation_logs(
         success=success,
         start=start,
         end=end,
+        tz_offset_minutes=tz_offset_minutes,
     )
+    logs = [serialize(r) for r in rows]
+    _enrich_targets(logs)
     return {
-        "logs": [serialize(r) for r in rows],
+        "logs": logs,
         "total_pages": total_pages,
     }
 
 
-def operation_log_stats(start: str | None = None, end: str | None = None) -> dict:
-    """时间范围内的统计聚合（图表用）。"""
-    return _repo_stats(start=start, end=end)
+def _enrich_targets(logs: list[dict]) -> None:
+    """给每条日志附加目标的可读信息（target_name；容器额外带 root_owner）。
+
+    批量取目标 id 后逐条查名（单页最多 page_size 条，N+1 可接受）。
+    目标已被删除时保持 None，前端回退显示 ID。
+    """
+    for r in logs:
+        r["target_name"] = None
+        r["root_owner"] = None
+
+    for r in logs:
+        try:
+            tid = r.get("target_id")
+            if tid is None:
+                continue
+            tt = r.get("target_type")
+            if tt == "machine":
+                m = machine_repo.get_by_id(tid)
+                if m:
+                    r["target_name"] = getattr(m, "machine_name", None)
+            elif tt == "container":
+                c = containers_repo.get_by_id(tid)
+                if c:
+                    r["target_name"] = getattr(c, "name", None)
+                bindings = usercontainer_repo.get_container_bindings(tid) or []
+                for b in bindings:
+                    role_raw = b.get("role")
+                    role_val = role_raw.value if hasattr(role_raw, "value") else str(role_raw or "")
+                    if str(role_val).upper() == ROLE.ROOT.value.upper():
+                        root_id = b.get("user_id")
+                        r["root_owner"] = user_repo.get_name_by_id(root_id) if root_id else None
+                        break
+            elif tt == "user":
+                r["target_name"] = user_repo.get_name_by_id(tid)
+        except Exception:
+            # 目标关联失败不影响日志主流程
+            continue
+
+
+def operation_log_stats(
+    start: str | None = None,
+    end: str | None = None,
+    tz_offset_minutes: int | None = None,
+) -> dict:
+    """时间范围内的统计聚合（图表用）。
+
+    tz_offset_minutes 影响窗口解析与 by_day 分桶口径（本地日），见 repo 层。
+    """
+    return _repo_stats(start=start, end=end, tz_offset_minutes=tz_offset_minutes)
