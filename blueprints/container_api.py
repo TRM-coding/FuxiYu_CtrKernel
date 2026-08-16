@@ -4,7 +4,9 @@ from flask import current_app
 from . import api_bp
 from ..services import container_tasks as container_service
 from ..utils.Container import Container_info
-from ..constant import ROLE
+from ..constant import ROLE, OperationType
+from ..services.operation_log_tasks import write_operation_log as write_op_log
+from ..utils.parsers import parse_bool
 from ..repositories import containers_repo, authentications_repo, user_repo
 from ..schemas.user_schema import user_schema, users_schema
 
@@ -32,6 +34,15 @@ REASON_STATUS_MAP = {
     'container_permission_denied': 403,
     'long_term_limit_reached': 409,
 }
+
+
+def _log_failure(*, operation, target_type, target_id, operator_user_id, error_reason, detail=None):
+    """蓝图层失败补记：task 层直接上抛/返回 False 的失败在这里统一记一条。"""
+    write_op_log(success=False, operator_user_id=operator_user_id, operation=operation,
+                 target_type=target_type, target_id=target_id,
+                 detail=detail or {}, error_reason=error_reason)
+
+
 @api_bp.post("/containers/create_container")
 def create_container_api():
     '''
@@ -100,10 +111,19 @@ def create_container_api():
                         container=container_obj,
                         public_key=public_key,
                         operator_user_id=operator_user_id):
+            _log_failure(operation=OperationType.CREATE_CONTAINER, target_type="container", target_id=0,
+                         operator_user_id=operator_user_id, error_reason="create_failed",
+                         detail={"machine_id": machine_id, "name": name})
             return jsonify({"success": 0, "message": "Failed to create container", "error_reason": "create_failed"}), 500
     except IntegrityError as e:
+        _log_failure(operation=OperationType.CREATE_CONTAINER, target_type="container", target_id=0,
+                     operator_user_id=operator_user_id, error_reason="duplicate_entry",
+                     detail={"machine_id": machine_id, "name": name})
         return jsonify({"success": 0, "message": f"Duplicate entry: {str(e.orig) if hasattr(e, 'orig') else str(e)}", "error_reason": "duplicate_entry"}), 409
     except container_service.NodeServiceError as e:
+        _log_failure(operation=OperationType.CREATE_CONTAINER, target_type="container", target_id=0,
+                     operator_user_id=operator_user_id, error_reason=getattr(e, 'reason', None),
+                     detail={"machine_id": machine_id, "name": name})
         status = REASON_STATUS_MAP.get(getattr(e, 'reason', None), 500)
         return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), status
     except Exception as e:
@@ -113,6 +133,9 @@ def create_container_api():
         payload = {"success": 0, "message": f"Internal error: {str(e)}"}
         if reason:
             payload['error_reason'] = reason
+        _log_failure(operation=OperationType.CREATE_CONTAINER, target_type="container", target_id=0,
+                     operator_user_id=operator_user_id, error_reason=reason or "internal_error",
+                     detail={"machine_id": machine_id, "name": name})
         return jsonify(payload), status
     return jsonify({"success": 1, "message": "Create container request sent"}), 200
     
@@ -140,9 +163,15 @@ def delete_container_api():
     request_user_id = authentications_repo.get_user_id_by_token(token)
     try:
         if not container_service.remove_container(container_id=container_id, operator_user_id=request_user_id):
+            _log_failure(operation=OperationType.DELETE_CONTAINER, target_type="container", target_id=container_id,
+                         operator_user_id=request_user_id, error_reason="delete_failed",
+                         detail={"container_id": container_id})
             return jsonify({"success": 0, "message": "Failed to delete container", "error_reason": "delete_failed"}), 500
     except container_service.NodeServiceError as e:
         # prefer remote's reason when available
+        _log_failure(operation=OperationType.DELETE_CONTAINER, target_type="container", target_id=container_id,
+                     operator_user_id=request_user_id, error_reason=getattr(e, 'reason', None),
+                     detail={"container_id": container_id})
         status = 404 if getattr(e, 'reason', None) == 'not_found' else 500
         return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), status
     except Exception as e:
@@ -151,6 +180,9 @@ def delete_container_api():
         payload = {"success": 0, "message": f"Internal error: {str(e)}"}
         if reason:
             payload['error_reason'] = reason
+        _log_failure(operation=OperationType.DELETE_CONTAINER, target_type="container", target_id=container_id,
+                     operator_user_id=request_user_id, error_reason=reason or "internal_error",
+                     detail={"container_id": container_id})
         return jsonify(payload), status
     return jsonify({"success": 1, "message": "Container deleted successfully"}), 200
 
@@ -168,8 +200,8 @@ def set_long_term_container_api():
         container_id = int(data.get("container_id"))
     except Exception:
         return jsonify({"success": 0, "message": "invalid container_id", "error_reason": "invalid_payload"}), 400
-    is_long_term = data.get("is_long_term")
-    if not isinstance(is_long_term, bool):
+    is_long_term = parse_bool(data.get("is_long_term"))
+    if is_long_term is None:
         return jsonify({"success": 0, "message": "is_long_term must be boolean", "error_reason": "invalid_payload"}), 400
 
     request_user_id = authentications_repo.get_user_id_by_token(token)
@@ -182,6 +214,9 @@ def set_long_term_container_api():
     except container_service.NodeServiceError as e:
         reason = getattr(e, "reason", None)
         status = REASON_STATUS_MAP.get(reason, 500)
+        _log_failure(operation=OperationType.SET_LONG_TERM, target_type="container", target_id=container_id,
+                     operator_user_id=request_user_id, error_reason=reason,
+                     detail={"container_id": container_id, "is_long_term": is_long_term})
         return jsonify({"success": 0, "message": str(e), "error_reason": reason}), status
     except Exception as e:
         reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
@@ -189,6 +224,9 @@ def set_long_term_container_api():
         payload = {"success": 0, "message": f"Internal error: {str(e)}"}
         if reason:
             payload["error_reason"] = reason
+        _log_failure(operation=OperationType.SET_LONG_TERM, target_type="container", target_id=container_id,
+                     operator_user_id=request_user_id, error_reason=reason or "internal_error",
+                     detail={"container_id": container_id, "is_long_term": is_long_term})
         return jsonify(payload), status
 
     return jsonify({"success": 1, **result}), 200
@@ -208,9 +246,15 @@ def start_container_api():
     request_user_id = authentications_repo.get_user_id_by_token(token)
     try:
         if not container_service.start_container(container_id=container_id, operator_user_id=request_user_id):
+            _log_failure(operation=OperationType.START_CONTAINER, target_type="container", target_id=container_id,
+                         operator_user_id=request_user_id, error_reason="start_failed",
+                         detail={"container_id": container_id})
             return jsonify({"success": 0, "message": "Failed to start container", "error_reason": "start_failed"}), 500
     except container_service.NodeServiceError as e:
         # propagate known node errors
+        _log_failure(operation=OperationType.START_CONTAINER, target_type="container", target_id=container_id,
+                     operator_user_id=request_user_id, error_reason=getattr(e, 'reason', None),
+                     detail={"container_id": container_id})
         return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), 500
     except Exception as e:
         reason = getattr(e, 'reason', None) or getattr(e, 'error_reason', None)
@@ -218,6 +262,9 @@ def start_container_api():
         payload = {"success": 0, "message": f"Internal error: {str(e)}"}
         if reason:
             payload['error_reason'] = reason
+        _log_failure(operation=OperationType.START_CONTAINER, target_type="container", target_id=container_id,
+                     operator_user_id=request_user_id, error_reason=reason or "internal_error",
+                     detail={"container_id": container_id})
         return jsonify(payload), status
     return jsonify({"success": 1, "message": "Container start request sent"}), 200
 
@@ -236,8 +283,14 @@ def stop_container_api():
     request_user_id = authentications_repo.get_user_id_by_token(token)
     try:
         if not container_service.stop_container(container_id=container_id, operator_user_id=request_user_id):
+            _log_failure(operation=OperationType.STOP_CONTAINER, target_type="container", target_id=container_id,
+                         operator_user_id=request_user_id, error_reason="stop_failed",
+                         detail={"container_id": container_id})
             return jsonify({"success": 0, "message": "Failed to stop container", "error_reason": "stop_failed"}), 500
     except container_service.NodeServiceError as e:
+        _log_failure(operation=OperationType.STOP_CONTAINER, target_type="container", target_id=container_id,
+                     operator_user_id=request_user_id, error_reason=getattr(e, 'reason', None),
+                     detail={"container_id": container_id})
         return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), 500
     except Exception as e:
         reason = getattr(e, 'reason', None) or getattr(e, 'error_reason', None)
@@ -245,6 +298,9 @@ def stop_container_api():
         payload = {"success": 0, "message": f"Internal error: {str(e)}"}
         if reason:
             payload['error_reason'] = reason
+        _log_failure(operation=OperationType.STOP_CONTAINER, target_type="container", target_id=container_id,
+                     operator_user_id=request_user_id, error_reason=reason or "internal_error",
+                     detail={"container_id": container_id})
         return jsonify(payload), status
     return jsonify({"success": 1, "message": "Container stop request sent"}), 200
 
@@ -263,8 +319,14 @@ def restart_container_api():
     request_user_id = authentications_repo.get_user_id_by_token(token)
     try:
         if not container_service.restart_container(container_id=container_id, operator_user_id=request_user_id):
+            _log_failure(operation=OperationType.RESTART_CONTAINER, target_type="container", target_id=container_id,
+                         operator_user_id=request_user_id, error_reason="restart_failed",
+                         detail={"container_id": container_id})
             return jsonify({"success": 0, "message": "Failed to restart container", "error_reason": "restart_failed"}), 500
     except container_service.NodeServiceError as e:
+        _log_failure(operation=OperationType.RESTART_CONTAINER, target_type="container", target_id=container_id,
+                     operator_user_id=request_user_id, error_reason=getattr(e, 'reason', None),
+                     detail={"container_id": container_id})
         return jsonify({"success": 0, "message": str(e), "error_reason": getattr(e, 'reason', None)}), 500
     except Exception as e:
         reason = getattr(e, 'reason', None) or getattr(e, 'error_reason', None)
@@ -272,6 +334,9 @@ def restart_container_api():
         payload = {"success": 0, "message": f"Internal error: {str(e)}"}
         if reason:
             payload['error_reason'] = reason
+        _log_failure(operation=OperationType.RESTART_CONTAINER, target_type="container", target_id=container_id,
+                     operator_user_id=request_user_id, error_reason=reason or "internal_error",
+                     detail={"container_id": container_id})
         return jsonify(payload), status
     return jsonify({"success": 1, "message": "Container restart request sent"}), 200
 

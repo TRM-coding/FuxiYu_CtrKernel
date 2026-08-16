@@ -1050,10 +1050,10 @@ class TestHandleFreezeEscalation:
             "get_container_root_owner_emails",
             lambda cid: []
         )
-        import sys
+        from ...services import operation_log_tasks
         monkeypatch.setattr(
-            sys.modules["FuxiYu_CtrKernel.repositories.operation_log_repo"],
-            "write",
+            operation_log_tasks,
+            "write_operation_log",
             lambda **kwargs: logs.append(kwargs)
         )
         monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)

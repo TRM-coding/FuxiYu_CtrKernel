@@ -5,6 +5,7 @@ from datetime import datetime
 from flask import Flask, current_app
 
 from ..models.container_ssh_login import ContainerSSHLogin
+from ..constant import OperationType
 from ..repositories import long_term_container_repo, container_cleanup_reminder_repo
 from ..services import container_tasks
 from ..utils.mail import send as send_mail
@@ -96,9 +97,9 @@ def _send_cleanup_reminders_if_needed(container_id: int, info: dict, app: Flask)
             if result.get("ok"):
                 if container_cleanup_reminder_repo.mark_sent(container_id, reminder_key, cleanup_at, email):
                     print(f"[container-cleanup] reminder sent container_id={container_id} threshold={reminder_key} to={email}")
-                    from ..repositories.operation_log_repo import write as write_op_log
-                    write_op_log(
-                        operation="send_cleanup_reminder",
+                    from ..services.operation_log_tasks import write_operation_log as write_op_log
+                    write_op_log(success=True,
+                        operation=OperationType.SEND_CLEANUP_REMINDER,
                         target_type="container",
                         target_id=container_id,
                         detail={

@@ -33,7 +33,7 @@ def test_add_machine_permission_missing_fields(client, monkeypatch):
 
 def test_add_machine_permission_machine_not_found(client, monkeypatch):
     _auth(monkeypatch)
-    monkeypatch.setattr(machine_api.machine_service, "Add_machine_permission", lambda machine_id, user_id: (_ for _ in ()).throw(ValueError("machine_not_found")))
+    monkeypatch.setattr(machine_api.machine_service, "Add_machine_permission", lambda machine_id, user_id, operator_user_id=None: (_ for _ in ()).throw(ValueError("machine_not_found")))
 
     resp = client.post("/api/machines/add_machine_permission", json={"machine_id": 1, "user_id": 2} )
 
@@ -43,7 +43,7 @@ def test_add_machine_permission_machine_not_found(client, monkeypatch):
 
 def test_add_machine_permission_user_not_found(client, monkeypatch):
     _auth(monkeypatch)
-    monkeypatch.setattr(machine_api.machine_service, "Add_machine_permission", lambda machine_id, user_id: (_ for _ in ()).throw(ValueError("user_not_found")))
+    monkeypatch.setattr(machine_api.machine_service, "Add_machine_permission", lambda machine_id, user_id, operator_user_id=None: (_ for _ in ()).throw(ValueError("user_not_found")))
 
     resp = client.post("/api/machines/add_machine_permission", json={"machine_id": 1, "user_id": 2} )
 
@@ -53,7 +53,7 @@ def test_add_machine_permission_user_not_found(client, monkeypatch):
 
 def test_add_machine_permission_success(client, monkeypatch):
     _auth(monkeypatch)
-    monkeypatch.setattr(machine_api.machine_service, "Add_machine_permission", lambda machine_id, user_id: True)
+    monkeypatch.setattr(machine_api.machine_service, "Add_machine_permission", lambda machine_id, user_id, operator_user_id=None: True)
 
     resp = client.post("/api/machines/add_machine_permission", json={"machine_id": 1, "user_id": 2} )
 

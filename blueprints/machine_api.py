@@ -68,7 +68,8 @@ def add_machine_api():
                                             disk_size=disk_size,
                                             max_memory_gb=max_memory_gb,
                                             max_gpu_number=max_gpu_number,
-                                            max_cpu_core_number=max_cpu_core_number)
+                                            max_cpu_core_number=max_cpu_core_number,
+                                            operator_user_id=authentications_repo.get_user_id_by_token(request.cookies.get("auth_token", "")))
     except IntegrityError as ie:
         # likely duplicate unique constraint (e.g. machine_name)
         return jsonify({"success": 0, "message": f"Duplicate entry: {str(ie.orig) if hasattr(ie, 'orig') else str(ie)}", "error_reason": "duplicate_entry"}), 409
@@ -104,7 +105,8 @@ def remove_machine_api():
     data = request.get_json() or {}
     data = request.get_json() or {}
     machine_ids = data.get("machine_ids", [])
-    success = machine_service.Remove_machine(machine_id=machine_ids)
+    success = machine_service.Remove_machine(machine_id=machine_ids,
+                                             operator_user_id=authentications_repo.get_user_id_by_token(request.cookies.get("auth_token", "")))
     if success:
         return jsonify({"success": 1, "message": "Machine(s) removed successfully"}), 200
     else:
@@ -150,7 +152,9 @@ def update_machine_api():
     machine_id = data.get("machine_id", 0)
     fields = data.get("fields", {})
     try:
-        success = machine_service.Update_machine(machine_id=machine_id, **fields)
+        success = machine_service.Update_machine(machine_id=machine_id,
+                                                 operator_user_id=authentications_repo.get_user_id_by_token(request.cookies.get("auth_token", "")),
+                                                 **fields)
     except Exception as e:
         err_reason = getattr(e, 'error_reason', None)
         if err_reason:
@@ -251,7 +255,8 @@ def add_machine_permission_api():
     if not machine_id or not user_id:
         return jsonify({"success": 0, "message": "machine_id and user_id required", "error_reason": "missing_fields"}), 400
     try:
-        machine_service.Add_machine_permission(machine_id, user_id)
+        machine_service.Add_machine_permission(machine_id, user_id,
+                                               operator_user_id=authentications_repo.get_user_id_by_token(token))
     except ValueError as e:
         reason = str(e)
         status = 404 if reason in ("machine_not_found", "user_not_found") else 400

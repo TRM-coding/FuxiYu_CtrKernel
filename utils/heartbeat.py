@@ -8,8 +8,27 @@ from ..config import CommsConfig
 from ..utils.CheckKeys import signature, encryption
 from ..repositories.containers_repo import update_container, list_containers as repo_list_containers
 from ..repositories.machine_repo import get_by_id as get_machine_by_id, update_machine
-from ..constant import ContainerStatus, MachineStatus
+from ..constant import ContainerStatus, MachineStatus, OperationType
+from ..services.operation_log_tasks import write_operation_log
 from flask import current_app
+
+
+def _log_machine_status_transition(mid: int, new_status: MachineStatus) -> None:
+    """机器状态真正变化时记一条系统日志（前→后），未变化不记。"""
+    try:
+        old = get_machine_by_id(mid)
+        if old is None:
+            return  # 机器已不存在（如过渡期间被删除），跳过记录
+        old_val = getattr(old, 'machine_status', None)
+        old_str = old_val.value if hasattr(old_val, 'value') else str(old_val) if old_val is not None else None
+    except Exception:
+        return
+    new_str = new_status.value if hasattr(new_status, 'value') else str(new_status)
+    if old_str is not None and str(old_str).lower() == str(new_str).lower():
+        return
+    write_operation_log(success=True, operator_user_id=None, operation=OperationType.UPDATE_MACHINE,
+                        target_type="machine", target_id=mid,
+                        detail={"before": {"machine_status": old_str}, "after": {"machine_status": new_str}})
 
 
 def send(machine_ip: str, endpoint: str, payload: dict, timeout: float = 5.0):
@@ -198,8 +217,10 @@ def start_machine_maintenance_transition_heartbeat(machine_id: int, timeout: int
         try:
             if app is not None:
                 with app.app_context():
+                    _log_machine_status_transition(mid, status)
                     update_machine(mid, machine_status=status)
             else:
+                _log_machine_status_transition(mid, status)
                 update_machine(mid, machine_status=status)
         except Exception:
             pass
