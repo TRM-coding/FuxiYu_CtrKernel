@@ -1,5 +1,8 @@
 from flask import current_app
 
+import threading
+import time
+
 from ..repositories.machine_repo import *
 from pydantic import BaseModel
 from typing import Optional
@@ -106,6 +109,39 @@ def is_machine_online_remote(machine_id: int, timeout: float = 2.0) -> bool:
         ms = (j.get('machine_status') or '').lower()
         return ms == 'online'
     return False
+
+
+# ── 机器可达性统一入口（TTL 缓存） ──────────────────────────
+# 所有需要"机器现在通不通"的地方都走这里（容器展示态派生、操作前置检查等）。
+# 唯一做 HTTP 探测的地方；WSS 落地后此入口改读连接状态，调用方无感。
+_reach_cache: dict[int, tuple[float, bool]] = {}
+_reach_cache_lock = threading.Lock()
+REACH_CACHE_TTL_SEC = 20.0
+
+
+def _peek_machine_reachable(machine_id: int) -> bool | None:
+    """缓存未过期返回结果，否则 None。"""
+    now = time.time()
+    with _reach_cache_lock:
+        hit = _reach_cache.get(machine_id)
+    if hit and (now - hit[0]) < REACH_CACHE_TTL_SEC:
+        return hit[1]
+    return None
+
+
+def _set_machine_reachable(machine_id: int, ok: bool) -> None:
+    with _reach_cache_lock:
+        _reach_cache[machine_id] = (time.time(), bool(ok))
+
+
+def get_machine_reachable(machine_id: int, timeout: float = 2.0) -> bool:
+    """机器可达性统一入口：命中 TTL 缓存零 HTTP，未命中探测一次并写缓存。"""
+    cached = _peek_machine_reachable(machine_id)
+    if cached is not None:
+        return cached
+    ok = is_machine_online_remote(machine_id, timeout=timeout)
+    _set_machine_reachable(machine_id, ok)
+    return ok
 
 #######################################
 #######################################
@@ -402,8 +438,13 @@ def List_all_machine_bref_information(
     _probe_results: dict[int, bool] = {}
     if machines:
         if use_parallel and _app is not None:
+            # 缓存新鲜则零探测，否则并发探活
             _callables = [
-                lambda mid=m.id, a=_app: _node_probe_machine(mid, _app=a)
+                lambda mid=m.id, a=_app: (
+                    _peek_machine_reachable(mid)
+                    if _peek_machine_reachable(mid) is not None
+                    else _node_probe_machine(mid, _app=a)
+                )
                 for m in machines
             ]
             _raw = parallel_node_calls(_callables, timeout_per_call=3.0)
@@ -411,7 +452,11 @@ def List_all_machine_bref_information(
                 _probe_results[m.id] = r if isinstance(r, bool) else False
         else:
             for m in machines:
-                _probe_results[m.id] = _node_probe_machine(m.id)
+                cached = _peek_machine_reachable(m.id)
+                _probe_results[m.id] = cached if cached is not None else _node_probe_machine(m.id)
+    # 写透可达性缓存：容器 getter 的派生展示态读它
+    for m in machines:
+        _set_machine_reachable(m.id, bool(_probe_results.get(m.id, False)))
 
     # --- Phase B: 逐条同步（串行，避免 DB session 竞争） ---
     for machine in machines:

@@ -17,7 +17,7 @@ from ..repositories import containers_repo, machine_repo, machine_permission_rep
 from .operation_log_tasks import write_operation_log as write_op_log
 from ..repositories import containers_repo as container_repo
 from ..repositories import container_ssh_login_repo
-from .machine_tasks import is_machine_online_remote
+from .machine_tasks import is_machine_online_remote, get_machine_reachable
 from ..repositories.machine_repo import *
 from ..repositories.user_repo import *
 from ..utils.CheckKeys import *
@@ -259,6 +259,25 @@ def get_container_status(machine_ip: str, container_name: str, timeout: float = 
     return {"error": str(last_exc) if last_exc is not None else "unknown error"}
 
 
+# 容器展示态派生：宿主机不可达时覆盖为 host_offline（仅展示，DB 状态不动）
+DISPLAY_STATUS_HOST_OFFLINE = "host_offline"
+
+
+def _derive_display_status(container_status, machine_id: int | None) -> str:
+    """由"容器 DB 状态 + 机器可达性"派生展示态。
+
+    规则：failed 是终态诊断不覆盖；机器不可达则一律 host_offline。
+    """
+    status_str = container_status.value if hasattr(container_status, 'value') else str(container_status)
+    if str(status_str).lower() == ContainerStatus.FAILED.value:
+        return status_str
+    if machine_id is None:
+        return status_str
+    if not get_machine_reachable(machine_id):
+        return DISPLAY_STATUS_HOST_OFFLINE
+    return status_str
+
+
 def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -> str | None:
     """
     通过中心端向集群客户端请求容器上次 SSH 登录时间。
@@ -486,6 +505,7 @@ class container_bref_information(BaseModel):
     machine_ip:str
     port:int
     container_status:str
+    display_status: str | None = None  # 派生展示态（如 host_offline），DB 不落库
     accounts: list[dict] = Field(default_factory=list)
     is_long_term: bool = False
     long_term_container_can_enable: bool = True
@@ -1456,6 +1476,7 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         "machine_id": container.machine_id,
         "machine_ip": get_machine_ip_by_id(container.machine_id),
         "container_status": container.container_status.value,
+        "display_status": _derive_display_status(container.container_status, container.machine_id),
         "memory_gb": container.memory_gb,
         "shared_gb": container.shared_gb,
         "gpu_number": container.gpu_number,
@@ -1658,6 +1679,7 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
             machine_ip=machine_ip,
             port=container.port,
             container_status=container.container_status.value,
+            display_status=_derive_display_status(container.container_status, container.machine_id),
             accounts=[
                 {"user_id": binding.get('user_id'), "username": binding.get("username"), "role": (ROLE(binding.get('role')).value if binding.get('role') is not None else None)}
                 for binding in bindings
