@@ -8,6 +8,7 @@
 import json
 import threading
 import time
+import logging
 from datetime import datetime, timedelta
 from flask import Flask, current_app
 
@@ -18,6 +19,8 @@ from ..services.container_tasks import (
     send,
     signature,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def run_mount_cleanup_once() -> None:
@@ -34,16 +37,13 @@ def run_mount_cleanup_once() -> None:
     if not rows:
         return
 
-    print(f"[mount-cleanup] found {len(rows)} pending mount(s) older than {after_days} days")
+    logger.info("[mount-cleanup] found %s pending mount(s) older than %s days", len(rows), after_days)
 
     for row in rows:
         try:
             machine_ip = machine_repo.get_machine_ip_by_id(row.machine_id)
             if not machine_ip:
-                print(
-                    f"[mount-cleanup] skip row {row.id}: "
-                    f"machine {row.machine_id} not found"
-                )
+                logger.warning("[mount-cleanup] skip row %s: machine %s not found", row.id, row.machine_id)
                 continue
 
             url = get_full_url(machine_ip, "/clean_mount")
@@ -54,16 +54,12 @@ def run_mount_cleanup_once() -> None:
 
             if isinstance(res, dict) and res.get("success") == 1:
                 container_mount_cleanup_repo.mark_cleaned(row.id)
-                print(
-                    f"[mount-cleanup] cleaned row {row.id}: "
-                    f"container={row.container_name} path={row.mount_path}"
-                )
+                logger.info("[mount-cleanup] cleaned row %s: container=%s path=%s",
+                            row.id, row.container_name, row.mount_path)
             else:
-                print(
-                    f"[mount-cleanup] node rejected row {row.id}: {res}"
-                )
+                logger.error("[mount-cleanup] node rejected row %s: %s", row.id, res)
         except Exception as e:
-            print(f"[mount-cleanup] failed row {row.id}: {e}")
+            logger.error("[mount-cleanup] failed row %s: %s", row.id, e)
 
 
 def start_mount_cleanup_scheduler(
@@ -95,7 +91,7 @@ def start_mount_cleanup_scheduler(
                 with app.app_context():
                     run_mount_cleanup_once()
             except Exception as e:
-                print(f"[mount-cleanup] periodic run failed: {e}")
+                logger.error("[mount-cleanup] periodic run failed: %s", e)
 
     t = threading.Thread(target=_worker, daemon=True, name="mount-cleanup")
     t.start()

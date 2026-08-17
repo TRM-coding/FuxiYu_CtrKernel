@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+import logging
 from datetime import datetime, timedelta
 from flask import Flask, current_app
 
@@ -8,6 +9,8 @@ from ..repositories import containers_repo
 from ..constant import OperationType
 from ..services import container_tasks
 from ..utils.parallel import parallel_node_calls
+
+logger = logging.getLogger(__name__)
 
 
 def check_all_containers_disk_usage_once(page_size: int = 200) -> None:
@@ -38,10 +41,8 @@ def check_all_containers_disk_usage_once(page_size: int = 200) -> None:
             _raw = parallel_node_calls(_callables, timeout_per_call=22.0)
             for c, r in zip(containers, _raw):
                 if isinstance(r, Exception):
-                    print(
-                        f"[disk-check] failed for container id={getattr(c, 'id', '?')} "
-                        f"name={getattr(c, 'name', '?')}: {r}"
-                    )
+                    logger.warning("[disk-check] failed for container id=%s name=%s: %s",
+                                   getattr(c, 'id', '?'), getattr(c, 'name', '?'), r)
                 elif isinstance(r, dict):
                     _evaluate_limits(c, r)
         else:
@@ -51,10 +52,8 @@ def check_all_containers_disk_usage_once(page_size: int = 200) -> None:
                     if isinstance(usage, dict):
                         _evaluate_limits(c, usage)
                 except Exception as e:
-                    print(
-                        f"[disk-check] failed for container id={getattr(c, 'id', '?')} "
-                        f"name={getattr(c, 'name', '?')}: {e}"
-                    )
+                    logger.warning("[disk-check] failed for container id=%s name=%s: %s",
+                                   getattr(c, 'id', '?'), getattr(c, 'name', '?'), e)
 
         if len(containers) < page_size:
             break
@@ -98,7 +97,7 @@ def _evaluate_limits(container, usage: dict) -> None:
 
     if disk_size_gb <= 0:
         # 无磁盘限额配置，跳过评估
-        print(f"[disk-check] skip container_id={container.id}: machine disk_size_gb not set")
+        logger.info("[disk-check] skip container_id=%s: machine disk_size_gb not set", container.id)
         return
 
     limit_bytes = int(disk_size_gb * 1024**3)
@@ -127,7 +126,7 @@ def _evaluate_limits(container, usage: dict) -> None:
             bind_mount_path=bind_mount_path,
         )
     except Exception as e:
-        print(f"[disk-check] failed to persist disk usage for container {container.id}: {e}")
+        logger.warning("[disk-check] failed to persist disk usage for container %s: %s", container.id, e)
 
     log_msg = (
         f"[disk-check] container_id={container.id} name={getattr(container, 'name', '?')} "
@@ -142,10 +141,8 @@ def _evaluate_limits(container, usage: dict) -> None:
     # 方便在关闭响应的情况下从日志验证行为，无影响上线。
     from ..repositories.long_term_container_repo import is_long_term
     if not is_long_term(container.id):
-        print(
-            f"[disk-check] container {container.id} "
-            f"({getattr(container, 'name', '?')}) is not long-term, skip response"
-        )
+        logger.info("[disk-check] container %s (%s) is not long-term, skip response",
+                    container.id, getattr(container, 'name', '?'))
         response_enabled = False
 
     # ── 重置检查（所有容器，不区分长期/短期）──
@@ -153,31 +150,28 @@ def _evaluate_limits(container, usage: dict) -> None:
     reset_pct = _app.config.get("CONTAINER_DISK_FREEZE_RESET_PERCENT", 95)
     if usage_percent < reset_pct:
         if freeze_state_repo.reset(container.id):
-            print(
-                f"[disk-check] freeze state reset: container {container.id} "
-                f"({getattr(container, 'name', '?')}) "
-                f"usage {usage_percent:.1f}% < {reset_pct}%"
-            )
-            print(f"[disk-check] OK: {log_msg}")
+            logger.info("[disk-check] freeze state reset: container %s (%s) usage %.1f%% < %s%%",
+                        container.id, getattr(container, 'name', '?'), usage_percent, reset_pct)
+            logger.info("[disk-check] OK: %s", log_msg)
             return  # 有冻结记录且容量回落，重置后不进入任何超限判断
         # 无冻结记录 → 继续正常流程（仍可能触发 soft limit）
 
     if usage_percent >= hard_limit:
-        print(f"[disk-check] HARD LIMIT exceeded: {log_msg}")
+        logger.error("[disk-check] HARD LIMIT exceeded: %s", log_msg)
         if response_enabled:
             _handle_hard_limit_with_escalation(container, usage, _app)
         else:
             # 短期容器：不做动作，但检查是否有遗留冻结状态（来自曾是长期的时期）
             _log_freeze_state_if_exists(container)
-            print(f"[disk-check] response disabled, skip action for container {container.id}")
+            logger.info("[disk-check] response disabled, skip action for container %s", container.id)
     elif usage_percent >= soft_limit:
-        print(f"[disk-check] SOFT LIMIT exceeded: {log_msg}")
+        logger.warning("[disk-check] SOFT LIMIT exceeded: %s", log_msg)
         if response_enabled:
             _handle_soft_limit(container, usage, _app)
         else:
-            print(f"[disk-check] response disabled, skip action for container {container.id}")
+            logger.info("[disk-check] response disabled, skip action for container %s", container.id)
     else:
-        print(f"[disk-check] OK: {log_msg}")
+        logger.info("[disk-check] OK: %s", log_msg)
 
 
 def _fmt_bytes(b: int) -> str:
@@ -209,7 +203,7 @@ def _handle_soft_limit(container, usage: dict, app) -> None:
         emails = []
 
     if not emails:
-        print(f"[disk-check] soft limit: no owner email for container {container.id}")
+        logger.warning("[disk-check] soft limit: no owner email for container %s", container.id)
         return
 
     container_data = usage.get("container", {})
@@ -227,9 +221,9 @@ def _handle_soft_limit(container, usage: dict, app) -> None:
     for email in emails:
         try:
             send_mail(to=email, subject=subject, content=content)
-            print(f"[disk-check] soft limit email sent to {email} for container {container.id}")
+            logger.info("[disk-check] soft limit email sent to %s for container %s", email, container.id)
         except Exception as e:
-            print(f"[disk-check] soft limit email failed to {email}: {e}")
+            logger.warning("[disk-check] soft limit email failed to %s: %s", email, e)
     last_sent[last_key] = now_ts
     if app:
         app._disk_check_cache = last_sent
@@ -269,9 +263,9 @@ def _handle_hard_limit(container, usage: dict, app) -> None:
         for e in emails:
             try:
                 send_mail(to=e, subject=subject, content=content)
-                print(f"[disk-check] hard limit email sent to {e} for container {container.id}")
+                logger.info("[disk-check] hard limit email sent to %s for container %s", e, container.id)
             except Exception as ex:
-                print(f"[disk-check] hard limit email failed to {e}: {ex}")
+                logger.warning("[disk-check] hard limit email failed to %s: %s", e, ex)
         last_sent[last_key] = now_ts
         if app:
             app._disk_check_cache = last_sent
@@ -281,7 +275,7 @@ def _handle_hard_limit(container, usage: dict, app) -> None:
         status = getattr(container, 'container_status', None)
         status_val = status.value if hasattr(status, 'value') else str(status)
         if str(status_val).lower() not in ('online',):
-            print(f"[disk-check] pause skipped for container {container.id}: status={status_val}")
+            logger.info("[disk-check] pause skipped for container %s: status=%s", container.id, status_val)
             return
         from ..repositories.machine_repo import get_machine_ip_by_id
         from ..constant import ContainerStatus
@@ -291,7 +285,7 @@ def _handle_hard_limit(container, usage: dict, app) -> None:
         sig = container_tasks.signature(payload)
         enc = container_tasks.encryption(payload)
         res = container_tasks.send(enc, sig, url, timeout=10.0)
-        print(f"[disk-check] pause result for container {container.id}: {res}")
+        logger.debug("[disk-check] pause result for container %s: %s", container.id, res)
         # 更新 DB 状态为 paused，防止并行检查重复 pause
         if isinstance(res, dict) and res.get("success") == 1:
             containers_repo.update_container(container.id, commit=True,
@@ -301,7 +295,7 @@ def _handle_hard_limit(container, usage: dict, app) -> None:
                      target_id=container.id,
                      detail={"reason": "disk_hard_limit", "usage": f"{total_gb:.1f}GB/{limit_gb:.1f}GB"})
     except Exception as e:
-        print(f"[disk-check] pause failed for container {container.id}: {e}")
+        logger.error("[disk-check] pause failed for container %s: %s", container.id, e)
 
 
 def _handle_hard_limit_with_escalation(container, usage: dict, app) -> None:
@@ -317,20 +311,15 @@ def _handle_hard_limit_with_escalation(container, usage: dict, app) -> None:
 
     # ── 宽限期检查 ──
     if freeze_state.grace_until and datetime.utcnow() < freeze_state.grace_until:
-        print(
-            f"[disk-check] in grace period until {freeze_state.grace_until}, "
-            f"skip action for container {container.id} "
-            f"({getattr(container, 'name', '?')})"
-        )
+        logger.info("[disk-check] in grace period until %s, skip action for container %s (%s)",
+                    freeze_state.grace_until, container.id, getattr(container, 'name', '?'))
         return
 
     # 宽限期已过期，清除
     if freeze_state.grace_until:
         freeze_state_repo.clear_grace(container.id)
-        print(
-            f"[disk-check] grace period expired for container {container.id} "
-            f"({getattr(container, 'name', '?')})"
-        )
+        logger.info("[disk-check] grace period expired for container %s (%s)",
+                    container.id, getattr(container, 'name', '?'))
 
     # ── 升级判断 ──
     days_frozen = (datetime.utcnow() - freeze_state.first_frozen_at).days
@@ -356,12 +345,8 @@ def _log_freeze_state_if_exists(container) -> None:
             grace_info = ", grace active"
         else:
             grace_info = ", grace expired"
-    print(
-        f"[disk-check] container {container.id} "
-        f"({getattr(container, 'name', '?')}) has legacy freeze state "
-        f"(frozen {days_frozen}d ago{grace_info}) "
-        f"but is not long-term, skip action"
-    )
+    logger.warning("[disk-check] container %s (%s) has legacy freeze state (frozen %sd ago%s) but is not long-term, skip action",
+                   container.id, getattr(container, 'name', '?'), days_frozen, grace_info)
 
 
 def _handle_freeze_escalation(container, usage: dict, app, days_frozen: int) -> None:
@@ -399,9 +384,9 @@ def _handle_freeze_escalation(container, usage: dict, app, days_frozen: int) -> 
             for e in emails:
                 try:
                     send_mail(to=e, subject=subject, content=content)
-                    print(f"[disk-check] escalation email sent to {e} for container {container.id}")
+                    logger.info("[disk-check] escalation email sent to %s for container %s", e, container.id)
                 except Exception as ex:
-                    print(f"[disk-check] escalation email failed to {e}: {ex}")
+                    logger.warning("[disk-check] escalation email failed to %s: %s", e, ex)
             last_sent[last_key] = now_ts
             if app:
                 app._disk_check_cache = last_sent
@@ -409,10 +394,8 @@ def _handle_freeze_escalation(container, usage: dict, app, days_frozen: int) -> 
     # ── 删除容器 ──
     try:
         container_tasks.remove_container(container.id)
-        print(
-            f"[disk-check] escalation: removed container {container.id} "
-            f"({getattr(container, 'name', '?')}) after {days_frozen}d frozen"
-        )
+        logger.warning("[disk-check] escalation: removed container %s (%s) after %sd frozen",
+                       container.id, getattr(container, 'name', '?'), days_frozen)
         from ..services.operation_log_tasks import write_operation_log as write_op_log
         write_op_log(success=True,
             operation=OperationType.REMOVE_CONTAINER,
@@ -428,9 +411,7 @@ def _handle_freeze_escalation(container, usage: dict, app, days_frozen: int) -> 
         # 升级删除：立刻清理 mount（宽限期已是最后机会）
         _clean_mount_immediately(container)
     except Exception as e:
-        print(
-            f"[disk-check] escalation remove failed for container {container.id}: {e}"
-        )
+        logger.error("[disk-check] escalation remove failed for container %s: %s", container.id, e)
 
 
 def _clean_mount_immediately(container) -> None:
@@ -441,10 +422,8 @@ def _clean_mount_immediately(container) -> None:
     """
     bind_mount = getattr(container, 'bind_mount_path', None)
     if not bind_mount:
-        print(
-            f"[disk-check] escalation: no bind_mount_path for container "
-            f"{getattr(container, 'id', '?')}, skip mount cleanup"
-        )
+        logger.info("[disk-check] escalation: no bind_mount_path for container %s, skip mount cleanup",
+                    getattr(container, 'id', '?'))
         return
 
     try:
@@ -461,7 +440,7 @@ def _clean_mount_immediately(container) -> None:
             cleaned_at=dt.utcnow(),
         )
     except Exception as e:
-        print(f"[disk-check] escalation: failed to record mount cleanup for {container.id}: {e}")
+        logger.warning("[disk-check] escalation: failed to record mount cleanup for %s: %s", container.id, e)
 
     try:
         from ..repositories.machine_repo import get_machine_ip_by_id
@@ -471,15 +450,11 @@ def _clean_mount_immediately(container) -> None:
         sig = container_tasks.signature(payload)
         enc = container_tasks.encryption(payload)
         res = container_tasks.send(enc, sig, url, timeout=10.0)
-        print(
-            f"[disk-check] escalation mount cleanup for container {container.id} "
-            f"path={bind_mount}: {res}"
-        )
+        logger.debug("[disk-check] escalation mount cleanup for container %s path=%s: %s",
+                     container.id, bind_mount, res)
     except Exception as e:
-        print(
-            f"[disk-check] escalation mount cleanup failed for container "
-            f"{container.id} path={bind_mount}: {e}"
-        )
+        logger.error("[disk-check] escalation mount cleanup failed for container %s path=%s: %s",
+                     container.id, bind_mount, e)
 
 
 def _get_limit_gb(container, app) -> float:
@@ -523,7 +498,7 @@ def start_container_disk_check_scheduler(
                 with app.app_context():
                     check_all_containers_disk_usage_once()
             except Exception as e:
-                print(f"[disk-check] periodic run failed: {e}")
+                logger.error("[disk-check] periodic run failed: %s", e)
 
     t = threading.Thread(target=_worker, daemon=True, name="container-disk-check")
     t.start()

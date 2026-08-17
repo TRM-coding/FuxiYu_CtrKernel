@@ -106,8 +106,7 @@ def test_Create_container():
                 cpu_number=2,
                 memory=2048
             ),
-            public_key="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7...",
-            debug=True
+            public_key="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7..."
         )
 
         assert result is True, "Create_container 应该返回 True"
@@ -222,7 +221,7 @@ def test_remove_container():
         assert user_container_count_before > 0, "测试前应该有用户容器绑定存在"
         
         try:
-            result = remove_container(container_id=container_id, debug=True, operator_user_id=user.id)
+            result = remove_container(container_id=container_id, operator_user_id=user.id)
             assert result is True or result is False, "remove_container 应该返回布尔值"
         except NodeServiceError as e:
             print(f"NodeServiceError (expected in test environment): {e}")
@@ -328,7 +327,6 @@ def test_add_collaborator():
                 container_id=container.id,
                 user_id=collaborator_user.id,
                 role=ROLE.COLLABORATOR,
-                debug=True,
                 operator_user_id=owner_user.id
             )
             if result is not None:

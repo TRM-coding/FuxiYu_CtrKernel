@@ -1,10 +1,13 @@
 import threading
 import time
+import logging
 from flask import Flask, current_app
 
 from ..repositories import containers_repo
 from ..services import container_tasks
 from ..utils.parallel import parallel_node_calls
+
+logger = logging.getLogger(__name__)
 
 
 def refresh_all_containers_last_ssh_login_time_once(page_size: int = 200) -> None:
@@ -35,19 +38,15 @@ def refresh_all_containers_last_ssh_login_time_once(page_size: int = 200) -> Non
             _raw = parallel_node_calls(_callables, timeout_per_call=8.0)
             for c, r in zip(containers, _raw):
                 if isinstance(r, Exception):
-                    print(
-                        f"[ssh-refresh] failed for container id={getattr(c, 'id', '?')} "
-                        f"name={getattr(c, 'name', '?')}: {r}"
-                    )
+                    logger.warning("[ssh-refresh] failed for container id=%s name=%s: %s",
+                                   getattr(c, 'id', '?'), getattr(c, 'name', '?'), r)
         else:
             for c in containers:
                 try:
                     container_tasks.get_container_last_ssh_login_time(c.id)
                 except Exception as e:
-                    print(
-                        f"[ssh-refresh] failed for container id={getattr(c, 'id', '?')} "
-                        f"name={getattr(c, 'name', '?')}: {e}"
-                    )
+                    logger.warning("[ssh-refresh] failed for container id=%s name=%s: %s",
+                                   getattr(c, 'id', '?'), getattr(c, 'name', '?'), e)
 
         if len(containers) < page_size:
             break
@@ -94,7 +93,7 @@ def start_container_ssh_refresh_scheduler(
                 # 磁盘检测独立线程并行，不阻塞 SSH 刷新
                 threading.Thread(target=_run_disk_check, args=(app,), daemon=True).start()
             except Exception as e:
-                print(f"[ssh-refresh] periodic run failed: {e}")
+                logger.error("[ssh-refresh] periodic run failed: %s", e)
 
     t = threading.Thread(target=_worker, daemon=True, name="container-ssh-refresh")
     t.start()
@@ -110,4 +109,4 @@ def _run_disk_check(app):
             from .container_disk_check_task import check_all_containers_disk_usage_once
             check_all_containers_disk_usage_once()
     except Exception as e:
-        print(f"[ssh-refresh] disk check failed: {e}")
+        logger.error("[ssh-refresh] disk check failed: %s", e)

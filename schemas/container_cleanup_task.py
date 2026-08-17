@@ -1,6 +1,7 @@
 import threading
 import time
 import json
+import logging
 from datetime import datetime
 from flask import Flask, current_app
 
@@ -9,6 +10,8 @@ from ..constant import OperationType
 from ..repositories import long_term_container_repo, container_cleanup_reminder_repo
 from ..services import container_tasks
 from ..utils.mail import send as send_mail
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_reminder_hours(raw: str | None) -> list[int]:
@@ -74,7 +77,7 @@ def _send_cleanup_reminders_if_needed(container_id: int, info: dict, app: Flask)
         )
         recipients = container_tasks.get_container_root_owner_emails(container_id)
         if not recipients:
-            print(f"[container-cleanup] reminder skipped for container_id={container_id}: no root owner email")
+            logger.info("[container-cleanup] reminder skipped for container_id=%s: no root owner email", container_id)
             return
 
         label = _format_hours(hours)
@@ -96,7 +99,7 @@ def _send_cleanup_reminders_if_needed(container_id: int, info: dict, app: Flask)
             result = send_mail(to=email, subject=subject, content=content)
             if result.get("ok"):
                 if container_cleanup_reminder_repo.mark_sent(container_id, reminder_key, cleanup_at, email):
-                    print(f"[container-cleanup] reminder sent container_id={container_id} threshold={reminder_key} to={email}")
+                    logger.info("[container-cleanup] reminder sent container_id=%s threshold=%s to=%s", container_id, reminder_key, email)
                     from ..services.operation_log_tasks import write_operation_log as write_op_log
                     write_op_log(success=True,
                         operation=OperationType.SEND_CLEANUP_REMINDER,
@@ -109,9 +112,9 @@ def _send_cleanup_reminders_if_needed(container_id: int, info: dict, app: Flask)
                         },
                     )
                 else:
-                    print(f"[container-cleanup] reminder duplicate container_id={container_id} threshold={reminder_key} to={email} (already recorded)")
+                    logger.warning("[container-cleanup] reminder duplicate container_id=%s threshold=%s to=%s (already recorded)", container_id, reminder_key, email)
             else:
-                print(f"[container-cleanup] reminder failed container_id={container_id} threshold={reminder_key} to={email}: {result}")
+                logger.error("[container-cleanup] reminder failed container_id=%s threshold=%s to=%s: %s", container_id, reminder_key, email, result)
 
 
 def cleanup_expired_containers_once(cleanup_after_days: int) -> None:
@@ -129,7 +132,7 @@ def cleanup_expired_containers_once(cleanup_after_days: int) -> None:
             info = container_tasks.build_cleanup_info(rec.last_ssh_login_time, cleanup_after_days)
             cid = int(rec.container_id)
             if long_term_container_repo.is_long_term(cid):
-                print(f"[container-cleanup] container_id={cid} is long-term, skipping cleanup")
+                logger.info("[container-cleanup] container_id=%s is long-term, skipping cleanup", cid)
                 continue
             info_with_record = {
                 **info,
@@ -150,21 +153,17 @@ def cleanup_expired_containers_once(cleanup_after_days: int) -> None:
                     **info_with_record,
                 },
             )
-            print(
-                "[container-cleanup] restore_snapshot="
-                + json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
-            )
-            print(f"[container-cleanup] container_id={cid} due for cleanup, removing...")
+            logger.debug("[container-cleanup] restore_snapshot=%s",
+                         json.dumps(snapshot, ensure_ascii=False, sort_keys=True))
+            logger.info("[container-cleanup] container_id=%s due for cleanup, removing...", cid)
             ok = container_tasks.remove_container(container_id=cid)
             if ok:
-                print(f"[container-cleanup] removed container_id={cid}")
+                logger.info("[container-cleanup] removed container_id=%s", cid)
             else:
-                print(f"[container-cleanup] remove returned False for container_id={cid}")
+                logger.warning("[container-cleanup] remove returned False for container_id=%s", cid)
         except Exception as e:
-            print(
-                f"[container-cleanup] failed for machine_id={getattr(rec, 'machine_id', '?')} "
-                f"container_id={getattr(rec, 'container_id', '?')}: {e}"
-            )
+            logger.error("[container-cleanup] failed for machine_id=%s container_id=%s: %s",
+                         getattr(rec, 'machine_id', '?'), getattr(rec, 'container_id', '?'), e)
 
 
 def start_container_cleanup_scheduler(
@@ -199,7 +198,7 @@ def start_container_cleanup_scheduler(
                     days = int(app.config.get("CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
                     cleanup_expired_containers_once(days)
             except Exception as e:
-                print(f"[container-cleanup] periodic run failed: {e}")
+                logger.error("[container-cleanup] periodic run failed: %s", e)
 
     t = threading.Thread(target=_worker, daemon=True, name="container-cleanup")
     t.start()

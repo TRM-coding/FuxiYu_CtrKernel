@@ -1,3 +1,4 @@
+import logging
 from sqlalchemy.exc import IntegrityError
 from flask import jsonify, request
 from flask import current_app
@@ -9,6 +10,8 @@ from ..services.operation_log_tasks import write_operation_log as write_op_log
 from ..utils.parsers import parse_bool
 from ..repositories import containers_repo, authentications_repo, user_repo
 from ..schemas.user_schema import user_schema, users_schema
+
+logger = logging.getLogger(__name__)
 
 # map known error_reason strings to HTTP status codes so we can surface them to clients
 REASON_STATUS_MAP = {
@@ -37,7 +40,13 @@ REASON_STATUS_MAP = {
 
 
 def _log_failure(*, operation, target_type, target_id, operator_user_id, error_reason, detail=None):
-    """蓝图层失败补记：task 层直接上抛/返回 False 的失败在这里统一记一条。"""
+    """蓝图层失败补记：task 层直接上抛/返回 False 的失败在这里统一记一条。
+
+    .log 与 op-log 同源：error 级落日志文件，success=False 落操作日志表。
+    """
+    logger.error("operation failed: op=%s target=%s/%s user=%s reason=%s detail=%s",
+                 getattr(operation, 'value', operation), target_type, target_id,
+                 operator_user_id, error_reason, detail or {})
     write_op_log(success=False, operator_user_id=operator_user_id, operation=operation,
                  target_type=target_type, target_id=target_id,
                  detail=detail or {}, error_reason=error_reason)

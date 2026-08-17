@@ -266,4 +266,25 @@ def check_duplicate_container_name(container_name: str, machine_id: int) -> None
 		# Log and ignore DB lookup errors at validation level
 		return
 
+
+def validate_create_params(machine_id: int, container: Container_info, public_key: str | None = None) -> None:
+	"""创建容器前的参数校验序列（纯校验，无返回值）。
+
+	依次校验：机器存在性 → GPU → memory/shared（shared <= memory，memory 校验在内部先跑）
+	→ CPU → 名称长度/格式 → 重名。
+	抛 ValueError / IntegrityError，异常语义与逐条调用时一致。
+	"""
+	# 存在性检查
+	ensure_machine_exists(machine_id)
+	# GPU 参数检查
+	validate_gpu_request(machine, container)
+	# memory/shared 参数检查（要求 shared <= memory；memory 校验在内部先跑）
+	validate_shared_request(machine, container)
+	# cpu 参数检查
+	validate_cpu_request(machine, container)
+	# name/image/public_key length and format checks
+	validate_names_and_lengths(container, public_key)
+	# duplicate name check (may raise IntegrityError)
+	check_duplicate_container_name(container_name=container.NAME, machine_id=machine_id)
+
 ###############################
