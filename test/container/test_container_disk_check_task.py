@@ -17,7 +17,7 @@ from ...repositories import (
     container_disk_freeze_state_repo,
     long_term_container_repo,
 )
-from ...schemas import container_disk_check_task
+from ...schedulers import container_disk_check_task
 from ..factories import create_container_graph
 
 

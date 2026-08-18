@@ -1,5 +1,9 @@
 # 容器展示态派生：宿主机不可达时覆盖为 host_offline（仅展示，DB 状态不动）
 
+from pydantic import BaseModel, Field
+from ...constant import ROLE, ContainerStatus
+from ..machine_tasks import get_machine_reachable
+
 #API Definition
 ####################################################
 class container_bref_information(BaseModel):

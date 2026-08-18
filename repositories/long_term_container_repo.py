@@ -55,3 +55,16 @@ def remove(container_id: int, commit: bool = True) -> bool:
     if commit:
         db.session.commit()
     return True
+
+
+def _get_long_term_container_limit() -> int:
+    try:
+        from flask import current_app
+        return max(0, int(current_app.config.get("LONG_TERM_CONTAINER_LIMIT", 1) or 1))
+    except Exception:
+        return 1
+
+def get_long_term_container_remaining(user_id: int) -> int:
+    limit = _get_long_term_container_limit()
+    used = count_by_user(user_id)
+    return max(0, limit - used)

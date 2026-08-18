@@ -63,7 +63,7 @@ def test_mock_node_response_records_calls(monkeypatch):
 
 
 def test_mock_mail_success_records_recipient_subject_content(monkeypatch):
-    from ..schemas import container_cleanup_task
+    from ..schedulers import container_cleanup_task
 
     calls = mocks.mock_mail_success(monkeypatch, container_cleanup_task)
 

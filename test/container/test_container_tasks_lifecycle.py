@@ -69,9 +69,11 @@ def test_create_container_rejects_machine_maintenance(db_session, container_info
 
 
 def test_create_container_rejects_machine_offline(monkeypatch, db_session, container_info):
+    from ...services.container_module import node_comms
+
     owner = create_user()
     machine = create_machine()
-    monkeypatch.setattr(container_tasks, "is_machine_online_remote", lambda machine_id: False)
+    monkeypatch.setattr(node_comms, "is_machine_online_remote", lambda machine_id: False)
 
     with pytest.raises(container_tasks.NodeServiceError) as excinfo:
         container_tasks.Create_container(owner.username, machine.id, container_info)
@@ -124,7 +126,7 @@ def test_create_container_node_failure_does_not_create_local_record(
     assert Container.query.filter_by(name=container_info.NAME).first() is None
 
 
-def test_create_container_heartbeat_failure_returns_false_after_local_write(
+def test_create_container_heartbeat_failure_keeps_creation_success(
     monkeypatch,
     db_session,
     container_info,
@@ -140,7 +142,8 @@ def test_create_container_heartbeat_failure_returns_false_after_local_write(
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("heartbeat")),
     )
 
-    assert container_tasks.Create_container(owner.username, machine.id, container_info) is False
+    # 心跳失败不再阻断创建：容器已建成功（Node/DB/绑定已落），返回 True
+    assert container_tasks.Create_container(owner.username, machine.id, container_info) is True
 
     assert Container.query.filter_by(name=container_info.NAME).first() is not None
 

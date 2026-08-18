@@ -1,5 +1,7 @@
 """操作日志服务层：蓝图 → service → repo 的分层入口。"""
 
+import logging
+
 from ..repositories import machine_repo, user_repo, containers_repo, usercontainer_repo
 from ..repositories.operation_log_repo import (
     list_logs as _repo_list,
@@ -8,6 +10,8 @@ from ..repositories.operation_log_repo import (
     write as _repo_write,
 )
 from ..constant import ROLE
+
+logger = logging.getLogger(__name__)
 
 # TODO
 def _maybe_raise_alert(
@@ -46,7 +50,16 @@ def write_operation_log(
     """写操作日志统一入口。
 
     本身不抛异常，log失败只打 print，不影响主流程。
+    .log 与 op-log 表同源：本函数是唯一写入点，成功/失败按级别落日志文件。
     """
+    _op = getattr(operation, 'value', operation)
+    if success:
+        logger.info("op success: op=%s target=%s/%s user=%s detail=%s",
+                    _op, target_type, target_id, operator_user_id, detail)
+    else:
+        logger.error("op failed: op=%s target=%s/%s user=%s reason=%s detail=%s",
+                     _op, target_type, target_id, operator_user_id, error_reason, detail)
+
     result = _repo_write(
         operator_user_id=operator_user_id,
         operation=operation,

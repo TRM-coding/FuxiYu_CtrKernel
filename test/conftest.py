@@ -119,7 +119,7 @@ def mock_external_services(monkeypatch, request):
     monkeypatch.setattr("FuxiYu_CtrKernel.services.user_tasks.send_mail", _mail_send)
     monkeypatch.setattr("FuxiYu_CtrKernel.services.announcement_tasks.send_mail", _mail_send)
     monkeypatch.setattr("FuxiYu_CtrKernel.services.announcement_tasks.send_batch", _mail_send_batch)
-    monkeypatch.setattr("FuxiYu_CtrKernel.schemas.container_cleanup_task.send_mail", _mail_send)
+    monkeypatch.setattr("FuxiYu_CtrKernel.schedulers.container_cleanup_task.send_mail", _mail_send)
     monkeypatch.setattr("FuxiYu_CtrKernel.utils.heartbeat.start_machine_maintenance_transition_heartbeat", _fake_thread)
     monkeypatch.setattr("FuxiYu_CtrKernel.utils.heartbeat.container_starting_status_heartbeat", _fake_thread)
     monkeypatch.setattr("FuxiYu_CtrKernel.utils.heartbeat.container_stopping_status_heartbeat", _fake_thread)

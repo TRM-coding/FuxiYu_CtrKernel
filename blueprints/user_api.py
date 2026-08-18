@@ -27,7 +27,6 @@ def register():
 	}
 	'''
 	"""用户注册 API"""
-	print("Register Called")
 	recived_data = request.get_json(silent=True)
 	if not recived_data:
 		return jsonify({"success": 0, "message": "invalid json"}), 400

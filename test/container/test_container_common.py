@@ -49,6 +49,8 @@ def test_container_heartbeats_are_mocked_by_default(container_graph):
 
 
 def test_machine_online_check_is_mocked_by_default(container_graph):
+    from ...services.container_module import node_comms
+
     _root, machine, _container = container_graph
 
-    assert container_tasks.is_machine_online_remote(machine.id) is True
+    assert node_comms.is_machine_online_remote(machine.id) is True

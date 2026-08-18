@@ -3,14 +3,13 @@ import requests
 import time
 import base64
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 import traceback
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
 from pydantic import BaseModel, Field
 
-from ..config import CommsConfig
 from ..constant import *
 from ..utils.parallel import parallel_node_calls
 from sqlalchemy.exc import IntegrityError
@@ -18,7 +17,6 @@ from ..repositories import containers_repo, machine_repo, machine_permission_rep
 from .operation_log_tasks import write_operation_log as write_op_log
 from ..repositories import containers_repo as container_repo
 from ..repositories import container_ssh_login_repo
-from .machine_tasks import is_machine_online_remote, get_machine_reachable
 from ..repositories.machine_repo import *
 from ..repositories.user_repo import *
 from ..utils.CheckKeys import *
@@ -33,6 +31,25 @@ from ..utils.heartbeat import (
 from ..models.containers import Container
 import math
 from ..utils import sanitizer as _sanitizer
+
+from .container_module.node_comms import (
+    send,
+    get_full_url,
+    get_container_status,
+    _ensure_machine_online_for_operation,
+    _node_probe_container,
+)
+from .container_module.exceptions import NodeServiceError, _raise_on_node_error
+from .container_module.pydantic_models import (
+    container_bref_information,
+    container_detail_information,
+    _derive_display_status,
+    DISPLAY_STATUS_HOST_OFFLINE,
+)
+from .container_module.utils import _parse_last_ssh_time, build_cleanup_info
+from ..utils.permissions import _can_access_machine, _is_operator_user
+from ..repositories.long_term_container_repo import get_long_term_container_remaining, _get_long_term_container_limit
+from ..repositories.containers_repo import _binding_role_value, _root_user_ids_from_bindings
 
 logger = logging.getLogger(__name__)
 
@@ -135,123 +152,6 @@ def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -
             last_time = record.last_ssh_login_time
 
     return last_time
-
-
-def unpause_container(container_id: int, operator_user_id: int | None = None) -> bool:
-    """解冻因磁盘超限被 pause 的容器。"""
-    try:
-        container_id = int(container_id)
-    except Exception:
-        return False
-
-    container = containers_repo.get_by_id(container_id)
-    if not container:
-        return False
-
-    machine_id = container.machine_id
-    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
-        raise NodeServiceError(f'Machine {machine_id} not accessible', reason='machine_permission_denied')
-
-    machine_ip = get_machine_ip_by_id(machine_id)
-    url = get_full_url(machine_ip, "/pause_container")
-    payload = json.dumps({"config": {"container_name": container.name, "action": "unpause"}})
-    try:
-        sig = signature(payload)
-        enc = encryption(payload)
-        res = send(enc, sig, url, timeout=10.0)
-    except Exception as e:
-        logger.error("unpause_container send error: %s", e)
-        write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.UNPAUSE_CONTAINER,
-                     target_type="container", target_id=container.id,
-                     detail={"name": container.name, "machine_id": machine_id},
-                     error_reason=getattr(e, 'reason', None) or str(e))
-        return False
-
-    _raise_on_node_error(res, 'unpause')
-    if res.get('success') == 1:
-        # 更新本地状态为 online
-        try:
-            update_container(container.id, container_status=ContainerStatus.ONLINE)
-        except Exception as e:
-            logger.warning("unpause: failed to update container %s status to ONLINE: %s", container.id, e)
-        write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.UNPAUSE_CONTAINER,
-                     target_type="container", target_id=container.id,
-                     detail={"name": container.name, "machine_id": machine_id})
-
-        # 磁盘超限冻结宽限期：管理员解冻后给予宽限
-        try:
-            from ..repositories import container_disk_freeze_state_repo
-            freeze_state = container_disk_freeze_state_repo.get(container_id)
-            if freeze_state is not None:
-                from flask import current_app
-                grace_days = current_app.config.get("CONTAINER_DISK_FREEZE_GRACE_DAYS", 3)
-                container_disk_freeze_state_repo.set_grace(container_id, grace_days)
-                logger.info(
-                    "[disk-check] grace period set for container %s (%s) (%s days, until %s)",
-                    container_id, getattr(container, 'name', '?'), grace_days, freeze_state.grace_until,
-                )
-        except Exception as e:
-            logger.warning("[disk-check] failed to set grace for container %s: %s", container_id, e)
-
-        return True
-    return False
-
-
-def get_container_disk_usage(container_id: int, timeout: float = 20.0) -> dict | None:
-    """
-    通过 Node 查询容器磁盘使用情况（只读）。
-    入参: container_id
-    返回: dict 包含 machine_disk 和 container 信息，或 None
-    """
-    try:
-        container_id = int(container_id)
-    except Exception:
-        logger.warning("Invalid container id for disk usage query: %s", container_id)
-        return None
-
-    try:
-        container = containers_repo.get_by_id(container_id)
-    except Exception:
-        logger.error("Error querying container info for id=%s: %s", container_id, traceback.format_exc())
-        return None
-
-    if not container:
-        return None
-    try:
-        machine_id = container.machine_id
-        machine_ip = get_machine_ip_by_id(machine_id)
-        url = get_full_url(machine_ip, "/check_disk_usage")
-    except Exception:
-        logger.error("Error retrieving machine info for container id=%s: %s", container_id, traceback.format_exc())
-        return None
-
-    container_name = getattr(container, 'name', None)
-    payload = json.dumps({"config": {"container_name": container_name}})
-    try:
-        sig = signature(payload)
-        enc = encryption(payload)
-        res = send(enc, sig, url, timeout=timeout)
-    except Exception as e:
-        logger.error("Error sending disk check request to %s: %s", url, e)
-        return None
-
-    if not isinstance(res, dict):
-        logger.error("get_container_disk_usage: unexpected response type: %s", type(res))
-        return None
-
-    _raise_on_node_error(res, 'check_disk')
-    if res.get('success') != 1:
-        logger.error("get_container_disk_usage: Node returned failure: %s", res)
-        return None
-
-    cd = res.get("container", {})
-    _errs = {k: cd[k] for k in ("overlay_rw_error", "bind_mount_error", "bind_mount_path") if k in cd}
-    logger.info("[disk-check] ctrl received: container=%s overlay=%sB bind=%sB total=%sB errs=%s",
-                container_name, cd.get('overlay_rw_bytes'), cd.get('bind_mount_bytes'), cd.get('total_bytes'), _errs)
-    return res
-
-
-####################################################
 
 
 
@@ -464,10 +364,176 @@ def remove_container(container_id:int, operator_user_id:int|None=None)->bool:
 
     return True
 
+def pause_container(container_id: int, operator_user_id: int | None = None, extra_detail: dict | None = None) -> bool:
+    """冻结容器（磁盘超限等场景）。与 unpause_container 对称。
+
+    *extra_detail* 供调用方补充操作详情（如磁盘处置的 reason/usage），合并进 op-log。
+    """
+    try:
+        container_id = int(container_id)
+    except Exception:
+        return False
+
+    container = containers_repo.get_by_id(container_id)
+    if not container:
+        return False
+
+    machine_id = container.machine_id
+    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
+        raise NodeServiceError(f'Machine {machine_id} not accessible', reason='machine_permission_denied')
+
+    machine_ip = get_machine_ip_by_id(machine_id)
+    url = get_full_url(machine_ip, "/pause_container")
+    payload = json.dumps({"config": {"container_name": container.name, "action": "pause"}})
+    try:
+        sig = signature(payload)
+        enc = encryption(payload)
+        res = send(enc, sig, url, timeout=10.0)
+    except Exception as e:
+        logger.error("pause_container send error: %s", e)
+        write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.PAUSE_CONTAINER,
+                     target_type="container", target_id=container.id,
+                     detail={"name": container.name, "machine_id": machine_id, **(extra_detail or {})},
+                     error_reason=getattr(e, 'reason', None) or str(e))
+        return False
+
+    _raise_on_node_error(res, 'pause')
+    if res.get('success') == 1:
+        # 更新本地状态为 paused
+        try:
+            update_container(container.id, container_status=ContainerStatus.PAUSED)
+        except Exception as e:
+            logger.warning("pause: failed to update container %s status to PAUSED: %s", container.id, e)
+        write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.PAUSE_CONTAINER,
+                     target_type="container", target_id=container.id,
+                     detail={"name": container.name, "machine_id": machine_id, **(extra_detail or {})})
+        return True
+    return False
+
+
+def unpause_container(container_id: int, operator_user_id: int | None = None) -> bool:
+    """解冻因磁盘超限被 pause 的容器。"""
+    try:
+        container_id = int(container_id)
+    except Exception:
+        return False
+
+    container = containers_repo.get_by_id(container_id)
+    if not container:
+        return False
+
+    machine_id = container.machine_id
+    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
+        raise NodeServiceError(f'Machine {machine_id} not accessible', reason='machine_permission_denied')
+
+    machine_ip = get_machine_ip_by_id(machine_id)
+    url = get_full_url(machine_ip, "/pause_container")
+    payload = json.dumps({"config": {"container_name": container.name, "action": "unpause"}})
+    try:
+        sig = signature(payload)
+        enc = encryption(payload)
+        res = send(enc, sig, url, timeout=10.0)
+    except Exception as e:
+        logger.error("unpause_container send error: %s", e)
+        write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.UNPAUSE_CONTAINER,
+                     target_type="container", target_id=container.id,
+                     detail={"name": container.name, "machine_id": machine_id},
+                     error_reason=getattr(e, 'reason', None) or str(e))
+        return False
+
+    _raise_on_node_error(res, 'unpause')
+    if res.get('success') == 1:
+        # 更新本地状态为 online
+        try:
+            update_container(container.id, container_status=ContainerStatus.ONLINE)
+        except Exception as e:
+            logger.warning("unpause: failed to update container %s status to ONLINE: %s", container.id, e)
+        write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.UNPAUSE_CONTAINER,
+                     target_type="container", target_id=container.id,
+                     detail={"name": container.name, "machine_id": machine_id})
+
+        # 磁盘超限冻结宽限期：管理员解冻后给予宽限
+        try:
+            from ..repositories import container_disk_freeze_state_repo
+            freeze_state = container_disk_freeze_state_repo.get(container_id)
+            if freeze_state is not None:
+                from flask import current_app
+                grace_days = current_app.config.get("CONTAINER_DISK_FREEZE_GRACE_DAYS", 3)
+                container_disk_freeze_state_repo.set_grace(container_id, grace_days)
+                logger.info(
+                    "[disk-check] grace period set for container %s (%s) (%s days, until %s)",
+                    container_id, getattr(container, 'name', '?'), grace_days, freeze_state.grace_until,
+                )
+        except Exception as e:
+            logger.warning("[disk-check] failed to set grace for container %s: %s", container_id, e)
+
+        return True
+    return False
+
+
+def get_container_disk_usage(container_id: int, timeout: float = 20.0) -> dict | None:
+    """
+    通过 Node 查询容器磁盘使用情况（只读）。
+    入参: container_id
+    返回: dict 包含 machine_disk 和 container 信息，或 None
+    """
+    try:
+        container_id = int(container_id)
+    except Exception:
+        logger.warning("Invalid container id for disk usage query: %s", container_id)
+        return None
+
+    try:
+        container = containers_repo.get_by_id(container_id)
+    except Exception:
+        logger.error("Error querying container info for id=%s: %s", container_id, traceback.format_exc())
+        return None
+
+    if not container:
+        return None
+    try:
+        machine_id = container.machine_id
+        machine_ip = get_machine_ip_by_id(machine_id)
+        url = get_full_url(machine_ip, "/check_disk_usage")
+    except Exception:
+        logger.error("Error retrieving machine info for container id=%s: %s", container_id, traceback.format_exc())
+        return None
+
+    container_name = getattr(container, 'name', None)
+    payload = json.dumps({"config": {"container_name": container_name}})
+    try:
+        sig = signature(payload)
+        enc = encryption(payload)
+        res = send(enc, sig, url, timeout=timeout)
+    except Exception as e:
+        logger.error("Error sending disk check request to %s: %s", url, e)
+        return None
+
+    if not isinstance(res, dict):
+        logger.error("get_container_disk_usage: unexpected response type: %s", type(res))
+        return None
+
+    _raise_on_node_error(res, 'check_disk')
+    if res.get('success') != 1:
+        logger.error("get_container_disk_usage: Node returned failure: %s", res)
+        return None
+
+    cd = res.get("container", {})
+    _errs = {k: cd[k] for k in ("overlay_rw_error", "bind_mount_error", "bind_mount_path") if k in cd}
+    logger.info("[disk-check] ctrl received: container=%s overlay=%sB bind=%sB total=%sB errs=%s",
+                container_name, cd.get('overlay_rw_bytes'), cd.get('bind_mount_bytes'), cd.get('total_bytes'), _errs)
+    return res
+
+
+####################################################
+
 
 def build_container_restore_snapshot(container_id: int, cleanup_context: dict | None = None) -> dict:
     """
     Build a pre-removal snapshot with enough metadata to recreate the container and bindings.
+
+    # 注：字段集将来可能被 image 蓝图（Dockerfile + 脚本 + pre_build）参考，
+    # image 域（FuxiYu_Global/fuxi平台继续开发.md「新增需求」）落地时评估是否吸收。
     """
     container = get_by_id(container_id)
     if not container:
@@ -517,53 +583,6 @@ def build_container_restore_snapshot(container_id: int, cleanup_context: dict | 
         "cleanup_context": cleanup_context or {},
     }
     return snapshot
-
-
-def get_container_root_owner_emails(container_id: int) -> list[str]:
-    bindings = get_container_bindings(container_id) or []
-    emails = []
-    seen = set()
-    for binding in bindings:
-        if _binding_role_value(binding).upper() != ROLE.ROOT.value:
-            continue
-        user_id = binding.get("user_id")
-        if user_id is None:
-            continue
-        user = user_repo.get_by_id(int(user_id))
-        email = getattr(user, "email", None)
-        if email and email not in seen:
-            emails.append(email)
-            seen.add(email)
-    return emails
-
-
-def _get_long_term_container_limit() -> int:
-    try:
-        from flask import current_app
-        return max(0, int(current_app.config.get("LONG_TERM_CONTAINER_LIMIT", 1) or 1))
-    except Exception:
-        return 1
-
-
-def get_long_term_container_remaining(user_id: int) -> int:
-    limit = _get_long_term_container_limit()
-    used = long_term_container_repo.count_by_user(user_id)
-    return max(0, limit - used)
-
-
-def _binding_role_value(binding: dict) -> str:
-    role = binding.get("role") if isinstance(binding, dict) else None
-    return role.value if isinstance(role, ROLE) else str(role or "")
-
-
-def _root_user_ids_from_bindings(bindings: list | None) -> set[int]:
-    return {
-        int(b["user_id"])
-        for b in (bindings or [])
-        if isinstance(b, dict)
-        and b.get("user_id") is not None
-        and _binding_role_value(b).upper() == ROLE.ROOT.value
-    }
 
 
 def _build_long_term_container_state(container_id: int, bindings: list | None = None) -> dict:
@@ -1058,8 +1077,6 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         ],
     }
     return res
-
-
 
 def list_all_container_bref_information(machine_id:int, request_user_id:int, page_number:int, page_size:int, user_id:int = None)->dict:
     # 非管理员用户必须先通过机器权限表过滤可见机器

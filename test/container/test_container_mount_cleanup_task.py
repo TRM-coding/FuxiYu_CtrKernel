@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 from ...extensions import db
 from ...repositories import container_mount_cleanup_repo
-from ...schemas import container_mount_cleanup_task
+from ...schedulers import container_mount_cleanup_task
 
 
 class TestMountCleanupTask:

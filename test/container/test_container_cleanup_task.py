@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from ...extensions import db
 from ...models.container_ssh_login import ContainerSSHLogin
 from ...repositories import long_term_container_repo
-from ...schemas import container_cleanup_task
+from ...schedulers import container_cleanup_task
 from ..factories import create_container_graph
 
 

@@ -11,9 +11,9 @@ from flask_cors import CORS
 from .extensions import db
 from .config import get_config, build_allowed_origins
 from .blueprints import register_blueprints
-from .schemas.container_ssh_refresh_task import start_container_ssh_refresh_scheduler
-from .schemas.container_cleanup_task import start_container_cleanup_scheduler
-from .schemas.container_mount_cleanup_task import start_mount_cleanup_scheduler
+from .schedulers.container_ssh_refresh_task import start_container_ssh_refresh_scheduler
+from .schedulers.container_cleanup_task import start_container_cleanup_scheduler
+from .schedulers.container_mount_cleanup_task import start_mount_cleanup_scheduler
 from .utils.logging_config import configure_daily_logging
 
 

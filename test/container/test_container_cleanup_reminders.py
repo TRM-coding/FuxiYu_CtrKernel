@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 
 from ...repositories import container_cleanup_reminder_repo
-from ...schemas import container_cleanup_task
+from ...schedulers import container_cleanup_task
 from ..factories import create_container_graph
 
 

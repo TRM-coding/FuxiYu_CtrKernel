@@ -1,4 +1,4 @@
-from ...schemas import container_ssh_refresh_task
+from ...schedulers import container_ssh_refresh_task
 from ..factories import create_container, create_machine
 
 

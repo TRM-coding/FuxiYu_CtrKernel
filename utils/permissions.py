@@ -1,3 +1,10 @@
+import logging
+
+from ..repositories import user_repo, machine_permission_repo
+
+logger = logging.getLogger(__name__)
+
+
 def _can_access_machine(user_id: int, machine_id: int) -> bool:
     if not user_id or not machine_id:
         return False

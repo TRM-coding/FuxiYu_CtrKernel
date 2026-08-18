@@ -111,8 +111,10 @@ def test_list_container_bref_non_operator_filters_by_machine_permission(monkeypa
 
 
 def test_list_container_bref_node_404_removes_and_skips_container(monkeypatch, db_session, container_graph):
+    from ...services.container_module import node_comms
+
     root, _machine, container = container_graph
-    monkeypatch.setattr(container_tasks, "get_container_status", lambda *args, **kwargs: NODE_STATUS_404)
+    monkeypatch.setattr(node_comms, "get_container_status", lambda *args, **kwargs: NODE_STATUS_404)
 
     result = container_tasks.list_all_container_bref_information(
         machine_id=None,
@@ -127,8 +129,10 @@ def test_list_container_bref_node_404_removes_and_skips_container(monkeypatch, d
 
 
 def test_list_container_bref_includes_cleanup_info_from_ssh_record(monkeypatch, db_session, container_graph):
+    from ...services.container_module import node_comms
+
     root, machine, container = container_graph
-    monkeypatch.setattr(container_tasks, "get_container_status", lambda *args, **kwargs: NODE_STATUS_ONLINE)
+    monkeypatch.setattr(node_comms, "get_container_status", lambda *args, **kwargs: NODE_STATUS_ONLINE)
     last_time = (datetime.utcnow() - timedelta(days=1)).isoformat()
     container_ssh_login_repo.upsert_last_ssh_login_time(machine.id, container.id, last_time)
 

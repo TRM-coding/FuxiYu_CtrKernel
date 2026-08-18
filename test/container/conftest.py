@@ -28,7 +28,7 @@ NODE_LAST_SSH_NOT_FOUND = {"success": 0, "error_reason": "not_found"}
 @pytest.fixture(autouse=True)
 def mock_container_machine_online(monkeypatch):
     monkeypatch.setattr(
-        "FuxiYu_CtrKernel.services.container_tasks.is_machine_online_remote",
+        "FuxiYu_CtrKernel.services.container_module.node_comms.is_machine_online_remote",
         lambda machine_id: True,
     )
 

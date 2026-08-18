@@ -277,23 +277,11 @@ def _handle_hard_limit(container, usage: dict, app) -> None:
         if str(status_val).lower() not in ('online',):
             logger.info("[disk-check] pause skipped for container %s: status=%s", container.id, status_val)
             return
-        from ..repositories.machine_repo import get_machine_ip_by_id
-        from ..constant import ContainerStatus
-        machine_ip = get_machine_ip_by_id(container.machine_id)
-        url = container_tasks.get_full_url(machine_ip, "/pause_container")
-        payload = json.dumps({"config": {"container_name": container.name, "action": "pause"}})
-        sig = container_tasks.signature(payload)
-        enc = container_tasks.encryption(payload)
-        res = container_tasks.send(enc, sig, url, timeout=10.0)
-        logger.debug("[disk-check] pause result for container %s: %s", container.id, res)
-        # 更新 DB 状态为 paused，防止并行检查重复 pause
-        if isinstance(res, dict) and res.get("success") == 1:
-            containers_repo.update_container(container.id, commit=True,
-                container_status=ContainerStatus.PAUSED)
-        from ..services.operation_log_tasks import write_operation_log as write_op_log
-        write_op_log(success=True, operation=OperationType.PAUSE_CONTAINER, target_type="container",
-                     target_id=container.id,
-                     detail={"reason": "disk_hard_limit", "usage": f"{total_gb:.1f}GB/{limit_gb:.1f}GB"})
+        ok = container_tasks.pause_container(
+            container.id,
+            extra_detail={"reason": "disk_hard_limit", "usage": f"{total_gb:.1f}GB/{limit_gb:.1f}GB"},
+        )
+        logger.debug("[disk-check] pause result for container %s: %s", container.id, ok)
     except Exception as e:
         logger.error("[disk-check] pause failed for container %s: %s", container.id, e)
 

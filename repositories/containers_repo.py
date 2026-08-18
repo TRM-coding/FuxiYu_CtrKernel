@@ -7,7 +7,7 @@ from ..models.machine import Machine
 from ..utils.Container import Container_info
 from ..constant import ROLE
 from sqlalchemy.exc import IntegrityError
-from . import machine_repo
+from . import machine_repo, usercontainer_repo, user_repo
 from .machine_repo import get_max_gpu_number, get_max_shared_gb, get_max_cpu_core_number, get_max_memory_gb
 
 
@@ -275,7 +275,7 @@ def validate_create_params(machine_id: int, container: Container_info, public_ke
 	抛 ValueError / IntegrityError，异常语义与逐条调用时一致。
 	"""
 	# 存在性检查
-	ensure_machine_exists(machine_id)
+	machine = ensure_machine_exists(machine_id)
 	# GPU 参数检查
 	validate_gpu_request(machine, container)
 	# memory/shared 参数检查（要求 shared <= memory；memory 校验在内部先跑）
@@ -288,3 +288,37 @@ def validate_create_params(machine_id: int, container: Container_info, public_ke
 	check_duplicate_container_name(container_name=container.NAME, machine_id=machine_id)
 
 ###############################
+
+def get_container_root_owner_emails(container_id: int) -> list[str]:
+    bindings = usercontainer_repo.get_container_bindings(container_id) or []
+    emails = []
+    seen = set()
+    for binding in bindings:
+        if _binding_role_value(binding).upper() != ROLE.ROOT.value:
+            continue
+        user_id = binding.get("user_id")
+        if user_id is None:
+            continue
+        user = user_repo.get_by_id(int(user_id))
+        email = getattr(user, "email", None)
+        if email and email not in seen:
+            emails.append(email)
+            seen.add(email)
+    return emails
+
+###########################################
+# 视图
+
+def _binding_role_value(binding: dict) -> str:
+    role = binding.get("role") if isinstance(binding, dict) else None
+    return role.value if isinstance(role, ROLE) else str(role or "")
+
+
+def _root_user_ids_from_bindings(bindings: list | None) -> set[int]:
+    return {
+        int(b["user_id"])
+        for b in (bindings or [])
+        if isinstance(b, dict)
+        and b.get("user_id") is not None
+        and _binding_role_value(b).upper() == ROLE.ROOT.value
+    }
