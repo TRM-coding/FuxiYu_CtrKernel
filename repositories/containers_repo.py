@@ -18,6 +18,14 @@ def get_id_by_name_machine(container_name: str, machine_id: int) -> int | None:
 	container = Container.query.filter_by(name=container_name, machine_id=machine_id).first()
 	return container.id if container else None
 
+def get_by_container_name(container_name: str) -> Container | None:
+	"""按容器名查询（宿主机内唯一）。Node 侧快照以 name 为键，解析层按名归位。
+
+	注意：不命名为 get_by_name —— user_repo 已有同名函数（按用户名），
+	container_tasks 等模块 `import *` 两处时会撞名覆盖。
+	"""
+	return Container.query.filter_by(name=container_name).first()
+
 def get_machine_id_by_container_id(container_id: int) -> int | None:
 	container = get_by_id(container_id)
 	return container.machine_id if container else None

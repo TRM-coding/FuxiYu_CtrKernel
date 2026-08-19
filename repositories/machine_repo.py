@@ -13,6 +13,11 @@ def get_id_by_ip(machine_ip:str):
     machine = Machine.query.filter_by(machine_ip=machine_ip).first()
     return machine.id if machine else None
 
+def get_by_uid(uid: str):
+    """按 Ctrl 颁发的 UID 查机器（WSS 接收器身份归位用）。"""
+    return Machine.query.filter_by(node_uid=uid).first()
+
+
 def get_machine_ip_by_id(machine_id:int)->str:
     machine = get_by_id(machine_id)
     if not machine:
@@ -102,7 +107,8 @@ def update_machine(machine_id: int, *, commit: bool = True, **fields) -> bool:
 
     allowed = {"machine_name", "machine_ip", "machine_type", "machine_status", "cpu_core_number",
                "memory_size_gb", "gpu_number", "gpu_type", "disk_size_gb", "machine_description", "shared_size_gb", "max_shared_gb",
-               "max_memory_gb", "max_gpu_number", "max_cpu_core_number"}
+               "max_memory_gb", "max_gpu_number", "max_cpu_core_number",
+               "node_uid", "node_cert_fingerprint", "cert_pinned_at"}
     dirty = False
     for k, v in fields.items():
         if k not in allowed:

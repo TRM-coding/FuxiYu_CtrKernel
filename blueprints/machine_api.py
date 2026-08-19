@@ -1,6 +1,7 @@
 from flask import jsonify, request
 from . import api_bp
 from ..services import machine_tasks as machine_service
+from ..services.container_module import node_comms
 from ..repositories import user_repo, authentications_repo
 from ..schemas.user_schema import user_schema, users_schema
 from ..constant import PERMISSION
@@ -83,7 +84,38 @@ def add_machine_api():
         return jsonify({"success": 1, "message": "Machine created successfully"}), 201
     else:
         return jsonify({"success": 0, "message": "Failed to create machine", "error_reason": "create_failed"}), 500
-    
+
+
+@api_bp.post("/machines/register_machine")
+def register_machine_api():
+    '''TOFU 接入机器：HTTPS 首连 → TLS 层取 Node 证书指纹 → 颁发 UID → 下发 → 落库双凭据。
+
+    发送格式：{"machine_id": 1}
+    返回格式：{"success": 1, "uid": "xxx", "certificate_fingerprint": "xxx"}
+    '''
+    if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
+        return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
+    if (not user_repo.check_permission(request.cookies.get("auth_token", ""), required_permission=PERMISSION.OPERATOR)):
+        return jsonify({"success": 0, "message": "insufficient permissions", "error_reason": "insufficient_permission"}), 403
+
+    data = request.get_json() or {}
+    try:
+        machine_id = int(data.get("machine_id", 0))
+    except Exception:
+        return jsonify({"success": 0, "message": "machine_id must be an integer", "error_reason": "invalid_machine_id"}), 400
+    if machine_id <= 0:
+        return jsonify({"success": 0, "message": "machine_id required", "error_reason": "invalid_machine_id"}), 400
+
+    try:
+        result = node_comms.register_machine(machine_id)
+    except Exception as e:
+        err_reason = getattr(e, 'error_reason', None)
+        if err_reason:
+            return jsonify({"success": 0, "message": str(e), "error_reason": err_reason}), 422
+        return jsonify({"success": 0, "message": f"Internal error: {str(e)}", "error_reason": "internal_error"}), 500
+
+    return jsonify({"success": 1, "message": "Machine enrolled successfully",
+                    "uid": result["uid"], "certificate_fingerprint": result["certificate_fingerprint"]}), 200
 @api_bp.post("/machines/remove_machine")
 def remove_machine_api():
     '''
