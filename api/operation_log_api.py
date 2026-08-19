@@ -1,81 +1,78 @@
-from flask import request, jsonify
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import JSONResponse
 
-from . import api_bp
-from ..repositories import authentications_repo, user_repo
+from ..schemas.operation_log import OperationLogListResponse, OperationLogStatsResponse
 from ..services import operation_log_tasks
-from ..utils.parsers import parse_bool
-from ..constant import PERMISSION
+from .deps import require_operator
+
+router = APIRouter(prefix="/admin/operation_logs", tags=["operation_logs"])
 
 
-def _require_operator():
-    """鉴权失败时返回 (response, status)，成功返回 None。"""
-    token = request.cookies.get("auth_token", "")
-    if not authentications_repo.is_token_valid(token):
-        return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
-    if not user_repo.check_permission(token, required_permission=PERMISSION.OPERATOR):
-        return jsonify({"success": 0, "message": "insufficient permissions", "error_reason": "insufficient_permission"}), 403
-    return None
+def _error(status_code: int, message: str, error_reason: str) -> JSONResponse:
+    """返回 Ctrl 现有错误结构。"""
+
+    return JSONResponse(
+        status_code=status_code,
+        content={"success": 0, "message": message, "error_reason": error_reason},
+    )
 
 
-def _int_or_none(name):
-    raw = request.args.get(name)
-    if raw is None or raw == "":
-        return None
-    try:
-        return int(raw)
-    except Exception:
-        return None
+@router.get("", response_model=OperationLogListResponse)
+def list_operation_logs_api(
+    request: Request,
+    _: int = Depends(require_operator),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1),
+    operator_user_id: int | None = None,
+    operation: str | None = None,
+    target_type: str | None = None,
+    success: bool | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    tz_offset_minutes: int | None = None,
+):
+    """操作日志查询。
 
-
-@api_bp.get("/admin/operation_logs")
-def list_operation_logs_api():
-    """操作日志查询（operator-only）。
-
-    query 参数：page / page_size / operation / target_type /
-    operator_user_id / success(true|false) / start / end /
-    tz_offset_minutes（分钟；start/end 按前端本地时间原样传，
-    由后端按该偏移解析成库内 naive UTC 口径）
+    start/end 按前端本地时间传入，tz_offset_minutes 用于转换库内 UTC 口径。
     """
-    denied = _require_operator()
-    if denied:
-        return denied
 
     try:
-        result = operation_log_tasks.list_operation_logs(
-            page=_int_or_none("page") or 1,
-            page_size=_int_or_none("page_size") or 20,
-            operator_user_id=_int_or_none("operator_user_id"),
-            operation=request.args.get("operation") or None,
-            target_type=request.args.get("target_type") or None,
-            success=parse_bool(request.args.get("success")),
-            start=request.args.get("start") or None,
-            end=request.args.get("end") or None,
-            tz_offset_minutes=_int_or_none("tz_offset_minutes"),
-        )
+        with request.app.state.flask_app.app_context():
+            result = operation_log_tasks.list_operation_logs(
+                page=page,
+                page_size=page_size,
+                operator_user_id=operator_user_id,
+                operation=operation,
+                target_type=target_type,
+                success=success,
+                start=start,
+                end=end,
+                tz_offset_minutes=tz_offset_minutes,
+            )
     except Exception as e:
-        return jsonify({"success": 0, "message": f"query failed: {e}", "error_reason": "list_failed"}), 500
+        return _error(500, f"query failed: {e}", "list_failed")
 
-    return jsonify({"success": 1, **result}), 200
+    return {"success": 1, **result}
 
 
-@api_bp.get("/admin/operation_logs/stats")
-def operation_log_stats_api():
-    """操作日志统计（operator-only）。query 参数：start / end / tz_offset_minutes。
-
-    tz_offset_minutes 同时影响窗口解析与 by_day 分桶日（本地日），
-    使绿墙日期轴与前端 UTC+8 渲染一致。
-    """
-    denied = _require_operator()
-    if denied:
-        return denied
+@router.get("/stats", response_model=OperationLogStatsResponse)
+def operation_log_stats_api(
+    request: Request,
+    _: int = Depends(require_operator),
+    start: str | None = None,
+    end: str | None = None,
+    tz_offset_minutes: int | None = None,
+):
+    """操作日志统计。"""
 
     try:
-        result = operation_log_tasks.operation_log_stats(
-            start=request.args.get("start") or None,
-            end=request.args.get("end") or None,
-            tz_offset_minutes=_int_or_none("tz_offset_minutes"),
-        )
+        with request.app.state.flask_app.app_context():
+            result = operation_log_tasks.operation_log_stats(
+                start=start,
+                end=end,
+                tz_offset_minutes=tz_offset_minutes,
+            )
     except Exception as e:
-        return jsonify({"success": 0, "message": f"stats failed: {e}", "error_reason": "list_failed"}), 500
+        return _error(500, f"stats failed: {e}", "list_failed")
 
-    return jsonify({"success": 1, **result}), 200
+    return {"success": 1, **result}

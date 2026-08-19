@@ -1,4 +1,3 @@
-import json
 import threading
 import time
 import logging
@@ -434,10 +433,8 @@ def _clean_mount_immediately(container) -> None:
         from ..repositories.machine_repo import get_machine_ip_by_id
         machine_ip = get_machine_ip_by_id(container.machine_id)
         url = container_tasks.get_full_url(machine_ip, "/clean_mount")
-        payload = json.dumps({"config": {"mount_path": bind_mount}})
-        sig = container_tasks.signature(payload)
-        enc = container_tasks.encryption(payload)
-        res = container_tasks.send(enc, sig, url, timeout=10.0)
+        payload = {"config": {"mount_path": bind_mount}}
+        res = container_tasks.send(url, payload, timeout=10.0)
         logger.debug("[disk-check] escalation mount cleanup for container %s path=%s: %s",
                      container.id, bind_mount, res)
     except Exception as e:

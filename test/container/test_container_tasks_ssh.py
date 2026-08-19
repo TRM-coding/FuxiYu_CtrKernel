@@ -93,7 +93,7 @@ def test_get_last_ssh_time_normalizes_raw_output_to_iso(
     db_session,
     container_graph,
     mock_node_send,
-    mock_crypto,
+
 ):
     """Node 返回 raw last 文本 → Ctrl 归一化为 ISO UTC 存入 DB。"""
     _root, machine, container = container_graph
@@ -112,7 +112,7 @@ def test_get_last_ssh_time_passes_through_iso(
     db_session,
     container_graph,
     mock_node_send,
-    mock_crypto,
+
 ):
     """Node 返回已是 ISO 格式 → 直接存储，不重复转换。"""
     _root, machine, container = container_graph
@@ -129,7 +129,7 @@ def test_get_last_ssh_time_not_found_does_not_overwrite(
     db_session,
     container_graph,
     mock_node_send,
-    mock_crypto,
+
 ):
     """Node 返回 not_found → 不覆写已有值。"""
     _root, machine, container = container_graph
@@ -158,7 +158,7 @@ def test_get_last_ssh_time_endpoint_404_raises_node_endpoint_not_found(
     db_session,
     container_graph,
     mock_node_send,
-    mock_crypto,
+
 ):
     _root, _machine, container = container_graph
     mock_node_send(NODE_ENDPOINT_404_HTML)

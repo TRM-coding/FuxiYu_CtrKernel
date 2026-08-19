@@ -13,7 +13,7 @@ def test_create_container_success_sends_node_then_creates_db_record_and_root_bin
     db_session,
     container_info,
     mock_node_send,
-    mock_crypto,
+
     heartbeat_calls,
 ):
     owner = create_user(username="owner_lifecycle")
@@ -37,7 +37,7 @@ def test_create_container_success_sends_node_then_creates_db_record_and_root_bin
     assert bindings[0]["username"] == "root"
     assert getattr(bindings[0]["role"], "value", bindings[0]["role"]) == ROLE.ROOT.value
     assert calls[0]["url"].endswith("/create_container")
-    assert mock_crypto[0]["owner_name"] == owner.username
+    assert calls[0]["payload"]["owner_name"] == owner.username
     assert heartbeat_calls["start"]
 
 
@@ -96,7 +96,7 @@ def test_create_container_rejects_duplicate_name_before_node_write(
     db_session,
     container_info,
     mock_node_send,
-    mock_crypto,
+
 ):
     owner = create_user()
     machine = create_machine()
@@ -113,7 +113,7 @@ def test_create_container_node_failure_does_not_create_local_record(
     db_session,
     container_info,
     mock_node_send,
-    mock_crypto,
+
 ):
     owner = create_user()
     machine = create_machine()
@@ -131,7 +131,7 @@ def test_create_container_heartbeat_failure_keeps_creation_success(
     db_session,
     container_info,
     mock_node_send,
-    mock_crypto,
+
 ):
     owner = create_user()
     machine = create_machine()
@@ -153,7 +153,7 @@ def test_remove_container_success_deletes_bindings_and_container(
     db_session,
     container_graph,
     mock_node_send,
-    mock_crypto,
+
     node_response,
 ):
     root, _machine, container = container_graph
@@ -169,7 +169,7 @@ def test_remove_container_node_failed_raises_and_keeps_local_record(
     db_session,
     container_graph,
     mock_node_send,
-    mock_crypto,
+
 ):
     root, _machine, container = container_graph
     mock_node_send(NODE_REMOVE_FAILED)
@@ -185,7 +185,7 @@ def test_start_container_success_starts_heartbeat(
     db_session,
     container_graph,
     mock_node_send,
-    mock_crypto,
+
     heartbeat_calls,
 ):
     root, _machine, container = container_graph
@@ -200,7 +200,7 @@ def test_stop_container_success_starts_heartbeat(
     db_session,
     container_graph,
     mock_node_send,
-    mock_crypto,
+
     heartbeat_calls,
 ):
     root, _machine, container = container_graph
@@ -215,7 +215,7 @@ def test_restart_container_success_marks_offline_and_starts_heartbeat(
     db_session,
     container_graph,
     mock_node_send,
-    mock_crypto,
+
     heartbeat_calls,
 ):
     root, _machine, container = container_graph

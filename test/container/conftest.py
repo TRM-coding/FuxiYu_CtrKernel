@@ -67,11 +67,10 @@ def mock_node_send(monkeypatch):
     def _install(response):
         calls.clear()
 
-        def _send(ciphertext, signature, url, timeout=5.0):
+        def _send(url, payload, timeout=5.0):
             calls.append({
-                "ciphertext": ciphertext,
-                "signature": signature,
                 "url": url,
+                "payload": payload,
                 "timeout": timeout,
             })
             return dict(response)
@@ -80,22 +79,6 @@ def mock_node_send(monkeypatch):
         return calls
 
     return _install
-
-
-@pytest.fixture()
-def mock_crypto(monkeypatch):
-    payloads = []
-
-    def _signature(payload):
-        payloads.append(json.loads(payload))
-        return b"signature"
-
-    def _encryption(payload):
-        return payload.encode("utf-8")
-
-    monkeypatch.setattr("FuxiYu_CtrKernel.services.container_tasks.signature", _signature)
-    monkeypatch.setattr("FuxiYu_CtrKernel.services.container_tasks.encryption", _encryption)
-    return payloads
 
 
 @pytest.fixture()

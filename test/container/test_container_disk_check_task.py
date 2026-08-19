@@ -1212,15 +1212,7 @@ class TestEscalationMountCleanup:
         # mock send to avoid real HTTP
         monkeypatch.setattr(
             container_disk_check_task.container_tasks, "send",
-            lambda enc, sig, url, timeout: {"success": 1}
-        )
-        monkeypatch.setattr(
-            container_disk_check_task.container_tasks, "signature",
-            lambda p: b"sig"
-        )
-        monkeypatch.setattr(
-            container_disk_check_task.container_tasks, "encryption",
-            lambda p: b"enc"
+            lambda url, payload, timeout: {"success": 1}
         )
         monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
 
@@ -1257,15 +1249,7 @@ class TestEscalationMountCleanup:
         sent_calls = []
         monkeypatch.setattr(
             container_disk_check_task.container_tasks, "send",
-            lambda enc, sig, url, timeout: sent_calls.append(url) or {"success": 1}
-        )
-        monkeypatch.setattr(
-            container_disk_check_task.container_tasks, "signature",
-            lambda p: b"sig"
-        )
-        monkeypatch.setattr(
-            container_disk_check_task.container_tasks, "encryption",
-            lambda p: b"enc"
+            lambda url, payload, timeout: sent_calls.append(url) or {"success": 1}
         )
         monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
 

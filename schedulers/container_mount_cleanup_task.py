@@ -5,7 +5,6 @@
 - escalation=True 的记录已在删除时立刻清理，此处跳过
 """
 
-import json
 import threading
 import time
 import logging
@@ -13,12 +12,7 @@ from datetime import datetime, timedelta
 from flask import Flask, current_app
 
 from ..repositories import container_mount_cleanup_repo, machine_repo
-from ..services.container_tasks import (
-    encryption,
-    get_full_url,
-    send,
-    signature,
-)
+from ..services.container_tasks import get_full_url, send
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +41,8 @@ def run_mount_cleanup_once() -> None:
                 continue
 
             url = get_full_url(machine_ip, "/clean_mount")
-            payload = json.dumps({"config": {"mount_path": row.mount_path}})
-            sig = signature(payload)
-            enc = encryption(payload)
-            res = send(enc, sig, url, timeout=10.0)
+            payload = {"config": {"mount_path": row.mount_path}}
+            res = send(url, payload, timeout=10.0)
 
             if isinstance(res, dict) and res.get("success") == 1:
                 container_mount_cleanup_repo.mark_cleaned(row.id)

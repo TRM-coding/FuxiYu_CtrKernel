@@ -30,20 +30,6 @@ def mock_node_response(monkeypatch, module, response: dict):
     return calls
 
 
-def mock_container_crypto(monkeypatch, module):
-    payloads = []
-
-    def _signature(payload):
-        payloads.append(json.loads(payload))
-        return b"signature"
-
-    def _encryption(payload):
-        return payload.encode("utf-8")
-
-    monkeypatch.setattr(module, "signature", _signature)
-    monkeypatch.setattr(module, "encryption", _encryption)
-    return payloads
-
 
 def mock_mail_success(monkeypatch, module):
     calls = []

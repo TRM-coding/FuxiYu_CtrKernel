@@ -19,7 +19,6 @@ from ..repositories import containers_repo as container_repo
 from ..repositories import container_ssh_login_repo
 from ..repositories.machine_repo import *
 from ..repositories.user_repo import *
-from ..utils.CheckKeys import *
 from ..utils.Container import Container_info
 from ..repositories.containers_repo import *
 from ..repositories.usercontainer_repo import *
@@ -83,11 +82,9 @@ def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -
         return None
 
     container_name = getattr(container, 'name', None)
-    payload = json.dumps({"config": {"container_name": container_name}})
+    payload = {"config": {"container_name": container_name}}
     try:
-        sig = signature(payload)
-        enc = encryption(payload)
-        res = send(enc, sig, url, timeout=timeout)
+        res = send(url, payload, timeout=timeout)
     except Exception as e:
         logger.error("Error sending request to %s: %s", url, e)
         # Node 不可达时，以 DB 已有记录兜底
@@ -196,7 +193,6 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
     container_info['config']=container.get_config()
     if public_key:
         container_info['public_key']=public_key
-    container_info=json.dumps(container_info)
     # 名称/长度/格式等校验已在参数检查阶段由 container_repo.validate_create_params 完成
 
     # check duplicate container name on this machine before sending to Node
@@ -212,11 +208,7 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
     except Exception as e:
         # If the check fails unexpectedly, log and continue to avoid blocking creation due to DB issues
         logger.warning("failed to check existing container name: %s", e)
-    signatured_message=signature(container_info)
-
-
-    encryptioned_message=encryption(container_info)
-    res=send(encryptioned_message,signatured_message,full_url)
+    res=send(full_url, container_info)
     logger.debug("Create_container: NODE response: %s", res)
     # 检查Node是否返回错误，如果有则抛出异常；如果没有则继续后续流程（写DB记录、建立绑定、启动心跳等）
     _raise_on_node_error(res, 'create')
@@ -299,10 +291,8 @@ def remove_container(container_id:int, operator_user_id:int|None=None)->bool:
         }
     }        
     
-    container_info=json.dumps(data)
-    signatured_message=signature(container_info)
-    encryptioned_message=encryption(container_info)
-    res=send(encryptioned_message,signatured_message,full_url)
+    container_info=data
+    res=send(full_url, container_info)
     logger.debug("remove_container: NODE response: %s", res)
     # 先看看远程调用层面是否有错误（网络/请求/远程处理错误等），如果有则抛出异常；如果没有则根据 Node 的返回内容来决定是否继续本地删除（Node 返回 NOTFOUND 则本地也删除，Node 返回 FAILED 则不删除并抛出异常）
     _raise_on_node_error(res, 'remove')
@@ -384,11 +374,9 @@ def pause_container(container_id: int, operator_user_id: int | None = None, extr
 
     machine_ip = get_machine_ip_by_id(machine_id)
     url = get_full_url(machine_ip, "/pause_container")
-    payload = json.dumps({"config": {"container_name": container.name, "action": "pause"}})
+    payload = {"config": {"container_name": container.name, "action": "pause"}}
     try:
-        sig = signature(payload)
-        enc = encryption(payload)
-        res = send(enc, sig, url, timeout=10.0)
+        res = send(url, payload, timeout=10.0)
     except Exception as e:
         logger.error("pause_container send error: %s", e)
         write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.PAUSE_CONTAINER,
@@ -428,11 +416,9 @@ def unpause_container(container_id: int, operator_user_id: int | None = None) ->
 
     machine_ip = get_machine_ip_by_id(machine_id)
     url = get_full_url(machine_ip, "/pause_container")
-    payload = json.dumps({"config": {"container_name": container.name, "action": "unpause"}})
+    payload = {"config": {"container_name": container.name, "action": "unpause"}}
     try:
-        sig = signature(payload)
-        enc = encryption(payload)
-        res = send(enc, sig, url, timeout=10.0)
+        res = send(url, payload, timeout=10.0)
     except Exception as e:
         logger.error("unpause_container send error: %s", e)
         write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.UNPAUSE_CONTAINER,
@@ -500,11 +486,9 @@ def get_container_disk_usage(container_id: int, timeout: float = 20.0) -> dict |
         return None
 
     container_name = getattr(container, 'name', None)
-    payload = json.dumps({"config": {"container_name": container_name}})
+    payload = {"config": {"container_name": container_name}}
     try:
-        sig = signature(payload)
-        enc = encryption(payload)
-        res = send(enc, sig, url, timeout=timeout)
+        res = send(url, payload, timeout=timeout)
     except Exception as e:
         logger.error("Error sending disk check request to %s: %s", url, e)
         return None
@@ -685,10 +669,8 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, operator_user_id:in
         }
            
     }
-    container_info=json.dumps(data)
-    signatured_message=signature(container_info)
-    encryptioned_message=encryption(container_info)
-    res=send(encryptioned_message,signatured_message,full_url)
+    container_info=data
+    res=send(full_url, container_info)
 
     _raise_on_node_error(res, 'add_collaborator')
     if res.get('success') not in (1, True):
@@ -750,10 +732,8 @@ def remove_collaborator(container_id:int,user_id:int,operator_user_id:int|None=N
             "user_name":user_name
         }
     }
-    container_info=json.dumps(data)
-    signatured_message=signature(container_info)
-    encryptioned_message=encryption(container_info)
-    res=send(encryptioned_message,signatured_message,full_url)
+    container_info=data
+    res=send(full_url, container_info)
     
     _raise_on_node_error(res, 'remove_collaborator')
     if res.get('success') not in (1, True):
@@ -802,11 +782,9 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,operator_user_id:
             "updated_role":updated_role.value
         }
     }
-    container_info=json.dumps(data)
-    signatured_message=signature(container_info)
-    encryptioned_message=encryption(container_info)
+    container_info=data
     # 使用 machine_ip 发送
-    res=send(encryptioned_message,signatured_message,full_url)
+    res=send(full_url, container_info)
 
     _raise_on_node_error(res, 'update_role')
     if res.get('success') not in (1, True):
@@ -849,11 +827,9 @@ def start_container(container_id:int, operator_user_id:int|None=None)->bool:
 
     container_name = get_by_id(container_id).name
     data = {"config": {"container_name": container_name}}
-    container_info = json.dumps(data)
-    signatured_message = signature(container_info)
-    encryptioned_message = encryption(container_info)
+    container_info = data
 
-    res = send(encryptioned_message, signatured_message, full_url)
+    res = send(full_url, container_info)
     logger.debug("start_container: NODE response: %s", res)
 
     # Check node-level errors
@@ -886,11 +862,9 @@ def stop_container(container_id:int, operator_user_id:int|None=None)->bool:
 
     container_name = get_by_id(container_id).name
     data = {"config": {"container_name": container_name}}
-    container_info = json.dumps(data)
-    signatured_message = signature(container_info)
-    encryptioned_message = encryption(container_info)
+    container_info = data
 
-    res = send(encryptioned_message, signatured_message, full_url)
+    res = send(full_url, container_info)
     logger.debug("stop_container: NODE response: %s", res)
 
     _raise_on_node_error(res, 'stop')
@@ -920,11 +894,9 @@ def restart_container(container_id:int, operator_user_id:int|None=None)->bool:
 
     container_name = get_by_id(container_id).name
     data = {"config": {"container_name": container_name}}
-    container_info = json.dumps(data)
-    signatured_message = signature(container_info)
-    encryptioned_message = encryption(container_info)
+    container_info = data
 
-    res = send(encryptioned_message, signatured_message, full_url)
+    res = send(full_url, container_info)
     logger.debug("restart_container: NODE response: %s", res)
 
     _raise_on_node_error(res, 'restart')

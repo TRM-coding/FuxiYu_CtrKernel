@@ -11,7 +11,7 @@ def test_add_collaborator_success_adds_binding_after_node_success(
     db_session,
     container_graph,
     mock_node_send,
-    mock_crypto,
+
 ):
     root, _machine, container = container_graph
     collaborator = create_user(username="collab_user")
@@ -85,7 +85,7 @@ def test_remove_collaborator_success_removes_binding_after_node_success(
     db_session,
     container_graph_with_collaborator,
     mock_node_send,
-    mock_crypto,
+
 ):
     root, collaborator, _machine, container = container_graph_with_collaborator
     mock_node_send(NODE_SUCCESS_TRUE)
@@ -116,7 +116,7 @@ def test_update_role_success_updates_binding(
     db_session,
     container_graph_with_collaborator,
     mock_node_send,
-    mock_crypto,
+
 ):
     root, collaborator, _machine, container = container_graph_with_collaborator
     mock_node_send(NODE_SUCCESS_TRUE)
@@ -137,7 +137,7 @@ def test_update_role_to_root_sets_container_username_root(
     db_session,
     container_graph_with_collaborator,
     mock_node_send,
-    mock_crypto,
+
 ):
     root, collaborator, _machine, container = container_graph_with_collaborator
     mock_node_send(NODE_SUCCESS_TRUE)

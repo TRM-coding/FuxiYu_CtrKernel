@@ -52,13 +52,18 @@ def _safe_test_environment():
 
 @pytest.fixture(scope="session")
 def app():
-    app = create_app(overrides=TEST_CONFIG_OVERRIDES)
-    _assert_sqlite_database_uri(app)
-    with app.app_context():
+    """FastAPI 迁移后：返回 Flask runtime（legacy 端点 + db context 宿主）。
+
+    已迁移到 FastAPI 的端点（如 machine_api）用 TestClient 测；legacy 端点用 flask client。
+    """
+    fastapi_app = create_app(overrides=TEST_CONFIG_OVERRIDES)
+    flask_app = fastapi_app.state.flask_app
+    _assert_sqlite_database_uri(flask_app)
+    with flask_app.app_context():
         from .. import models  # noqa: F401
 
         db.create_all()
-        yield app
+        yield flask_app
         db.session.remove()
         db.drop_all()
 

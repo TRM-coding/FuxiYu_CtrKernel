@@ -24,7 +24,6 @@ def test_ctrl_e2e_user_login_machine_permission_container_create_and_list(
 
     login_resp = client.post("/api/login", json={"username": "e2e_user", "password": "Password_123"})
     mocks.mock_node_response(monkeypatch, container_tasks, {"success": 1})
-    mocks.mock_container_crypto(monkeypatch, container_tasks)
     monkeypatch.setattr(node_comms, "is_machine_online_remote", lambda machine_id: True)
     heartbeat_calls = []
     monkeypatch.setattr(

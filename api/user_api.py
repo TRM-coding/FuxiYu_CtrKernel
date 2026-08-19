@@ -1,429 +1,292 @@
-from flask import jsonify, request, make_response, current_app
-from . import api_bp
+from typing import Any
+
+from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi.responses import JSONResponse
+
+from ..repositories import user_repo
+from ..schemas.common import SuccessMessageResponse
+from ..schemas.user import (
+    ChangePasswordRequest,
+    DeleteUserResponse,
+    ListUserBriefResponse,
+    LoginRequest,
+    LoginResponse,
+    RegisterRequest,
+    RegisterResponse,
+    RequestRegisterCodeRequest,
+    ResetPasswordResponse,
+    UpdateUserRequest,
+    UpdateUserResponse,
+    UserDetailResponse,
+    UserIdRequest,
+)
 from ..services import user_tasks
-from ..repositories import user_repo, authentications_repo
-from ..schemas.user_schema import user_schema, users_schema
+from .deps import require_current_user
+
+router = APIRouter(tags=["users"])
 
 
-@api_bp.post("/register")
-def register():
-	'''
-	通信数据格式：
-	发送格式：
-	{
-		"username":"xxxx",
-		"email":"xxxx",
-		"password":"xxxx",
-		"graduation_year":xxxx
-	}
-	返回格式：
-	{
-		"success": [0|1],
-		["error_reason": "xxxx"],
-		"message": "xxxx",
-		"user_id": xxxx,
-		"username": "xxxx",
-		"email": "xxxx",
-	}
-	'''
-	"""用户注册 API"""
-	recived_data = request.get_json(silent=True)
-	if not recived_data:
-		return jsonify({"success": 0, "message": "invalid json"}), 400
-	
-	# 直接读取明文字段
-	username = recived_data.get("username")
-	email = recived_data.get("email")
-	password = recived_data.get("password")
-	graduation_year = recived_data.get("graduation_year")
-	
-	if not username or not email or not password:
-		return jsonify({"success": 0, "message": "username, email and password required"}), 400
-	
-	# 调用 service 层注册用户
-	try:
-		success, user_or_reason, _ = user_tasks.Register_with_code(username, email, password, graduation_year, recived_data.get("registration_code"))
-	except Exception as e:
-		return jsonify({"success": 0, "message": "registration failed due to server error"}), 500
-	if success:
-		return jsonify({
-			"success": 1,
-			"message": "Registration successful",
-			"user_id": user_or_reason.id,
-			"username": user_or_reason.username,
-			"email": user_or_reason.email
-		}), 201
-	else:
-		# user_or_reason 是错误原因字符串
-		error_reason = user_or_reason
-		error_messages = {
-			"username_exists": "Username already exists",
-			"email_exists": "Email already exists",
-			"no_none_ascii": "Input contains non-ASCII characters",
-			"invalid_username": "Username may contain only letters, digits and underscore",
-			"registration_code_required": "Verification code required",
-			"registration_code_invalid": "Verification code invalid or expired",
-			"mail_send_failed": "Failed to send verification email"
-		}
-		message = error_messages.get(error_reason, "Registration failed")
+def _model_data(model, *, exclude_none: bool = False) -> dict[str, Any]:
+    """兼容 Pydantic v1/v2 的模型转 dict。"""
 
-		if error_reason in ["username_exists", "email_exists"]:
-			status_code = 409  # Conflict
-		else:
-			status_code = 400  # Bad Request
-
-		return jsonify({
-			"success": 0,
-			"message": message,
-			"error_reason": error_reason
-		}), status_code
+    if hasattr(model, "model_dump"):
+        return model.model_dump(exclude_none=exclude_none)
+    return model.dict(exclude_none=exclude_none)
 
 
+def _error(status_code: int, message: str, error_reason: str | None = None) -> JSONResponse:
+    """返回 Ctrl 现有错误结构。"""
+
+    payload: dict[str, Any] = {"success": 0, "message": message}
+    if error_reason is not None:
+        payload["error_reason"] = error_reason
+    return JSONResponse(status_code=status_code, content=payload)
 
 
-@api_bp.post("/request_register_code")
-def request_register_code():
-	data = request.get_json(silent=True) or {}
-	email = data.get("email")
-	if not email:
-		return jsonify({"success": 0, "message": "email required", "error_reason": "missing_email"}), 400
-	success, reason = user_tasks.Request_register_code(email)
-	if success:
-		return jsonify({"success": 1, "message": "verification code sent"}), 200
-	status = 400 if reason == 'email_domain_not_allowed' else 500
-	return jsonify({"success": 0, "message": reason, "error_reason": reason}), status
+#####################
+# 注册
 
-@api_bp.post("/login")
-def login():
-	'''
-	通信数据格式：
-	发送格式：
-	{
-		"username":"xxxx",
-		"password":"xxxx"
-		"remember":"[True|False]
-	}
-	返回格式：
-	{
-		"success": [0|1],
-		"message": "xxxx",
-		["error_reason": "xxxx"],
-		"user_id": xxxx,
-		"username": "xxxx",
-		"email": "xxxx",
-		"permission": "[user|operator]",
-	}
-	'''
-	"""用户登录 API"""
-	recived_data = request.get_json(silent=True)
-	if not recived_data:
-		return jsonify({"success": 0, "message": "invalid json"}), 400
-	
-	# 直接读取明文字段
-	username = recived_data.get("username")
-	password = recived_data.get("password")
-	remember = recived_data.get("remember")
-	
-	if not username or not password:
-		return jsonify({"success": 0, "message": "username and password required"}), 400
-	
-	# 调用 Login 函数，返回结果和错误原因
-	success, user_or_reason, token = user_tasks.Login(username, password, remember=remember)
-	
-	if success:
-		max_age = None
-		if remember:
-			max_age = 24*3600*30
-		# 创建响应
-		response = make_response(jsonify({
-			"success": 1,
-			"message": "Login successful",
-			"user_id": user_or_reason.id,
-			"username": user_or_reason.username,
-			"email": user_or_reason.email,
-			"permission": user_or_reason.permission.value,
-		}), 200)
-		
-		# 设置 cookies
-		response.set_cookie(
-			'auth_token',
-			token,
-			max_age=max_age,  # 不记住：None，关浏览器就丢 | 记住：24小时*30
-			httponly=True,
-			secure=current_app.config.get("SSL_ENABLED", True),  # 跟随 ENABLE_SSL：HTTPS 时阻止 cookie 走明文
-			samesite='Lax'
-		)
-		
-		return response
-	else:
-		# user_or_reason 是错误原因字符串
-		error_reason = user_or_reason
-		error_messages = {
-			"user_not_found": "User does not exist",
-			"password_incorrect": "Password is incorrect"
-		}
-		message = error_messages.get(error_reason, "Login failed")
-		if error_reason == "user_not_found":
-			error_code = 404
-		elif error_reason == "password_incorrect":
-			error_code = 400
 
-		return jsonify({
-			"success": 0,
-			"message": message,
-			"error_reason": error_reason
-		}), error_code
+@router.post("/register", response_model=RegisterResponse, status_code=201)
+def register(message: RegisterRequest, request: Request):
+    """用户注册。"""
 
-@api_bp.get("/users/get_user_detail_information")
-def get_user_detail_information_api():
-	'''
-	通信数据格式：
-	发送格式：
-	{
-		"user_id"
-	}
-	返回格式：
-	{
-		"success": [0|1],
-		"message": "xxxx",
-		["error_reason": "xxxx"],
-        "user_id",
-        "username",
-        "email",
-        "graduation_year",
-		"permission": "[user|operator]",
-        "containers", # in IDs
-        "amount_of_container",
-        "amount_of_functional_container",
-        "amount_of_managed_container"
+    data = _model_data(message)
+    try:
+        with request.app.state.flask_app.app_context():
+            success, user_or_reason, _ = user_tasks.Register_with_code(
+                data.get("username"),
+                data.get("email"),
+                data.get("password"),
+                data.get("graduation_year"),
+                data.get("registration_code"),
+            )
+    except Exception:
+        return _error(500, "registration failed due to server error")
+
+    if success:
+        return {
+            "success": 1,
+            "message": "Registration successful",
+            "user_id": user_or_reason.id,
+            "username": user_or_reason.username,
+            "email": user_or_reason.email,
+        }
+
+    error_reason = user_or_reason
+    error_messages = {
+        "username_exists": "Username already exists",
+        "email_exists": "Email already exists",
+        "no_none_ascii": "Input contains non-ASCII characters",
+        "invalid_username": "Username may contain only letters, digits and underscore",
+        "registration_code_required": "Verification code required",
+        "registration_code_invalid": "Verification code invalid or expired",
+        "mail_send_failed": "Failed to send verification email",
     }
-	'''
-	# require valid token
-	if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
-		return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
+    status_code = 409 if error_reason in {"username_exists", "email_exists"} else 400
+    return _error(status_code, error_messages.get(error_reason, "Registration failed"), error_reason)
 
-	data = request.get_json(silent=True) or {}
-	# support both JSON body and querystring
-	user_id = data.get("user_id") or request.args.get("user_id")
-	if not user_id:
-		return jsonify({"success": 0, "message": "user_id required", "error_reason": "missing_user_id"}), 400
 
-	info = user_tasks.Get_user_detail_information(user_id)
-	if not info:
-		return jsonify({"success": 0, "message": "user not found", "error_reason": "user_not_found"}), 404
+@router.post("/request_register_code", response_model=SuccessMessageResponse)
+def request_register_code(message: RequestRegisterCodeRequest, request: Request):
+    """发送注册验证码。"""
 
-	# if pydantic model, convert to dict
-	try:
-		payload = info.dict()
-	except Exception:
-		payload = info
+    with request.app.state.flask_app.app_context():
+        success, reason = user_tasks.Request_register_code(message.email)
+    if success:
+        return {"success": 1, "message": "verification code sent"}
+    status_code = 400 if reason == "email_domain_not_allowed" else 500
+    return _error(status_code, reason, reason)
 
-	return jsonify({"success": 1, "user_info": payload}), 200
 
-@api_bp.get("/users/list_all_user_bref_information")
-def list_all_user_bref_information_api():
-	'''
-	通信数据格式：
-	发送格式：
-	{
-		"page_number",
-		"page_size"
-	}
-	返回格式：
-	{[
-        "user_id",
-        "username",
-        "email",
-        "graduation_year",
-        "containers",
-        "amount_of_container",
-        "amount_of_functional_container",
-        "amount_of_managed_container"
-	], 
-	...
-	}
-	'''
-	# require valid token
-	if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
-		return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
+#####################
+# 登录
 
-	data = request.get_json(silent=True) or {}
-	page_number = data.get("page_number") or request.args.get("page_number") or 1
-	page_size = data.get("page_size") or request.args.get("page_size") or 10
 
-	try:
-		users = user_tasks.List_all_user_bref_information(page_number=int(page_number), page_size=int(page_size))
-	except Exception as e:
-		return jsonify({"success": 0, "message": "failed to list users", "error_reason": "list_failed"}), 500
+@router.post("/login", response_model=LoginResponse)
+def login(message: LoginRequest, response: Response, request: Request):
+    """用户登录并设置 auth_token cookie。"""
 
-	# convert pydantic models to dicts if necessary
-	out = []
-	for u in users:
-		try:
-			out.append(u.dict())
-		except Exception:
-			out.append(u)
+    with request.app.state.flask_app.app_context():
+        success, user_or_reason, token = user_tasks.Login(
+            message.username,
+            message.password,
+            remember=message.remember,
+        )
+        ssl_enabled = request.app.state.flask_app.config.get("SSL_ENABLED", True)
 
-	return jsonify({"success": 1, "users": out}), 200
+    if success:
+        max_age = 24 * 3600 * 30 if message.remember else None
+        response.set_cookie(
+            "auth_token",
+            token,
+            max_age=max_age,
+            httponly=True,
+            secure=ssl_enabled,
+            samesite="Lax",
+        )
+        return {
+            "success": 1,
+            "message": "Login successful",
+            "user_id": user_or_reason.id,
+            "username": user_or_reason.username,
+            "email": user_or_reason.email,
+            "permission": user_or_reason.permission.value,
+        }
 
-@api_bp.post("/users/change_password")
-def change_password_user():
-	'''
-	通讯数据格式：
-	发送格式：
-	{
-		"user_id",
-		"old_password",
-		"new_password"
-	}
-	返回格式：
-	{
-		"success": [0|1],
-		"message": "xxxx",
-		["error_reason": "xxxx"]
-	}
-	'''
-	if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
-		return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
+    error_reason = user_or_reason
+    error_messages = {
+        "user_not_found": "User does not exist",
+        "password_incorrect": "Password is incorrect",
+    }
+    status_code = 404 if error_reason == "user_not_found" else 400
+    return _error(status_code, error_messages.get(error_reason, "Login failed"), error_reason)
 
-	data = request.get_json(silent=True) or {}
-	
-	user_id = data.get("user_id") or request.args.get("user_id")
-	old_password = data.get("old_password")
-	new_password = data.get("new_password")
 
-	if not user_id or not old_password or not new_password:
-		return jsonify({"success": 0, "message": "user_id, old_password and new_password required", "error_reason": "missing_fields"}), 400
+#####################
+# 用户详情
 
-	# fetch user object
-	user = user_repo.get_by_id(int(user_id))
-	if not user:
-		return jsonify({"success": 0, "message": "user not found", "error_reason": "user_not_found"}), 404
 
-	try:
-		ok = user_tasks.Change_password(user, old_password, new_password)
-		if ok:
-			return jsonify({"success": 1, "message": "password changed"}), 200
-		else:
-			return jsonify({"success": 0, "message": "old password incorrect", "error_reason": "old_password_incorrect"}), 400
-	except ValueError as e:
-		if str(e) == 'no_none_ascii':
-			return jsonify({"success": 0, "message": "None ascii not allowed (Chinese not accepted)", "error_reason": "no_none_ascii"}), 400
-		raise
+@router.get("/users/get_user_detail_information", response_model=UserDetailResponse)
+def get_user_detail_information_api(
+    request: Request,
+    user_id: int = Query(..., ge=1),
+    _: int = Depends(require_current_user),
+):
+    """查询用户详情。"""
 
-@api_bp.post("/users/delete_user")
-def delete_user_api():
-	'''
-	通讯数据格式：
-	发送格式：
-	{
-		"user_id"
-	}
-	返回格式：
-	{
-		"success": [0|1],
-		"message": "xxxx",
-		["error_reason": "xxxx"],
-		"wild_containers": [...]  # 可选字段，仅在存在无主容器阻止删除时返回
-	}
-	'''
-	if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
-		return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
+    with request.app.state.flask_app.app_context():
+        info = user_tasks.Get_user_detail_information(user_id)
+    if not info:
+        return _error(404, "user not found", "user_not_found")
+    return {"success": 1, "user_info": _model_data(info)}
 
-	data = request.get_json(silent=True) or {}
-	user_id = data.get("user_id") or request.args.get("user_id")
-	if not user_id:
-		return jsonify({"success": 0, "message": "user_id required", "error_reason": "missing_user_id"}), 400
 
-	try:
-		ok = user_tasks.Delete_user(int(user_id))
-	except Exception as e:
-		# 异常时，意味着存在无主容器阻止删除；返回特定错误信息并附加无主容器列表
-		payload = {"success": 0, "message": "Wild container NOT allowed. Must remove all affected containers first.", "error_reason": "wild_container"}
-		wild = getattr(e, 'wild_containers', None)
-		if wild:
-			payload['wild_containers'] = wild
-		return jsonify(payload), 400
+@router.get("/users/list_all_user_bref_information", response_model=ListUserBriefResponse)
+def list_all_user_bref_information_api(
+    request: Request,
+    page_number: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1),
+    _: int = Depends(require_current_user),
+):
+    """分页查询用户概要。"""
 
-	if ok:
-		return jsonify({"success": 1, "message": "user deleted"}), 200
-	else:
-		return jsonify({"success": 0, "message": "user not found", "error_reason": "user_not_found"}), 404
+    try:
+        with request.app.state.flask_app.app_context():
+            users = user_tasks.List_all_user_bref_information(
+                page_number=int(page_number),
+                page_size=int(page_size),
+            )
+    except Exception:
+        return _error(500, "failed to list users", "list_failed")
 
-@api_bp.post("/users/update_user")
-def update_user_api():
-	'''
-	通讯数据格式：
-	发送格式：
-	{
-		"user_id",
-		"fields": {
-			"username": "newname",
-			"email": "newemail",
-			"graduation_year": 2026
-		}
-	}
-	返回格式：
-	{
-		"success": [0|1],
-		"message": "xxxx",
-		["error_reason": "xxxx"],
-		"user": { ... updated user data ... }
-	}
-	'''
-	if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
-		return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
+    return {"success": 1, "users": [_model_data(u) for u in users]}
 
-	data = request.get_json(silent=True) or {}
-	
-	user_id = data.get("user_id") or request.args.get("user_id")
-	fields = data.get("fields", {})
 
-	if not user_id or not fields:
-		return jsonify({"success": 0, "message": "user_id and fields required", "error_reason": "missing_fields"}), 400
+#####################
+# 修改密码
 
-	try:
-		user = user_tasks.Update_user(int(user_id), **fields)
-	except ValueError as e:
-		if str(e) == 'no_none_ascii':
-			return jsonify({"success": 0, "message": "禁止非ASCII字符（请勿输入中文）", "error_reason": "no_none_ascii"}), 400
-		if str(e) == 'invalid_username':
-			return jsonify({"success": 0, "message": "用户名仅允许字母、数字和下划线", "error_reason": "invalid_username"}), 400
-		return jsonify({"success": 0, "message": str(e), "error_reason": "invalid_fields"}), 400
 
-	if user:
-		return jsonify({"success": 1, "message": "user updated", "user": user.username}), 200
-	else:
-		return jsonify({"success": 0, "message": "user not found", "error_reason": "user_not_found"}), 404
+@router.post("/users/change_password", response_model=SuccessMessageResponse)
+def change_password_user(
+    message: ChangePasswordRequest,
+    request: Request,
+    _: int = Depends(require_current_user),
+):
+    """修改用户密码。"""
 
-@api_bp.post("/users/reset_password")
-def reset_password_api():
-	'''
-	通讯数据格式：
-	发送格式：
-	{
-		"user_id"
-	}
-	返回格式：
-	{
-		"success": [0|1],
-		"message": "xxxx",
-		["error_reason": "xxxx"],
-		"new_password": "xxxx"
-	}
-	'''
-	if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
-		return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
+    with request.app.state.flask_app.app_context():
+        user = user_repo.get_by_id(message.user_id)
+        if not user:
+            return _error(404, "user not found", "user_not_found")
+        try:
+            ok = user_tasks.Change_password(user, message.old_password, message.new_password)
+        except ValueError as e:
+            if str(e) == "no_none_ascii":
+                return _error(400, "None ascii not allowed (Chinese not accepted)", "no_none_ascii")
+            raise
 
-	data = request.get_json(silent=True) or {}
-	
-	user_id = data.get("user_id") or request.args.get("user_id")
+    if ok:
+        return {"success": 1, "message": "password changed"}
+    return _error(400, "old password incorrect", "old_password_incorrect")
 
-	if not user_id:
-		return jsonify({"success": 0, "message": "user_id required", "error_reason": "missing_user_id"}), 400
 
-	new_password = user_tasks.Reset_password(int(user_id))
-	if new_password:
-		return jsonify({"success": 1, "message": "password reset", "new_password": new_password}), 200
-	else:
-		return jsonify({"success": 0, "message": "user not found", "error_reason": "user_not_found"}), 404
+#####################
+# 删除用户
+
+
+@router.post("/users/delete_user", response_model=DeleteUserResponse)
+def delete_user_api(
+    message: UserIdRequest,
+    request: Request,
+    _: int = Depends(require_current_user),
+):
+    """删除用户。"""
+
+    try:
+        with request.app.state.flask_app.app_context():
+            ok = user_tasks.Delete_user(message.user_id)
+    except Exception as e:
+        payload: dict[str, Any] = {
+            "success": 0,
+            "message": "Wild container NOT allowed. Must remove all affected containers first.",
+            "error_reason": "wild_container",
+        }
+        wild = getattr(e, "wild_containers", None)
+        if wild:
+            payload["wild_containers"] = wild
+        return JSONResponse(status_code=400, content=payload)
+
+    if ok:
+        return {"success": 1, "message": "user deleted"}
+    return _error(404, "user not found", "user_not_found")
+
+
+#####################
+# 更新用户
+
+
+@router.post("/users/update_user", response_model=UpdateUserResponse)
+def update_user_api(
+    message: UpdateUserRequest,
+    request: Request,
+    _: int = Depends(require_current_user),
+):
+    """更新用户基础字段。"""
+
+    fields = _model_data(message.fields, exclude_none=True)
+    if not fields:
+        return _error(400, "user_id and fields required", "missing_fields")
+
+    try:
+        with request.app.state.flask_app.app_context():
+            user = user_tasks.Update_user(message.user_id, **fields)
+    except ValueError as e:
+        if str(e) == "no_none_ascii":
+            return _error(400, "禁止非ASCII字符（请勿输入中文）", "no_none_ascii")
+        if str(e) == "invalid_username":
+            return _error(400, "用户名仅允许字母、数字和下划线", "invalid_username")
+        return _error(400, str(e), "invalid_fields")
+
+    if user:
+        return {"success": 1, "message": "user updated", "user": user.username}
+    return _error(404, "user not found", "user_not_found")
+
+
+#####################
+# 重置密码
+
+
+@router.post("/users/reset_password", response_model=ResetPasswordResponse)
+def reset_password_api(
+    message: UserIdRequest,
+    request: Request,
+    _: int = Depends(require_current_user),
+):
+    """重置用户密码。"""
+
+    with request.app.state.flask_app.app_context():
+        new_password = user_tasks.Reset_password(message.user_id)
+    if new_password:
+        return {"success": 1, "message": "password reset", "new_password": new_password}
+    return _error(404, "user not found", "user_not_found")

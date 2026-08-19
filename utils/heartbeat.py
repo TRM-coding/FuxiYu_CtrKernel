@@ -1,11 +1,6 @@
 import threading
 import time
-import json
-import base64
-import requests
 
-from ..config import CommsConfig
-from ..utils.CheckKeys import signature, encryption
 from ..repositories.containers_repo import update_container, list_containers as repo_list_containers
 from ..repositories.machine_repo import get_by_id as get_machine_by_id, update_machine
 from ..constant import ContainerStatus, MachineStatus, OperationType
@@ -32,20 +27,11 @@ def _log_machine_status_transition(mid: int, new_status: MachineStatus) -> None:
 
 
 def send(machine_ip: str, endpoint: str, payload: dict, timeout: float = 5.0):
-    url = f"http://{machine_ip}{CommsConfig.NODE_URL_MIDDLE}{endpoint}"
-    body = json.dumps(payload)
-    sig = signature(body)
-    enc = encryption(body)
+    """HTTPS 明文 POST（check_keys 已退役，TLS 承载身份）。"""
+    from ..services.container_module.node_comms import get_full_url, send as node_comms_send
+    url = get_full_url(machine_ip, endpoint)
     try:
-        resp = requests.post(url, json={
-            "message": base64.b64encode(enc).decode('utf-8'),
-            "signature": base64.b64encode(sig).decode('utf-8')
-        }, timeout=timeout)
-        resp.raise_for_status()
-        try:
-            return resp.json()
-        except ValueError:
-            return {"text": resp.text, "status_code": resp.status_code}
+        return node_comms_send(url, payload, timeout=timeout)
     except Exception as e:
         return {"error": str(e)}
 

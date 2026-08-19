@@ -40,15 +40,7 @@ class TestMountCleanupTask:
         sent_payloads = []
         monkeypatch.setattr(
             container_mount_cleanup_task, "send",
-            lambda enc, sig, url, timeout: sent_payloads.append(url) or {"success": 1}
-        )
-        monkeypatch.setattr(
-            container_mount_cleanup_task, "signature",
-            lambda p: b"sig"
-        )
-        monkeypatch.setattr(
-            container_mount_cleanup_task, "encryption",
-            lambda p: b"enc"
+            lambda url, payload, timeout: sent_payloads.append(url) or {"success": 1}
         )
         # mock machine_repo to return a valid IP
         monkeypatch.setattr(
@@ -113,7 +105,7 @@ class TestMountCleanupTask:
 
         call_count = [0]
 
-        def _fail_first(enc, sig, url, timeout):
+        def _fail_first(url, payload, timeout):
             call_count[0] += 1
             if call_count[0] == 1:
                 raise RuntimeError("node unreachable")
@@ -121,12 +113,6 @@ class TestMountCleanupTask:
 
         monkeypatch.setattr(
             container_mount_cleanup_task, "send", _fail_first
-        )
-        monkeypatch.setattr(
-            container_mount_cleanup_task, "signature", lambda p: b"sig"
-        )
-        monkeypatch.setattr(
-            container_mount_cleanup_task, "encryption", lambda p: b"enc"
         )
         monkeypatch.setattr(
             container_mount_cleanup_task.machine_repo,

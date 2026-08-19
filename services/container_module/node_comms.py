@@ -15,7 +15,6 @@ from ...constant import ContainerStatus
 from ...repositories import machine_repo, containers_repo
 from ...repositories.container_ssh_login_repo import upsert_last_ssh_login_time
 from ..machine_tasks import is_machine_online_remote
-from ...utils.CheckKeys import signature, encryption
 from ...utils.parallel import parallel_node_calls
 from .exceptions import NodeServiceError
 from .utils import _parse_last_ssh_time
@@ -42,40 +41,39 @@ def _pin_file(machine_ip: str) -> Path:
     return Path(PINNED_CERTS_DIR) / f"{machine_ip}.pem"
 
 
-def _resolve_tls(machine_ip: str, cert=None, verify=None):
+def _resolve_tls(url: str, cert=None, verify=None):
     """解析 send 的 TLS 参数。
 
     - cert 默认 Ctrl 客户端证书（cert_utils 已生成时）
-    - verify 默认对端 pin 文件；未接入（未 pin）时降级 verify=False（TOFU 过渡，警告）
+    - verify 默认对端 pin 文件（按 URL 的 host 定位）；未接入（未 pin）时降级
+      verify=False（TOFU 过渡，警告）
     """
+    host = url.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
     if cert is None:
         from ...utils.cert_utils import ctrl_certificate_paths
         paths = ctrl_certificate_paths()
         if paths.cert_file.exists() and paths.key_file.exists():
             cert = (str(paths.cert_file), str(paths.key_file))
     if verify is None:
-        pin = _pin_file(machine_ip)
+        pin = _pin_file(host)
         if pin.exists():
             verify = str(pin)
         else:
-            logger.warning("send to %s: no pinned cert (machine not enrolled yet); TLS verify disabled", machine_ip)
+            logger.warning("send to %s: no pinned cert (machine not enrolled yet); TLS verify disabled", host)
             verify = False
     return cert, verify
 
 
-def send(ciphertext:bytes,signature:bytes,mechine_ip:str, timeout:float=5.0, *, cert=None, verify=None)->dict:
+def send(url: str, payload: dict, timeout: float = 5.0, *, cert=None, verify=None) -> dict:
     """
-    发送 POST 并返回解析后的响应（优先 JSON），出现错误时返回包含 error 字段的 dict。
+    HTTPS POST 明文 JSON payload 到 Node，返回解析后的响应（优先 JSON）。
 
-    TLS：https + Ctrl 客户端证书（cert）+ 对端证书 pin（verify），
-    显式传入 cert/verify 可覆盖默认（TOFU 首连时 verify=False）。
+    TLS 承载身份（check_keys 信封已退役）：https + Ctrl 客户端证书（cert）+
+    对端证书 pin（verify）；显式传入 cert/verify 可覆盖默认（TOFU 首连时 verify=False）。
     """
-    cert, verify = _resolve_tls(mechine_ip, cert=cert, verify=verify)
+    cert, verify = _resolve_tls(url, cert=cert, verify=verify)
     try:
-        resp = requests.post(mechine_ip, json={
-            "message": base64.b64encode(ciphertext).decode('utf-8'),
-            "signature": base64.b64encode(signature).decode('utf-8')
-        }, timeout=timeout, cert=cert, verify=verify)
+        resp = requests.post(url, json=payload, timeout=timeout, cert=cert, verify=verify)
 
         # 尝试解析为 JSON（即使是 4xx/5xx，也优先解析 body 中的 JSON，以保留 Node 返回的 error_reason）
         try:
@@ -138,14 +136,12 @@ def get_container_status(machine_ip: str, container_name: str, timeout: float = 
     这个方法主要是为了在服务端调用 Node 的 /container_status API 来验证容器状态的。但是这个方法不被heartbeat使用。
     """
     url = get_full_url(machine_ip, "/container_status")
-    payload = json.dumps({"config": {"container_name": container_name}})
-    sig = signature(payload)
-    enc = encryption(payload)
+    payload = {"config": {"container_name": container_name}}
 
     last_exc = None
     for attempt in range(2):
         try:
-            res = send(enc, sig, url, timeout=timeout)
+            res = send(url, payload, timeout=timeout)
             # send 不抛网络异常（以 {"error": ...} 返回），按原语义对网络级失败重试
             if isinstance(res, dict) and res.get('error') and res.get('status_code') != 404:
                 last_exc = res.get('error')
@@ -612,6 +608,26 @@ def probe_machine_connectivity(machine_id: int, attempts: int = CONNECTIVITY_PRO
 #   3. 断线 → 由挂载方调用 probe_machine_connectivity 回退探测（连续两次不达判宿主机离线）
 # 应用层 session：落库需 Flask app context（apply_* 用 db.session），挂载方包一层 ctx。
 
+def _handle_container_deleted(container_name: str) -> None:
+    """Node 推 delete 帧：容器在 Node 侧消失 → 抹 Ctrl DB 记录（绑定 + 容器行）。
+
+    关联表（usercontainer/container_ssh_login/freeze/long_term）均 ondelete=CASCADE，
+    删容器行即级联清理。外部删除是异常路径，记录 warning。
+    """
+    try:
+        from ...repositories.usercontainer_repo import remove_binding
+        container = containers_repo.get_by_container_name(container_name)
+        if container is None:
+            logger.debug("handle_node_ws delete: container %r already gone (skip)", container_name)
+            return
+        remove_binding(0, container.id, all=True)
+        containers_repo.delete_container(container.id)
+        logger.warning("handle_node_ws delete: container %r (id=%s) removed from DB (vanished on node)",
+                       container_name, container.id)
+    except Exception as e:
+        logger.warning("handle_node_ws delete: failed to remove container %r: %s", container_name, e)
+
+
 def rebuild_pinned_chain() -> Path | None:
     """重建 pin chain 文件：pinned_certs/*.pem 拼接为一个 bundle。
 
@@ -685,8 +701,17 @@ async def handle_node_ws(websocket) -> None:
             if frame.get("type") == "snapshot_batch":
                 # 落库需 Flask app context——挂载方（ASGI 桥接）负责包 ctx
                 apply_snapshot_batch(frame)
-            elif frame.get("type") in ("event", "delete"):
-                logger.info("handle_node_ws: frame type %r not yet handled (uid=%s)", frame.get("type"), uid)
+            elif frame.get("type") == "delete":
+                # 容器在 Node 侧消失（外部删除/对账清理）→ 抹 Ctrl DB 记录。
+                # 这是 Ctrl 现有 404 语义（删 DB 记录）的唯一替代品（文档 WSS 协议硬项）。
+                container_name = frame.get("container_name")
+                if container_name:
+                    _handle_container_deleted(container_name)
+            elif frame.get("type") == "event":
+                # 运行事件（event_log 素材）：记录日志；container_events 表随 WSS 推送落地时规划
+                logger.info("handle_node_ws: container event uid=%s name=%s type=%s exit_code=%s",
+                            uid, frame.get("container_name"), frame.get("event_type"),
+                            frame.get("exit_code"))
             else:
                 logger.warning("handle_node_ws: unknown frame type %r (uid=%s)", frame.get("type"), uid)
     except Exception as e:
