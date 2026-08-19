@@ -197,24 +197,49 @@ def _fetch_peer_cert(machine_ip: str, timeout: float = 5.0) -> tuple[str, bytes]
     return der_cert_sha256_fingerprint(der), der
 
 
-def register_machine(machine_id: int, timeout: float = 8.0) -> dict:
-    """TOFU 接入一台机器：首连 → TLS 层取指纹 → 颁发 UID → 下发 → pin → 落库。
+# 默认资源分配比例（占 Node 上报硬件的比例）：管理员随后用 update_machine 调整
+DEFAULT_RESOURCE_RATIO = float(os.getenv("CTRL_DEFAULT_RESOURCE_RATIO", "0.5"))
 
-    返回 {"success": True, "uid": str, "certificate_fingerprint": str}；
+
+def _default_resource_limits(hardware: dict) -> dict:
+    """按默认比例策略从 Node 上报硬件生成资源分配限制（建档用）。
+
+    真实硬件（cpu/memory/disk/gpu）取 Node 上报值；max_* 分配限制按比例折算，
+    管理员通过 update_machine 调整。hardware 为 None/空时返回空 dict。
+    """
+    hw = hardware or {}
+    cpu_cores = int((hw.get("cpu") or {}).get("cores") or 0)
+    mem_gb = int((hw.get("memory") or {}).get("total_gb") or 0)
+    disk_gb = int((hw.get("disk") or {}).get("total_gb") or 0)
+    gpus = hw.get("gpu") or []
+    ratio = DEFAULT_RESOURCE_RATIO
+    limits = {
+        "cpu_core_number": cpu_cores,
+        "max_cpu_core_number": max(1, int(cpu_cores * ratio)),
+        "memory_size_gb": mem_gb,
+        "max_memory_gb": max(1, int(mem_gb * ratio)),
+        "disk_size_gb": disk_gb,
+        "gpu_number": len(gpus),
+        "max_gpu_number": len(gpus),
+        "gpu_type": (gpus[0].get("name", "") if gpus else ""),
+    }
+    return limits
+
+
+def register_machine(machine_name: str, machine_ip: str, timeout: float = 8.0) -> dict:
+    """TOFU 建档一体接入（机器建档主入口）：信任锚（name/ip）→ TLS 首连 → 指纹 →
+    硬件上报 → UID 下发 → 建档（默认分配比例）→ 落库双凭据。
+
+    入参是管理员手填的最小信任锚；机器记录由本流程创建（add_machine 不再必须）。
+    返回 {"success": True, "uid", "certificate_fingerprint", "machine_id", "hardware"}；
     失败抛 NodeServiceError（reason 区分阶段）。
     """
+    from ...constant import MachineTypes
     from ...utils.cert_utils import ensure_ctrl_certificates, ctrl_certificate_paths, der_cert_to_pem
 
-    machine = None
-    try:
-        machine = machine_repo.get_by_id(machine_id)
-    except Exception:
-        machine = None
-    if not machine:
-        raise NodeServiceError(f"register_machine failed: machine {machine_id} not found", reason="machine_not_found")
-    machine_ip = getattr(machine, 'machine_ip', None)
-    if not machine_ip:
-        raise NodeServiceError(f"register_machine failed: machine {machine_id} has no ip", reason="machine_no_ip")
+    if not machine_name or not machine_ip:
+        raise NodeServiceError("register_machine failed: machine_name and machine_ip are required",
+                               reason="invalid_trust_anchor")
 
     # Ctrl 证书先就绪（mTLS 客户端证书；Node 侧校验调用者用）
     try:
@@ -232,7 +257,7 @@ def register_machine(machine_id: int, timeout: float = 8.0) -> dict:
         raise NodeServiceError(f"register_machine failed: cannot reach {machine_ip} over TLS: {e}",
                                reason="machine_unreachable") from e
 
-    # 2. 首连登记资料（只读身份状态，不返回指纹）
+    # 2. 首连登记资料（身份状态 + 静态硬件，不返回指纹）
     try:
         profile_url = get_full_url(machine_ip, "/node_identity/enrollment_profile")
         profile_resp = requests.get(profile_url, timeout=timeout, verify=False, cert=client_cert)
@@ -243,6 +268,7 @@ def register_machine(machine_id: int, timeout: float = 8.0) -> dict:
     if not isinstance(profile, dict):
         raise NodeServiceError(f"register_machine failed: bad enrollment_profile from {machine_ip}",
                                reason="enrollment_failed")
+    hardware = profile.get("hardware") if isinstance(profile.get("hardware"), dict) else {}
 
     # 3. 生成高熵 UID 并下发
     uid = secrets.token_urlsafe(24)
@@ -264,21 +290,50 @@ def register_machine(machine_id: int, timeout: float = 8.0) -> dict:
     except Exception as e:
         logger.warning("register_machine: failed to persist pin file for %s: %s", machine_ip, e)
 
-    # 5. 落库双凭据
+    # 5. 建档（硬件 + 默认分配策略）
+    limits = _default_resource_limits(hardware)
+    machine_type = MachineTypes.GPU if limits["gpu_number"] > 0 else MachineTypes.CPU
+    try:
+        machine = machine_repo.create_machine(
+            machinename=machine_name,
+            machine_ip=machine_ip,
+            machine_type=machine_type,
+            machine_description=f"enrolled via TOFU register ({machine_ip})",
+            cpu_core_number=limits["cpu_core_number"],
+            gpu_number=limits["gpu_number"],
+            gpu_type=limits["gpu_type"],
+            memory_size=limits["memory_size_gb"],
+            max_shared_gb=2,
+            disk_size=limits["disk_size_gb"],
+            max_cpu_core_number=limits["max_cpu_core_number"],
+            max_gpu_number=limits["max_gpu_number"],
+            max_memory_gb=limits["max_memory_gb"],
+        )
+    except Exception as e:
+        raise NodeServiceError(f"register_machine failed: create machine record: {e}",
+                               reason="create_machine_failed") from e
+
+    # 6. 落库双凭据
     try:
         machine_repo.update_machine(
-            machine_id,
+            machine.id,
             node_uid=uid,
             node_cert_fingerprint=fingerprint,
             cert_pinned_at=datetime.datetime.utcnow(),
         )
     except Exception as e:
-        raise NodeServiceError(f"register_machine failed: persist credentials for machine {machine_id}: {e}",
+        raise NodeServiceError(f"register_machine failed: persist credentials for machine {machine.id}: {e}",
                                reason="persist_failed") from e
 
-    logger.info("machine %s (%s) enrolled: uid=%s fingerprint=%s",
-                machine_id, machine_ip, uid, fingerprint)
-    return {"success": True, "uid": uid, "certificate_fingerprint": fingerprint}
+    logger.info("machine %s (%s) enrolled: id=%s uid=%s fingerprint=%s hardware=%s",
+                machine_name, machine_ip, machine.id, uid, fingerprint, hardware)
+    return {
+        "success": True,
+        "uid": uid,
+        "certificate_fingerprint": fingerprint,
+        "machine_id": machine.id,
+        "hardware": hardware,
+    }
 
 
 ####################################################
@@ -408,14 +463,77 @@ def apply_disk_usage_snapshot(data: dict) -> dict:
     return {"updated": updated, "skipped": skipped}
 
 
+def apply_sys_snapshot(data: dict, machine_id: int | None = None) -> dict:
+    """解析 sys_snapshot 帧：静态硬件漂移检测 + 动态指标记录。
+
+    *machine_id* 由调用方从帧的 node_uid 归位（apply_snapshot_batch 提供）。
+    - 静态（cpu.cores/memory.total_gb/disk.total_gb/gpu）：
+      比对 machines 表建档硬件，不一致 → warning（漂移检测，凭据之外的硬件变动感知）
+    - 动态（cpu.usage_percent/memory.used_gb/disk.used_gb）：
+      记录日志（管理面板展示/告警评估的落库待后续）
+    返回 {"checked", "drifted"}。
+    """
+    checked = drifted = 0
+    if not isinstance(data, dict) or machine_id is None:
+        return {"checked": checked, "drifted": drifted}
+
+    machine = None
+    try:
+        machine = machine_repo.get_by_id(machine_id)
+    except Exception:
+        machine = None
+    if machine is None:
+        logger.debug("apply_sys_snapshot: machine %s not found (deleted?)", machine_id)
+        return {"checked": checked, "drifted": drifted}
+
+    checked += 1
+    cpu = (data.get("cpu") or {}).get("cores")
+    mem = (data.get("memory") or {}).get("total_gb")
+    disk = (data.get("disk") or {}).get("total_gb")
+    gpus = data.get("gpu") or []
+
+    drift = {}
+    if cpu is not None and int(cpu) != (machine.cpu_core_number or 0):
+        drift["cpu_core_number"] = f"{machine.cpu_core_number} -> {int(cpu)}"
+    if mem is not None and int(mem) != (machine.memory_size_gb or 0):
+        drift["memory_size_gb"] = f"{machine.memory_size_gb} -> {int(mem)}"
+    if disk is not None and int(disk) != (machine.disk_size_gb or 0):
+        drift["disk_size_gb"] = f"{machine.disk_size_gb} -> {int(disk)}"
+    if len(gpus) != (machine.gpu_number or 0):
+        drift["gpu_number"] = f"{machine.gpu_number} -> {len(gpus)}"
+
+    if drift:
+        drifted += 1
+        logger.warning("apply_sys_snapshot: HARDWARE DRIFT on machine %s (%s): %s",
+                       machine.id, data.get("hostname"), drift)
+
+    logger.info("apply_sys_snapshot: machine %s (%s) cpu=%s%% mem=%s%% disk=%s%%",
+                machine.id, data.get("hostname"),
+                (data.get("cpu") or {}).get("usage_percent"),
+                (data.get("memory") or {}).get("usage_percent"),
+                (data.get("disk") or {}).get("percent"))
+    return {"checked": checked, "drifted": drifted}
+
+
 def apply_snapshot_batch(batch: dict) -> dict:
-    """解析 snapshot_batch 帧 → 按 topic 分发到三个 apply_*。返回按 topic 的统计。
+    """解析 snapshot_batch 帧 → 按 topic 分发到各 apply_*。返回按 topic 的统计。
 
     HTTP 回退轮询与 WSS 推送共用本函数（传输无关）。
     """
     result = {}
     if not isinstance(batch, dict):
         return result
+
+    # sys_snapshot 归位上下文：帧带 node_uid（WSS 协议）；未归位（uid 不在 machine 表）→ None
+    machine_id = None
+    node_uid = batch.get("node_uid")
+    if node_uid:
+        try:
+            machine = machine_repo.get_by_uid(node_uid)
+            machine_id = machine.id if machine else None
+        except Exception:
+            machine_id = None
+
     frames = batch.get("payload") or []
     for frame in frames:
         if not isinstance(frame, dict) or frame.get("type") != "snapshot":
@@ -428,6 +546,8 @@ def apply_snapshot_batch(batch: dict) -> dict:
             result[topic] = apply_last_ssh_snapshot(data)
         elif topic == "disk_usage":
             result[topic] = apply_disk_usage_snapshot(data)
+        elif topic == "sys_snapshot":
+            result[topic] = apply_sys_snapshot(data, machine_id)
         else:
             logger.warning("apply_snapshot_batch: unknown topic %r", topic)
     return result
