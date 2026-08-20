@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel, Field
 from ...constant import ROLE, ContainerStatus
-from ..machine_tasks import get_machine_reachable
+from ..machine_tasks import get_machine_reachable, is_machine_in_maintenance
 
 #API Definition
 ####################################################
@@ -56,6 +56,7 @@ class container_detail_information(BaseModel):
 # 派生状态定义
 
 DISPLAY_STATUS_HOST_OFFLINE = "host_offline"
+DISPLAY_STATUS_HOST_MAINTENANCE = "host_maintenance"
 
 # 派生状态辅助函数
 def _derive_display_status(container_status, machine_id: int | None) -> str:
@@ -68,7 +69,8 @@ def _derive_display_status(container_status, machine_id: int | None) -> str:
         return status_str
     if machine_id is None:
         return status_str
+    if is_machine_in_maintenance(machine_id):
+        return DISPLAY_STATUS_HOST_MAINTENANCE
     if not get_machine_reachable(machine_id):
         return DISPLAY_STATUS_HOST_OFFLINE
     return status_str
-

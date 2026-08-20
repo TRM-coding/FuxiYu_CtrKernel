@@ -4,6 +4,8 @@ from importlib import import_module
 
 import uvicorn
 
+from FuxiYu_CtrKernel.config import AppConfig
+
 pkg_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(pkg_dir)
 if parent_dir not in sys.path:
@@ -18,10 +20,9 @@ except Exception:
 app = create_app()
 
 if __name__ == "__main__":
-    flask_app = app.state.flask_app
-    ssl_enabled = flask_app.config.get("SSL_ENABLED", False)
-    cert_path = flask_app.config.get("SSL_CERT_PATH")
-    key_path = flask_app.config.get("SSL_KEY_PATH")
+    ssl_enabled = getattr(AppConfig, "SSL_ENABLED", False)
+    cert_path = getattr(AppConfig, "SSL_CERT_PATH", None)
+    key_path = getattr(AppConfig, "SSL_KEY_PATH", None)
 
     ssl_kwargs = {}
     if ssl_enabled and cert_path and key_path and os.path.exists(cert_path) and os.path.exists(key_path):

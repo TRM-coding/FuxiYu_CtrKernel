@@ -6,7 +6,7 @@
 import datetime as dt
 import json
 
-from flask import current_app
+from ..config import AppConfig
 from pydantic import BaseModel
 
 from ..constant import AnnouncementStatus, AnnouncementTargetType
@@ -136,7 +136,7 @@ def resolve_recipients(targets: list[TargetEntry]) -> ResolveResult:
                     email=u.email,
                 )
 
-    max_recipients = current_app.config.get("ANNOUNCEMENT_MAX_RECIPIENTS", 200)
+    max_recipients = getattr(AppConfig, "ANNOUNCEMENT_MAX_RECIPIENTS", 200)
     if len(recipients_map) > max_recipients:
         raise ValueError("too_many_recipients")
 
@@ -251,7 +251,7 @@ def batch_send_drafts_service(
 
     单条失败不影响后续。
     """
-    max_batch = current_app.config.get("ANNOUNCEMENT_BATCH_SEND_MAX", 20)
+    max_batch = getattr(AppConfig, "ANNOUNCEMENT_BATCH_SEND_MAX", 20)
     if len(draft_ids) > max_batch:
         raise ValueError("batch_too_large")
     if not targets:

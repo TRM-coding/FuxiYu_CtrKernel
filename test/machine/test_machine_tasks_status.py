@@ -37,22 +37,28 @@ def test_update_machine_rejects_max_shared_greater_than_target_memory(db_session
         machine_tasks.Update_machine(machine.id, max_shared_gb=6, max_memory_gb=4)
 
 
-def test_update_machine_online_to_maintenance_starts_transition_without_status_update(monkeypatch, db_session):
+def test_update_machine_sets_maintenance_switch(db_session):
+    # 维护态为纯开关，不写入 machine_status。
     machine = create_machine(machine_status=MachineStatus.ONLINE, machine_description="old")
-    calls = []
-    monkeypatch.setattr(machine_tasks, "start_machine_maintenance_transition_heartbeat", lambda machine_id: calls.append(machine_id))
 
-    assert machine_tasks.Update_machine(machine.id, machine_status=MachineStatus.MAINTENANCE.value, machine_description="new") is True
+    assert machine_tasks.Update_machine(machine.id, is_maintenance=True, machine_description="new") is True
 
     refreshed = Machine.query.get(machine.id)
     assert refreshed.machine_status == MachineStatus.ONLINE
+    assert refreshed.is_maintenance is True
     assert refreshed.machine_description == "new"
-    assert calls == [machine.id]
+
+
+def test_update_machine_rejects_maintenance_as_machine_status(db_session):
+    machine = create_machine(machine_status=MachineStatus.ONLINE)
+
+    with pytest.raises(ValueError, match="is_maintenance"):
+        machine_tasks.Update_machine(machine.id, machine_status="maintenance")
 
 
 def test_is_machine_online_remote_true_when_node_online(monkeypatch, db_session):
     machine = create_machine(machine_ip="10.0.0.8")
-    monkeypatch.setattr(machine_tasks, "send", lambda ip, endpoint, payload, timeout=2.0: {"success": 1, "machine_status": "online"})
+    monkeypatch.setattr(machine_tasks, "send", lambda url, payload, timeout=2.0: {"success": 1, "machine_status": "online"})
 
     assert machine_tasks.is_machine_online_remote(machine.id) is True
 
@@ -63,12 +69,12 @@ def test_is_machine_online_remote_false_when_machine_missing(db_session):
 
 def test_is_machine_online_remote_false_when_node_offline(monkeypatch, db_session):
     machine = create_machine()
-    monkeypatch.setattr(machine_tasks, "send", lambda ip, endpoint, payload, timeout=2.0: {"success": 1, "machine_status": "offline"})
+    monkeypatch.setattr(machine_tasks, "send", lambda url, payload, timeout=2.0: {"success": 1, "machine_status": "offline"})
 
     assert machine_tasks.is_machine_online_remote(machine.id) is False
 
 
-def test_is_machine_online_remote_false_when_heartbeat_raises(monkeypatch, db_session):
+def test_is_machine_online_remote_false_when_send_raises(monkeypatch, db_session):
     machine = create_machine()
     monkeypatch.setattr(machine_tasks, "send", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("network")))
 
@@ -97,22 +103,26 @@ def test_list_machine_bref_marks_offline_machine_and_containers_offline(monkeypa
     assert Container.query.get(container.id).container_status == ContainerStatus.OFFLINE
 
 
-def test_list_machine_bref_keeps_maintenance_when_remote_online(monkeypatch, db_session):
-    machine = create_machine(machine_status=MachineStatus.MAINTENANCE)
+def test_list_machine_bref_keeps_maintenance_display_when_remote_online(monkeypatch, db_session):
+    machine = create_machine(machine_status=MachineStatus.OFFLINE, is_maintenance=True)
     monkeypatch.setattr(machine_tasks, "is_machine_online_remote", lambda machine_id, timeout=2.0: True)
 
     result, _ = machine_tasks.List_all_machine_bref_information(0, 10)
 
-    assert result[0].machine_status == MachineStatus.MAINTENANCE.value
+    assert result[0].machine_status == MachineStatus.ONLINE.value
+    assert result[0].is_maintenance is True
+    assert result[0].display_status == "maintenance"
 
 
-def test_list_machine_bref_marks_maintenance_offline_when_remote_offline(monkeypatch, db_session):
-    machine = create_machine(machine_status=MachineStatus.MAINTENANCE)
+def test_list_machine_bref_marks_connection_offline_but_keeps_maintenance_display(monkeypatch, db_session):
+    machine = create_machine(machine_status=MachineStatus.ONLINE, is_maintenance=True)
     monkeypatch.setattr(machine_tasks, "is_machine_online_remote", lambda machine_id, timeout=2.0: False)
 
     result, _ = machine_tasks.List_all_machine_bref_information(0, 10)
 
     assert result[0].machine_status == MachineStatus.OFFLINE.value
+    assert result[0].is_maintenance is True
+    assert result[0].display_status == "maintenance"
 
 
 def test_list_machine_bref_filters_non_operator_by_machine_permission(monkeypatch, db_session):

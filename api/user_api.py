@@ -3,6 +3,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import JSONResponse
 
+from ..config import AppConfig
+from ..extensions import session_scope
 from ..repositories import user_repo
 from ..schemas.common import SuccessMessageResponse
 from ..schemas.user import (
@@ -60,14 +62,13 @@ def register(message: RegisterRequest, request: Request):
 
     data = _model_data(message)
     try:
-        with request.app.state.flask_app.app_context():
-            success, user_or_reason, _ = user_tasks.Register_with_code(
-                data.get("username"),
-                data.get("email"),
-                data.get("password"),
-                data.get("graduation_year"),
-                data.get("registration_code"),
-            )
+        success, user_or_reason, _ = user_tasks.Register_with_code(
+            data.get("username"),
+            data.get("email"),
+            data.get("password"),
+            data.get("graduation_year"),
+            data.get("registration_code"),
+        )
     except Exception:
         return _error(500, "registration failed due to server error")
 
@@ -98,8 +99,7 @@ def register(message: RegisterRequest, request: Request):
 def request_register_code(message: RequestRegisterCodeRequest, request: Request):
     """发送注册验证码。"""
 
-    with request.app.state.flask_app.app_context():
-        success, reason = user_tasks.Request_register_code(message.email)
+    success, reason = user_tasks.Request_register_code(message.email)
     if success:
         return {"success": 1, "message": "verification code sent"}
     status_code = 400 if reason == "email_domain_not_allowed" else 500
@@ -114,13 +114,12 @@ def request_register_code(message: RequestRegisterCodeRequest, request: Request)
 def login(message: LoginRequest, response: Response, request: Request):
     """用户登录并设置 auth_token cookie。"""
 
-    with request.app.state.flask_app.app_context():
-        success, user_or_reason, token = user_tasks.Login(
-            message.username,
-            message.password,
-            remember=message.remember,
-        )
-        ssl_enabled = request.app.state.flask_app.config.get("SSL_ENABLED", True)
+    success, user_or_reason, token = user_tasks.Login(
+        message.username,
+        message.password,
+        remember=message.remember,
+    )
+    ssl_enabled = getattr(AppConfig, "SSL_ENABLED", True)
 
     if success:
         max_age = 24 * 3600 * 30 if message.remember else None
@@ -162,8 +161,7 @@ def get_user_detail_information_api(
 ):
     """查询用户详情。"""
 
-    with request.app.state.flask_app.app_context():
-        info = user_tasks.Get_user_detail_information(user_id)
+    info = user_tasks.Get_user_detail_information(user_id)
     if not info:
         return _error(404, "user not found", "user_not_found")
     return {"success": 1, "user_info": _model_data(info)}
@@ -179,11 +177,10 @@ def list_all_user_bref_information_api(
     """分页查询用户概要。"""
 
     try:
-        with request.app.state.flask_app.app_context():
-            users = user_tasks.List_all_user_bref_information(
-                page_number=int(page_number),
-                page_size=int(page_size),
-            )
+        users = user_tasks.List_all_user_bref_information(
+            page_number=int(page_number),
+            page_size=int(page_size),
+        )
     except Exception:
         return _error(500, "failed to list users", "list_failed")
 
@@ -202,8 +199,8 @@ def change_password_user(
 ):
     """修改用户密码。"""
 
-    with request.app.state.flask_app.app_context():
-        user = user_repo.get_by_id(message.user_id)
+    with session_scope(commit=False) as session:
+        user = user_repo.get_by_id(message.user_id, session=session)
         if not user:
             return _error(404, "user not found", "user_not_found")
         try:
@@ -231,8 +228,7 @@ def delete_user_api(
     """删除用户。"""
 
     try:
-        with request.app.state.flask_app.app_context():
-            ok = user_tasks.Delete_user(message.user_id)
+        ok = user_tasks.Delete_user(message.user_id)
     except Exception as e:
         payload: dict[str, Any] = {
             "success": 0,
@@ -266,8 +262,7 @@ def update_user_api(
         return _error(400, "user_id and fields required", "missing_fields")
 
     try:
-        with request.app.state.flask_app.app_context():
-            user = user_tasks.Update_user(message.user_id, **fields)
+        user = user_tasks.Update_user(message.user_id, **fields)
     except ValueError as e:
         if str(e) == "no_none_ascii":
             return _error(400, "禁止非ASCII字符（请勿输入中文）", "no_none_ascii")
@@ -292,8 +287,7 @@ def reset_password_api(
 ):
     """重置用户密码。"""
 
-    with request.app.state.flask_app.app_context():
-        new_password = user_tasks.Reset_password(message.user_id)
+    new_password = user_tasks.Reset_password(message.user_id)
     if new_password:
         return {"success": 1, "message": "password reset", "new_password": new_password}
     return _error(404, "user not found", "user_not_found")

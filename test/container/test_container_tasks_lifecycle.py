@@ -58,7 +58,7 @@ def test_create_container_rejects_machine_not_found(db_session, container_info):
 
 def test_create_container_rejects_machine_maintenance(db_session, container_info):
     owner = create_user()
-    machine = create_machine(machine_status=MachineStatus.MAINTENANCE)
+    machine = create_machine(is_maintenance=True)
 
     with pytest.raises(container_tasks.NodeServiceError) as excinfo:
         container_tasks.Create_container(owner.username, machine.id, container_info)

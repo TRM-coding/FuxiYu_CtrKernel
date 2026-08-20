@@ -35,7 +35,7 @@ def test_add_and_update_machine_with_real_repository(db_session):
     assert Machine.query.get(machine.id).machine_name == "repo_machine_updated"
 
 
-def test_list_machine_bref_updates_status_with_mocked_heartbeat(monkeypatch, db_session):
+def test_list_machine_bref_updates_status_with_mocked_probe(monkeypatch, db_session):
     machine = create_machine(machine_status=MachineStatus.OFFLINE)
     create_container(machine=machine)
     monkeypatch.setattr(machine_tasks, "is_machine_online_remote", lambda machine_id, timeout=2.0: True)

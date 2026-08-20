@@ -70,7 +70,8 @@ def test_Add_machine():
         assert machine.machine_name == machine_name
         assert machine.machine_ip == machine_ip
         assert machine.machine_type == machine_type
-        assert machine.machine_status == MachineStatus.MAINTENANCE  # 默认状态
+        assert machine.machine_status == MachineStatus.ONLINE  # 默认连接状态
+        assert machine.is_maintenance is False
         assert machine.cpu_core_number == cpu_core_number
         assert machine.memory_size_gb == memory_size  # 验证内存字段
         assert machine.gpu_number == gpu_number
@@ -107,7 +108,7 @@ def test_Remove_machine():
                 machine_name=machine_name,
                 machine_ip=machine_ip,
                 machine_type=machine_type,
-                machine_status=MachineStatus.MAINTENANCE,
+                machine_status=MachineStatus.ONLINE,
                 cpu_core_number=random.randint(1, 16),
                 gpu_number=random.randint(0, 4),
                 gpu_type=f"GPU_{random.randint(1000, 5000)}",
@@ -194,7 +195,7 @@ def test_Update_machine():
         available_types = list(MachineTypes)
         new_machine_type = random.choice([t for t in available_types if t != machine_type])
         
-        new_machine_status = MachineStatus.MAINTENANCE
+        new_machine_status = MachineStatus.OFFLINE
         new_cpu_core_number = random.randint(17, 32)
         new_memory_size = random.randint(129, 256)
         new_gpu_number = random.randint(5, 8)
@@ -264,7 +265,7 @@ def test_Update_machine():
         assert partially_updated_machine.machine_ip == new_machine_ip, f"部分更新后IP被意外修改: {partially_updated_machine.machine_ip} != {new_machine_ip}"
         
         # 测试组合1：只更新机器状态和描述
-        new_status = MachineStatus.ONLINE if new_machine_status == MachineStatus.MAINTENANCE else MachineStatus.MAINTENANCE
+        new_status = MachineStatus.ONLINE if new_machine_status == MachineStatus.OFFLINE else MachineStatus.OFFLINE
         new_desc = f"test_machine_{uuid.uuid4().hex[:4]}"
         
         result_combo1 = Update_machine(

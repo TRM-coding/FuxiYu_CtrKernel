@@ -1,6 +1,7 @@
 #限制：注册用户名必须是英文
 from ..models.user import User
 from werkzeug.security import check_password_hash, generate_password_hash
+from ..extensions import session_scope
 from ..repositories.user_repo import *
 from ..repositories import authentications_repo
 from ..repositories import registration_code_repo
@@ -57,24 +58,22 @@ def Login(username: str, password: str, *, remember: bool = False):
                - 登录成功: (True, User对象, token)
     """
     # 检查用户是否存在：用户名优先；用户名规则不含 @，可无歧义地回退按邮箱查
-    user = User.query.filter_by(username=username).first()
-    if not user:
-        user = User.query.filter_by(email=username).first()
-    if not user:
-        return False, "user_not_found", None
-    
-    # 检查密码是否正确
-    if not check_password_hash(user.password_hash, password):
-        return False, "password_incorrect", None
-    
-    # 登录成功，生成 token
-    token = secrets.token_urlsafe(32)
-    expires_at = datetime.utcnow() + timedelta(hours=24)
-    if remember: 
-        expires_at = datetime.utcnow() + timedelta(days=30)
-    auth = authentications_repo.create_auth(token, user.id, expires_at)
-    
-    return True, user, auth.token
+    with session_scope() as session:
+        user = get_by_name(username, session=session)
+        if not user:
+            user = get_by_email(username, session=session)
+        if not user:
+            return False, "user_not_found", None
+
+        # 检查密码是否正确
+        if not check_password_hash(user.password_hash, password):
+            return False, "password_incorrect", None
+
+        # 登录成功，生成 token
+        token = secrets.token_urlsafe(32)
+        expires_at = datetime.utcnow() + timedelta(days=30 if remember else 1)
+        auth = authentications_repo.create_auth(token, user.id, expires_at, session=session)
+        return True, user, auth.token
 #####################################
 
 
@@ -129,25 +128,27 @@ def Register(username: str, email: str, password: str, graduation_year):
         return False, "no_none_ascii", None
 
     # 检查用户名是否已存在
-    if User.query.filter_by(username=username).first():
-        return False, "username_exists", None
-    
-    # 检查邮箱是否已存在
-    if User.query.filter_by(email=email).first():
-        return False, "email_exists", None
-    
-    # 创建新用户
-    try:
-        new_user = create_user( # 改用repository层的create_user函数
-            username=username,
-            email=email,
-            password_hash=generate_password_hash(password),
-            graduation_year=graduation_year
-        )
-    except Exception as e:
-        write_op_log(success=False, operation=OperationType.REGISTER_USER, target_type="user", target_id=0,
-                     detail={"username": username, "email": email}, error_reason=str(e))
-        raise
+    with session_scope() as session:
+        if get_by_name(username, session=session):
+            return False, "username_exists", None
+
+        # 检查邮箱是否已存在
+        if get_by_email(email, session=session):
+            return False, "email_exists", None
+
+        # 创建新用户
+        try:
+            new_user = create_user( # 改用repository层的create_user函数
+                username=username,
+                email=email,
+                password_hash=generate_password_hash(password),
+                graduation_year=graduation_year,
+                session=session,
+            )
+        except Exception as e:
+            write_op_log(success=False, operation=OperationType.REGISTER_USER, target_type="user", target_id=0,
+                         detail={"username": username, "email": email}, error_reason=str(e))
+            raise
     write_op_log(success=True, operation=OperationType.REGISTER_USER, target_type="user", target_id=new_user.id,
                  detail={"username": username, "email": email})
     return True, new_user, None
@@ -181,7 +182,8 @@ def Change_password(user: User, old_password: str, new_password: str) -> bool:
                      target_type="user", target_id=user.id, detail={}, error_reason=str(e))
         return False
     try:
-        update_user(user.id, password_hash=generate_password_hash(new_password))
+        with session_scope() as session:
+            update_user(user.id, password_hash=generate_password_hash(new_password), session=session)
     except Exception as e:
         print(f"Error updating password in database: {e}")
         write_op_log(success=False, operator_user_id=user.id, operation=OperationType.CHANGE_PASSWORD,
@@ -209,8 +211,10 @@ def Delete_user(user_id: int) -> bool:
         return False
 
     # 最终删除用户
-    user = get_by_id(user_id)
-    if delete_user(user_id=user_id):
+    with session_scope() as session:
+        user = get_by_id(user_id, session=session)
+        ok = delete_user(user_id=user_id, session=session)
+    if ok:
         write_op_log(success=True, operation=OperationType.DELETE_USER, target_type="user", target_id=user_id,
                      detail={"username": getattr(user, 'username', None)})
         return True
@@ -227,7 +231,8 @@ def Get_user_detail_information(user_id: int)->user_detail_information:
     if not user_id:
         return None
     try:
-        user = User.query.get(int(user_id))
+        with session_scope(commit=False) as session:
+            user = get_by_id(int(user_id), session=session)
     except Exception:
         return None
 
@@ -265,7 +270,8 @@ def List_all_user_bref_information(page_number:int, page_size:int)->list[user_br
         ps = 10
 
     offset = (pn - 1) * ps
-    users = list_users(limit=ps, offset=offset)
+    with session_scope(commit=False) as session:
+        users = list_users(limit=ps, offset=offset, session=session)
     result: list[user_bref_information] = []
     for u in users:
         # Use centralized helper to compute container counts for this user
@@ -334,8 +340,9 @@ def Update_user(user_id:int,**fields)->User|None:
         if isinstance(v, str) and not _is_all_ascii(v):
             raise ValueError('no_none_ascii')
 
-    user=update_user(user_id,**fields)
-    return user
+    with session_scope() as session:
+        user = update_user(user_id, **fields, session=session)
+        return user
 #####################################
 
 #####################################
@@ -343,16 +350,17 @@ def Update_user(user_id:int,**fields)->User|None:
 #TODO:实现邮件发送功能
 # 暂时默认重置为 "[graduation_year][username]
 def Reset_password(user_id:int)->str|None:
-    user=get_by_id(user_id)
-    if not user:
-        return None
-    new_password=f"{user.graduation_year}{user.username}"
-    try:
-        update_user(user_id,password_hash=generate_password_hash(new_password))
-    except Exception as e:
-        write_op_log(success=False, operation=OperationType.RESET_PASSWORD, target_type="user", target_id=user_id,
-                     detail={"username": user.username}, error_reason=str(e))
-        raise
+    with session_scope() as session:
+        user = get_by_id(user_id, session=session)
+        if not user:
+            return None
+        new_password=f"{user.graduation_year}{user.username}"
+        try:
+            update_user(user_id,password_hash=generate_password_hash(new_password), session=session)
+        except Exception as e:
+            write_op_log(success=False, operation=OperationType.RESET_PASSWORD, target_type="user", target_id=user_id,
+                         detail={"username": user.username}, error_reason=str(e))
+            raise
     write_op_log(success=True, operation=OperationType.RESET_PASSWORD, target_type="user", target_id=user_id,
                  detail={"username": user.username})
     return new_password
@@ -377,7 +385,14 @@ def Request_register_code(email: str):
     code = f'{secrets.randbelow(1000000):06d}'
     expires_at = datetime.utcnow() + timedelta(minutes=3)
     try:
-        registration_code_repo.create_code(email=email, school_domain=domain, code=code, expires_at=expires_at)
+        with session_scope() as session:
+            registration_code_repo.create_code(
+                email=email,
+                school_domain=domain,
+                code=code,
+                expires_at=expires_at,
+                session=session,
+            )
     except Exception as exc:
         print(f"Failed to create registration code for {email}: {exc}")
         return False, 'code_creation_failed'
@@ -396,8 +411,14 @@ def Register_with_code(username: str, email: str, password: str, graduation_year
     if domain not in ALLOWED_REGISTRATION_EMAIL_DOMAINS:
         return False, 'email_domain_not_allowed', None
 
-    if not registration_code_repo.verify_code(email=email, code=registration_code, school_domain=domain):
-        return False, 'registration_code_invalid', None
+    with session_scope() as session:
+        if not registration_code_repo.verify_code(
+            email=email,
+            code=registration_code,
+            school_domain=domain,
+            session=session,
+        ):
+            return False, 'registration_code_invalid', None
 
     return Register(username, email, password, graduation_year)
 

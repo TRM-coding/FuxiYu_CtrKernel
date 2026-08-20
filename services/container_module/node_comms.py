@@ -14,7 +14,7 @@ from ...config import CommsConfig
 from ...constant import ContainerStatus
 from ...repositories import machine_repo, containers_repo
 from ...repositories.container_ssh_login_repo import upsert_last_ssh_login_time
-from ..machine_tasks import is_machine_online_remote
+from ..machine_tasks import is_machine_in_maintenance, is_machine_online_remote
 from ...utils.parallel import parallel_node_calls
 from .exceptions import NodeServiceError
 from .utils import _parse_last_ssh_time
@@ -139,11 +139,7 @@ def _ensure_machine_online_for_operation(machine_id: int, operation: str = ''):
         m = None
     if not m:
         raise NodeServiceError(f"MACHINE {operation} failed: machine {machine_id} not found", reason="machine_not_found")
-    try:
-        machine_status = m.machine_status.value.lower() if hasattr(m.machine_status, 'value') else str(m.machine_status).lower()
-    except Exception:
-        machine_status = str(getattr(m, 'machine_status', '')).lower()
-    if machine_status == 'maintenance':
+    if bool(getattr(m, "is_maintenance", False)) or is_machine_in_maintenance(machine_id):
         raise NodeServiceError(f"MACHINE {operation} aborted: machine is maintenance", reason="machine_maintenance")
     ok = is_machine_online_remote(machine_id)
     if not ok:

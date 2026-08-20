@@ -33,11 +33,15 @@ class _StreamToLogger:
 def configure_daily_logging(app) -> None:
     global _CONFIGURED
 
-    app.logger.handlers = []
-    app.logger.propagate = True
+    app_logger = getattr(app, "logger", logging.getLogger("FuxiYu_CtrKernel"))
+    app_logger.handlers = []
+    app_logger.propagate = True
 
     if _CONFIGURED:
-        app._daily_logging_configured = True
+        try:
+            app._daily_logging_configured = True
+        except Exception:
+            pass
         return
 
     base_dir = os.path.dirname(os.path.abspath(os.path.join(__file__, "..")))
@@ -74,4 +78,7 @@ def configure_daily_logging(app) -> None:
     sys.stderr = _StreamToLogger(logging.getLogger("stderr"), logging.ERROR)
 
     _CONFIGURED = True
-    app._daily_logging_configured = True
+    try:
+        app._daily_logging_configured = True
+    except Exception:
+        pass

@@ -1,4 +1,4 @@
-from flask import current_app
+from ..config import AppConfig
 
 import threading
 import time
@@ -6,12 +6,12 @@ import time
 from ..repositories.machine_repo import *
 from pydantic import BaseModel
 from typing import Optional
-from ..utils.heartbeat import send, start_machine_maintenance_transition_heartbeat
 from ..utils.parallel import parallel_node_calls
 from ..repositories.containers_repo import update_container, list_containers as repo_list_containers
 from ..repositories import machine_permission_repo, user_repo
 from .operation_log_tasks import write_operation_log as write_op_log
 from ..constant import ContainerStatus, MachineStatus, OperationType
+MACHINE_DISPLAY_MAINTENANCE = "maintenance"
 #######################################
 #API Definition
 class machine_bref_information(BaseModel):
@@ -20,12 +20,16 @@ class machine_bref_information(BaseModel):
     machine_ip:str
     machine_type:str
     machine_status:str
+    is_maintenance: bool = False
+    display_status: str | None = None
 
 class machine_detail_information(BaseModel):
     machine_name:str
     machine_ip:str
     machine_type:str
     machine_status:str
+    is_maintenance: bool = False
+    display_status: str | None = None
     cpu_core_number:int
     gpu_number:int
     gpu_type: Optional[str] # 部分sql数据会出现此字段是NULL的情况，因此暂时用这个方法解决
@@ -84,6 +88,28 @@ def _is_operator_user(user_id: int) -> bool:
     except Exception:
         return False
 
+
+def _machine_status_value(machine) -> str:
+    """返回机器真实连接状态轴：online/offline。"""
+    status = getattr(machine, "machine_status", None)
+    return status.value if hasattr(status, "value") else str(status)
+
+
+def _display_machine_status(machine) -> str:
+    """返回对外展示状态：维护开关优先，真实连接状态仍保留在 DB。"""
+    if bool(getattr(machine, "is_maintenance", False)):
+        return MACHINE_DISPLAY_MAINTENANCE
+    return _machine_status_value(machine)
+
+
+def is_machine_in_maintenance(machine_id: int) -> bool:
+    """供操作准入和容器派生展示态复用的维护开关判断。"""
+    try:
+        machine = get_by_id(machine_id)
+    except Exception:
+        machine = None
+    return bool(machine and getattr(machine, "is_maintenance", False))
+
 def is_machine_online_remote(machine_id: int, timeout: float = 2.0) -> bool:
     """
     Perform a single, lightweight communication check to the Node's `/machine_status` endpoint.
@@ -101,8 +127,10 @@ def is_machine_online_remote(machine_id: int, timeout: float = 2.0) -> bool:
     if not machine_ip:
         return False
 
+    # 延迟 import：node_comms 顶层依赖本模块（is_machine_online_remote），顶层互引会循环
+    from ..services.container_module.node_comms import get_full_url, send
     try:
-        j = send(machine_ip, "/machine_status", {"config": {}}, timeout=timeout)
+        j = send(get_full_url(machine_ip, "/machine_status"), {"config": {}}, timeout=timeout)
     except Exception:
         return False
     if isinstance(j, dict) and j.get('success') in (1, True):
@@ -285,28 +313,16 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
                 setattr(e, 'error_reason', 'update_failed')
                 raise e
 
-    requested_status = fields.get('machine_status', None)
-    current_status = machine.machine_status.value if hasattr(machine.machine_status, 'value') else str(machine.machine_status)
-
-    # ONLINE -> MAINTENANCE: Ctrl异步处理，保持当前状态并启动过渡心跳；
-    # 其他状态变更则直接更新
-    if str(current_status).lower() == MachineStatus.ONLINE.value and str(requested_status).lower() == MachineStatus.MAINTENANCE.value:
-        passthrough_fields = dict(fields)
-        passthrough_fields.pop('machine_status', None)
-        if 'disk_size' in passthrough_fields:
-            passthrough_fields['disk_size_gb'] = passthrough_fields.pop('disk_size')
-        if passthrough_fields:
-            before = {k: str(getattr(machine, k, None)) for k in passthrough_fields.keys()}
-            update_machine(machine_id, **passthrough_fields)
-            write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.UPDATE_MACHINE, target_type="machine", target_id=machine_id,
-                         detail={"before": before, "after": {k: str(v) for k, v in passthrough_fields.items()}})
-        # 状态迁移本身由过渡心跳完成后记（before/after 见 heartbeat 侧）
-        start_machine_maintenance_transition_heartbeat(machine_id)
-        return True
+    # 维护态为纯开关（维护不触发停容器，状态机落地后由 set_maintenance 承载）；
+    # machine_status 变更直接更新，不再启动过渡心跳。
 
     # 字段名翻译: 前端 disk_size → 模型 disk_size_gb
     if 'disk_size' in fields:
         fields['disk_size_gb'] = fields.pop('disk_size')
+    if str(fields.get('machine_status', '')).lower() == MACHINE_DISPLAY_MAINTENANCE:
+        raise ValueError("machine_status no longer accepts maintenance; use is_maintenance")
+    if 'is_maintenance' in fields:
+        fields['is_maintenance'] = bool(fields['is_maintenance'])
 
     # 记录前值：repo 已原子化，update 前从 machine 对象取旧值即可
     before = {k: str(getattr(machine, k, None)) for k in fields.keys()}
@@ -320,6 +336,29 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
     write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.UPDATE_MACHINE, target_type="machine", target_id=machine_id,
                  detail={"before": before, "after": {k: str(v) for k, v in fields.items()}})
     return True
+
+
+def _log_machine_status_transition(mid: int, new_status: MachineStatus) -> None:
+    """机器状态真正变化时记一条系统日志（前→后），未变化不记。
+
+    从 utils/heartbeat.py 迁入：状态机转换（WSS 驱动 ①② / 手动开关 ③④）的公共审计点。
+    """
+    try:
+        old = get_by_id(mid)
+        if old is None:
+            return  # 机器已不存在（如过渡期间被删除），跳过记录
+        old_val = getattr(old, 'machine_status', None)
+        old_str = old_val.value if hasattr(old_val, 'value') else str(old_val) if old_val is not None else None
+    except Exception:
+        return
+    new_str = new_status.value if hasattr(new_status, 'value') else str(new_status)
+    if old_str is not None and str(old_str).lower() == str(new_str).lower():
+        return
+    write_op_log(success=True, operator_user_id=None, operation=OperationType.MACHINE_STATUS_TRANSITION,
+                 target_type="machine", target_id=mid,
+                 detail={"before": {"machine_status": old_str}, "after": {"machine_status": new_str}})
+
+
 #######################################
 
 
@@ -334,7 +373,9 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
         machine_name=machine.machine_name,
         machine_ip=machine.machine_ip,
         machine_type=machine.machine_type.value,
-        machine_status=machine.machine_status.value,
+        machine_status=_machine_status_value(machine),
+        is_maintenance=bool(getattr(machine, "is_maintenance", False)),
+        display_status=_display_machine_status(machine),
         cpu_core_number=machine.cpu_core_number,
         gpu_number=machine.gpu_number,
         gpu_type=machine.gpu_type,
@@ -356,12 +397,9 @@ def _node_probe_machine(machine_id: int, _app=None) -> bool:
     等同于原 for 循环内的 ``is_machine_online_remote(machine_id, timeout=2.0)``，
     抽取为独立函数以适配 ``parallel_node_calls``。
 
-    *_app* 可选传入 Flask app 实例，用于线程池内推送 app context。
+    *_app* 参数保留兼容旧调用，不再使用。
     """
     try:
-        if _app is not None:
-            with _app.app_context():
-                return is_machine_online_remote(machine_id, timeout=2.0)
         return is_machine_online_remote(machine_id, timeout=2.0)
     except Exception:
         return False
@@ -429,21 +467,17 @@ def List_all_machine_bref_information(
     res = []
 
     # --- Phase A: 并发探活 ---
-    try:
-        use_parallel = current_app.config.get("NODE_PARALLEL_ENABLED_MACHINES", True)
-        _app = current_app._get_current_object()
-    except RuntimeError:
-        use_parallel = True
-        _app = None
+    use_parallel = getattr(AppConfig, "NODE_PARALLEL_ENABLED_MACHINES", True)
+    _app = None
     _probe_results: dict[int, bool] = {}
     if machines:
-        if use_parallel and _app is not None:
+        if use_parallel:
             # 缓存新鲜则零探测，否则并发探活
             _callables = [
                 lambda mid=m.id, a=_app: (
                     _peek_machine_reachable(mid)
                     if _peek_machine_reachable(mid) is not None
-                    else _node_probe_machine(mid, _app=a)
+                    else _node_probe_machine(mid)
                 )
                 for m in machines
             ]
@@ -489,34 +523,19 @@ def List_all_machine_bref_information(
                              target_type="machine", target_id=mid,
                              detail={"before": {"machine_status": before}, "after": {"machine_status": after}})
 
-            if current_status_val == 'maintenance':
-                if online:
-                    try:
-                        _log_status_transition(machine.id, current_status_val, MachineStatus.MAINTENANCE.value)
-                        update_machine(machine.id, machine_status=MachineStatus.MAINTENANCE)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        _log_status_transition(machine.id, current_status_val, MachineStatus.OFFLINE.value)
-                        update_machine(machine.id, machine_status=MachineStatus.OFFLINE)
-                    except Exception:
-                        pass
-                    _mark_containers_offline(machine)
+            if online:
+                try:
+                    _log_status_transition(machine.id, current_status_val, MachineStatus.ONLINE.value)
+                    update_machine(machine.id, machine_status=MachineStatus.ONLINE)
+                except Exception:
+                    pass
             else:
-                if online:
-                    try:
-                        _log_status_transition(machine.id, current_status_val, MachineStatus.ONLINE.value)
-                        update_machine(machine.id, machine_status=MachineStatus.ONLINE)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        _log_status_transition(machine.id, current_status_val, MachineStatus.OFFLINE.value)
-                        update_machine(machine.id, machine_status=MachineStatus.OFFLINE)
-                    except Exception:
-                        pass
-                    _mark_containers_offline(machine)
+                try:
+                    _log_status_transition(machine.id, current_status_val, MachineStatus.OFFLINE.value)
+                    update_machine(machine.id, machine_status=MachineStatus.OFFLINE)
+                except Exception:
+                    pass
+                _mark_containers_offline(machine)
         except Exception:
             pass
         latest = get_by_id(machine.id) or machine
@@ -525,7 +544,9 @@ def List_all_machine_bref_information(
             machine_name=latest.machine_name,
             machine_ip=latest.machine_ip,
             machine_type=latest.machine_type.value,
-            machine_status=latest.machine_status.value
+            machine_status=_machine_status_value(latest),
+            is_maintenance=bool(getattr(latest, "is_maintenance", False)),
+            display_status=_display_machine_status(latest),
         )
         res.append(info)
     

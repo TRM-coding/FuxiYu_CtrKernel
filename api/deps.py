@@ -1,6 +1,7 @@
 from fastapi import Cookie, Depends, HTTPException, Request
 
 from ..constant import PERMISSION
+from ..extensions import session_scope
 from ..repositories import authentications_repo, user_repo
 
 
@@ -16,13 +17,13 @@ def require_current_user(
 ) -> int:
     """校验登录态并返回 user_id。"""
 
-    with request.app.state.flask_app.app_context():
+    with session_scope(commit=False) as session:
         if not authentications_repo.is_token_valid(auth_token):
             raise HTTPException(
                 status_code=401,
                 detail={"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"},
             )
-        return authentications_repo.get_user_id_by_token(auth_token)
+        return authentications_repo.get_user_id_by_token(auth_token, session=session)
 
 
 def require_operator(
@@ -32,8 +33,8 @@ def require_operator(
 ) -> int:
     """校验 operator 权限并返回 user_id。"""
 
-    with request.app.state.flask_app.app_context():
-        if not user_repo.check_permission(auth_token, required_permission=PERMISSION.OPERATOR):
+    with session_scope(commit=False) as session:
+        if not user_repo.check_permission(auth_token, required_permission=PERMISSION.OPERATOR, session=session):
             raise HTTPException(
                 status_code=403,
                 detail={"success": 0, "message": "insufficient permissions", "error_reason": "insufficient_permission"},
@@ -49,14 +50,13 @@ def require_permission(entity_code: str):
     用法：user_id: int = Depends(require_permission("container:create"))
     """
     def dep(request: Request, user_id: int = Depends(require_current_user)) -> int:
-        with request.app.state.flask_app.app_context():
-            from ..services.rbac_service import user_has_entity
-            if not user_has_entity(user_id, entity_code):
-                raise HTTPException(
-                    status_code=403,
-                    detail={"success": 0, "message": "insufficient permissions",
-                            "error_reason": "insufficient_permission"},
-                )
+        from ..services.rbac_service import user_has_entity
+        if not user_has_entity(user_id, entity_code):
+            raise HTTPException(
+                status_code=403,
+                detail={"success": 0, "message": "insufficient permissions",
+                        "error_reason": "insufficient_permission"},
+            )
         return user_id
 
     return dep
@@ -81,14 +81,13 @@ def require_resource(resource_type: str, id_field: str = "id"):
             raise HTTPException(status_code=400,
                                 detail={"success": 0, "message": f"missing resource id field {id_field!r}",
                                         "error_reason": "invalid_resource_id"})
-        with request.app.state.flask_app.app_context():
-            from ..services.rbac_service import user_has_resource
-            if not user_has_resource(user_id, resource_type, int(rid)):
-                raise HTTPException(
-                    status_code=403,
-                    detail={"success": 0, "message": "resource access denied",
-                            "error_reason": "resource_access_denied"},
-                )
+        from ..services.rbac_service import user_has_resource
+        if not user_has_resource(user_id, resource_type, int(rid)):
+            raise HTTPException(
+                status_code=403,
+                detail={"success": 0, "message": "resource access denied",
+                        "error_reason": "resource_access_denied"},
+            )
         return user_id
 
     return dep

@@ -3,7 +3,6 @@ from enum import Enum
 class MachineStatus(Enum):
     ONLINE = "online"
     OFFLINE = "offline"
-    MAINTENANCE = "maintenance"
 
 
 class MachineTypes(Enum):

@@ -81,7 +81,3 @@ def mock_node_send(monkeypatch):
     return _install
 
 
-@pytest.fixture()
-def heartbeat_calls(monkeypatch):
-    """心跳三件套已退役（WSS 推送接管状态推进）；保留空壳 fixture 以兼容引用，无副作用。"""
-    return {"start": [], "stop": [], "restart": []}

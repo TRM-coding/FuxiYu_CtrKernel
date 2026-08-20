@@ -3,8 +3,8 @@ import time
 import json
 import logging
 from datetime import datetime
-from flask import Flask, current_app
 
+from ..config import AppConfig
 from ..models.container_ssh_login import ContainerSSHLogin
 from ..constant import OperationType
 from ..repositories import long_term_container_repo, container_cleanup_reminder_repo
@@ -12,6 +12,7 @@ from ..services import container_tasks
 from ..utils.mail import send as send_mail
 
 logger = logging.getLogger(__name__)
+_SCHEDULER_STATE: dict[str, object] = {}
 
 
 def _parse_reminder_hours(raw: str | None) -> list[int]:
@@ -45,7 +46,7 @@ def _format_hours(hours: int) -> str:
     return f"{hours}小时"
 
 
-def _send_cleanup_reminders_if_needed(container_id: int, info: dict, app: Flask) -> None:
+def _send_cleanup_reminders_if_needed(container_id: int, info: dict, config=AppConfig) -> None:
     if info.get("cleanup_status") != "countdown":
         return
 
@@ -59,7 +60,7 @@ def _send_cleanup_reminders_if_needed(container_id: int, info: dict, app: Flask)
     except Exception:
         return
 
-    reminder_hours = _parse_reminder_hours(app.config.get("CONTAINER_CLEANUP_REMINDER_HOURS", "72,24,12"))
+    reminder_hours = _parse_reminder_hours(getattr(config, "CONTAINER_CLEANUP_REMINDER_HOURS", "72,24,12"))
     eligible_hours = [hours for hours in reminder_hours if 0 < seconds_left <= hours * 3600]
     if not eligible_hours:
         return
@@ -143,7 +144,7 @@ def cleanup_expired_containers_once(cleanup_after_days: int) -> None:
                     else None
                 ),
             }
-            _send_cleanup_reminders_if_needed(cid, info_with_record, current_app)
+            _send_cleanup_reminders_if_needed(cid, info_with_record, AppConfig)
             if info.get("cleanup_status") != "due":
                 continue
             snapshot = container_tasks.build_container_restore_snapshot(
@@ -166,17 +167,14 @@ def cleanup_expired_containers_once(cleanup_after_days: int) -> None:
                          getattr(rec, 'machine_id', '?'), getattr(rec, 'container_id', '?'), e)
 
 
-def start_container_cleanup_scheduler(
-    app: Flask,
-    interval_seconds: int = 1200,  # 20 min
-) -> threading.Thread:
+def start_container_cleanup_scheduler(interval_seconds: int = 1200) -> threading.Thread:
     """
     启动容器定时清理任务：
     - 默认每 20 分钟扫描一次
     - 启动后先执行一次，保证历史到期容器可尽快处理
     """
     key = "container_cleanup_scheduler"
-    existing = app.extensions.get(key)
+    existing = _SCHEDULER_STATE.get(key)
     if existing and isinstance(existing, dict) and existing.get("thread"):
         t = existing["thread"]
         if t.is_alive():
@@ -185,22 +183,20 @@ def start_container_cleanup_scheduler(
     stop_event = threading.Event()
 
     def _worker():
-        with app.app_context():
-            days = int(app.config.get("CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
-            cleanup_expired_containers_once(days)
+        days = int(getattr(AppConfig, "CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
+        cleanup_expired_containers_once(days)
 
         while not stop_event.is_set():
             time.sleep(interval_seconds)
             if stop_event.is_set():
                 break
             try:
-                with app.app_context():
-                    days = int(app.config.get("CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
-                    cleanup_expired_containers_once(days)
+                days = int(getattr(AppConfig, "CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
+                cleanup_expired_containers_once(days)
             except Exception as e:
                 logger.error("[container-cleanup] periodic run failed: %s", e)
 
     t = threading.Thread(target=_worker, daemon=True, name="container-cleanup")
     t.start()
-    app.extensions[key] = {"thread": t, "stop_event": stop_event}
+    _SCHEDULER_STATE[key] = {"thread": t, "stop_event": stop_event}
     return t

@@ -12,8 +12,9 @@ class Machine(db.Model):
     machine_status: MachineStatus = db.Column(
     db.Enum(MachineStatus, values_callable=lambda obj: [e.value for e in obj]),
         nullable=False,
-        default=MachineStatus.MAINTENANCE
+        default=MachineStatus.ONLINE
     )
+    is_maintenance: bool = db.Column(db.Boolean, nullable=False, default=False)
     cpu_core_number: int = db.Column(db.Integer, nullable=True)
     memory_size_gb: int = db.Column(db.Integer, nullable=True)
     gpu_number: int = db.Column(db.Integer, nullable=True)

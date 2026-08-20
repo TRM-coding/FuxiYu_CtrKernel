@@ -9,7 +9,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Callable, TypeVar
 
-from flask import current_app
+from ..config import AppConfig
 
 T = TypeVar("T")
 
@@ -37,10 +37,7 @@ def parallel_node_calls(
         return []
 
     if pool_size is None:
-        try:
-            pool_size = current_app.config.get("NODE_REQUEST_POOL_SIZE", 8)
-        except RuntimeError:
-            pool_size = 8
+        pool_size = getattr(AppConfig, "NODE_REQUEST_POOL_SIZE", 8)
     pool_size = max(1, int(pool_size))
 
     results: list[T | Exception] = [Exception("unreachable")] * len(calls)

@@ -23,7 +23,11 @@ TEST_OPERATOR_TOKEN = "test-operator-token"
 
 
 def _assert_sqlite_database_uri(app):
-    uri = str(app.config.get("SQLALCHEMY_DATABASE_URI", ""))
+    config = getattr(app, "config", None)
+    if config is None:
+        config = getattr(getattr(app, "state", None), "config", None)
+    uri = str((config.get("SQLALCHEMY_DATABASE_URI", "") if isinstance(config, dict)
+               else getattr(config, "SQLALCHEMY_DATABASE_URI", "")))
     if not uri.startswith("sqlite://"):
         raise RuntimeError(f"Refusing to run tests against non-SQLite database URI: {uri}")
 
@@ -54,21 +58,20 @@ def _safe_test_environment():
 def fastapi_app():
     """FastAPI 主应用（全量迁移完成后所有 API 都在 FastAPI 侧）。"""
     app = create_app(overrides=TEST_CONFIG_OVERRIDES)
+    app.config = TEST_CONFIG_OVERRIDES
     return app
 
 
 @pytest.fixture(scope="session")
 def app(fastapi_app):
-    """Flask runtime（db context 宿主；repositories 仍走 Flask-SQLAlchemy）。"""
-    flask_app = fastapi_app.state.flask_app
-    _assert_sqlite_database_uri(flask_app)
-    with flask_app.app_context():
-        from .. import models  # noqa: F401
+    """FastAPI runtime（Flask 已清退，测试直接使用 SQLAlchemy session）。"""
+    _assert_sqlite_database_uri(fastapi_app)
+    from .. import models  # noqa: F401
 
-        db.create_all()
-        yield flask_app
-        db.session.remove()
-        db.drop_all()
+    db.create_all()
+    yield fastapi_app
+    db.session.remove()
+    db.drop_all()
 
 
 @pytest.fixture()
@@ -82,13 +85,12 @@ def client(fastapi_app):
 @pytest.fixture(autouse=True)
 def db_session(app):
     _assert_sqlite_database_uri(app)
-    with app.app_context():
-        try:
-            yield db.session
-        finally:
-            db.session.remove()
-            db.drop_all()
-            db.create_all()
+    try:
+        yield db.session
+    finally:
+        db.session.remove()
+        db.drop_all()
+        db.create_all()
 
 
 @pytest.fixture(autouse=True)
@@ -131,8 +133,6 @@ def mock_external_services(monkeypatch, request):
     monkeypatch.setattr("FuxiYu_CtrKernel.services.announcement_tasks.send_mail", _mail_send)
     monkeypatch.setattr("FuxiYu_CtrKernel.services.announcement_tasks.send_batch", _mail_send_batch)
     monkeypatch.setattr("FuxiYu_CtrKernel.schedulers.container_cleanup_task.send_mail", _mail_send)
-    monkeypatch.setattr("FuxiYu_CtrKernel.utils.heartbeat.start_machine_maintenance_transition_heartbeat", _fake_thread)
-    monkeypatch.setattr("FuxiYu_CtrKernel.services.machine_tasks.start_machine_maintenance_transition_heartbeat", _fake_thread)
     yield
 
 

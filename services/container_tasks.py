@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
 from pydantic import BaseModel, Field
+from ..config import AppConfig
 
 from ..constant import *
 from sqlalchemy.exc import IntegrityError
@@ -36,6 +37,7 @@ from .container_module.pydantic_models import (
     container_detail_information,
     _derive_display_status,
     DISPLAY_STATUS_HOST_OFFLINE,
+    DISPLAY_STATUS_HOST_MAINTENANCE,
 )
 from .container_module.utils import _parse_last_ssh_time, build_cleanup_info
 from ..utils.permissions import _can_access_machine, _is_operator_user
@@ -349,8 +351,7 @@ def unpause_container(container_id: int, operator_user_id: int | None = None) ->
             from ..repositories import container_disk_freeze_state_repo
             freeze_state = container_disk_freeze_state_repo.get(container_id)
             if freeze_state is not None:
-                from flask import current_app
-                grace_days = current_app.config.get("CONTAINER_DISK_FREEZE_GRACE_DAYS", 3)
+                grace_days = getattr(AppConfig, "CONTAINER_DISK_FREEZE_GRACE_DAYS", 3)
                 container_disk_freeze_state_repo.set_grace(container_id, grace_days)
                 logger.info(
                     "[disk-check] grace period set for container %s (%s) (%s days, until %s)",
@@ -821,7 +822,7 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         if fs:
             from datetime import datetime
             days_frozen = (datetime.utcnow() - fs.first_frozen_at).days if fs.first_frozen_at else 0
-            escalation_days = int(current_app.config.get("CONTAINER_DISK_FREEZE_ESCALATION_DAYS", 7) or 7)
+            escalation_days = int(getattr(AppConfig, "CONTAINER_DISK_FREEZE_ESCALATION_DAYS", 7) or 7)
             freeze_state_val = {
                 "is_frozen": True,
                 "first_frozen_at": fs.first_frozen_at.isoformat() if fs.first_frozen_at else None,
@@ -892,19 +893,10 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
         if freeze_state and freeze_state.first_frozen_at:
             from datetime import datetime
             freeze_days_frozen = (datetime.utcnow() - freeze_state.first_frozen_at).days
-            try:
-                from flask import current_app
-                freeze_escalation_days = int(current_app.config.get("CONTAINER_DISK_FREEZE_ESCALATION_DAYS", 7) or 7)
-            except Exception as e:
-                logger.debug("failed to read CONTAINER_DISK_FREEZE_ESCALATION_DAYS, fallback to 7: %s", e)
-                freeze_escalation_days = 7
+            freeze_escalation_days = int(getattr(AppConfig, "CONTAINER_DISK_FREEZE_ESCALATION_DAYS", 7) or 7)
         ssh_record = container_ssh_login_repo.get_by_machine_container(container.machine_id, container.id)
         cleanup_days = 7
-        try:
-            from flask import current_app
-            cleanup_days = int(current_app.config.get("CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
-        except Exception as e:
-            logger.debug("failed to read CONTAINER_CLEANUP_AFTER_DAYS, fallback to 7: %s", e)
+        cleanup_days = int(getattr(AppConfig, "CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
         cleanup_info = build_cleanup_info(
             ssh_record.last_ssh_login_time if ssh_record else None,
             cleanup_days,

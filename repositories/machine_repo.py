@@ -105,7 +105,7 @@ def update_machine(machine_id: int, *, commit: bool = True, **fields) -> bool:
     if not machine:
         return None
 
-    allowed = {"machine_name", "machine_ip", "machine_type", "machine_status", "cpu_core_number",
+    allowed = {"machine_name", "machine_ip", "machine_type", "machine_status", "is_maintenance", "cpu_core_number",
                "memory_size_gb", "gpu_number", "gpu_type", "disk_size_gb", "machine_description", "shared_size_gb", "max_shared_gb",
                "max_memory_gb", "max_gpu_number", "max_cpu_core_number",
                "node_uid", "node_cert_fingerprint", "cert_pinned_at"}
@@ -122,6 +122,21 @@ def update_machine(machine_id: int, *, commit: bool = True, **fields) -> bool:
 
     if dirty:
        db.session.commit()
+    return True
+
+
+def set_maintenance(machine_id: int, enabled: bool, *, commit: bool = True) -> bool:
+    """设置机器维护开关。
+
+    维护态是管理开关，不写入 machine_status；machine_status 只承载 online/offline。
+    """
+    machine = get_by_id(machine_id)
+    if not machine:
+        return False
+    if bool(getattr(machine, "is_maintenance", False)) != bool(enabled):
+        machine.is_maintenance = bool(enabled)
+        if commit:
+            db.session.commit()
     return True
 
 

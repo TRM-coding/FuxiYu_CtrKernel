@@ -1,12 +1,9 @@
-Flask>=2.3.0
-Flask-SQLAlchemy>=3.0.0
 SQLAlchemy>=2.0.0
 marshmallow>=3.19.0
 fastapi
 uvicorn
 pymysql
 pydantic
-Flask-Cors>=3.0.10
 requests
 dotenv
 cryptography

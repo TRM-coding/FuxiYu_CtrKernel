@@ -77,7 +77,7 @@ def test_list_users_task_failure(client, monkeypatch):
 
 def test_change_password_success(client, monkeypatch):
     _valid_token(monkeypatch)
-    monkeypatch.setattr(deps.user_repo, "get_by_id", lambda user_id: SimpleNamespace(id=user_id))
+    monkeypatch.setattr(deps.user_repo, "get_by_id", lambda user_id, **_: SimpleNamespace(id=user_id))
     monkeypatch.setattr(user_api.user_tasks, "Change_password", lambda user, old, new: True)
 
     resp = client.post("/api/users/change_password", json={"user_id": 1, "old_password": "old", "new_password": "new"} )
@@ -87,7 +87,7 @@ def test_change_password_success(client, monkeypatch):
 
 def test_change_password_wrong_old_password(client, monkeypatch):
     _valid_token(monkeypatch)
-    monkeypatch.setattr(deps.user_repo, "get_by_id", lambda user_id: SimpleNamespace(id=user_id))
+    monkeypatch.setattr(deps.user_repo, "get_by_id", lambda user_id, **_: SimpleNamespace(id=user_id))
     monkeypatch.setattr(user_api.user_tasks, "Change_password", lambda user, old, new: False)
 
     resp = client.post("/api/users/change_password", json={"user_id": 1, "old_password": "bad", "new_password": "new"} )
