@@ -1,9 +1,9 @@
-from ...blueprints import machine_api
+from ...api import machine_api, deps
 
 
 def _auth(monkeypatch, *, valid=True, operator=True):
-    monkeypatch.setattr(machine_api.authentications_repo, "is_token_valid", lambda token: valid)
-    monkeypatch.setattr(machine_api.user_repo, "check_permission", lambda token, required_permission: operator)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: valid)
+    monkeypatch.setattr(deps.user_repo, "check_permission", lambda token, required_permission: operator)
 
 
 def test_add_machine_permission_requires_token(client, monkeypatch):
@@ -61,7 +61,7 @@ def test_add_machine_permission_success(client, monkeypatch):
 
 
 def test_list_machine_permissions_requires_token(client, monkeypatch):
-    monkeypatch.setattr(machine_api.authentications_repo, "is_token_valid", lambda token: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: False)
 
     resp = client.get("/api/machines/list_machine_permissions?machine_id=1")
 
@@ -69,7 +69,7 @@ def test_list_machine_permissions_requires_token(client, monkeypatch):
 
 
 def test_list_machine_permissions_missing_machine_id(client, monkeypatch):
-    monkeypatch.setattr(machine_api.authentications_repo, "is_token_valid", lambda token: True)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: True)
 
     resp = client.get("/api/machines/list_machine_permissions" )
 
@@ -77,7 +77,7 @@ def test_list_machine_permissions_missing_machine_id(client, monkeypatch):
 
 
 def test_list_machine_permissions_success(client, monkeypatch):
-    monkeypatch.setattr(machine_api.authentications_repo, "is_token_valid", lambda token: True)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: True)
     monkeypatch.setattr(machine_api.machine_service, "List_machine_permissions", lambda machine_id: [2, 3])
 
     resp = client.get("/api/machines/list_machine_permissions?machine_id=1" )

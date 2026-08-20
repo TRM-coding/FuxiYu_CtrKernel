@@ -2,12 +2,12 @@ from types import SimpleNamespace
 
 from sqlalchemy.exc import IntegrityError
 
-from ...blueprints import machine_api
+from ...api import machine_api, deps
 
 
 def _auth(monkeypatch, *, valid=True, operator=True):
-    monkeypatch.setattr(machine_api.authentications_repo, "is_token_valid", lambda token: valid)
-    monkeypatch.setattr(machine_api.user_repo, "check_permission", lambda token, required_permission: operator)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: valid)
+    monkeypatch.setattr(deps.user_repo, "check_permission", lambda token, required_permission: operator)
 
 
 def test_add_machine_requires_token(client, monkeypatch):

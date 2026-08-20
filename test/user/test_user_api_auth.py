@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from ...blueprints import user_api
+from ...api import user_api, deps
 from ...constant import PERMISSION
 
 

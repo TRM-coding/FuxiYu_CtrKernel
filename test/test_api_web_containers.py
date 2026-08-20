@@ -9,7 +9,7 @@ from .. import create_app
 from ..extensions import db
 from ..models.user import User
 from ..models.authentications import Authentication
-from ..blueprints import container_api as container_api_module
+from ..api import container_api as container_api_module, deps
 from datetime import datetime, timedelta
 
 # module-level test token placeholder
@@ -59,15 +59,15 @@ from types import SimpleNamespace
 
 def test_create_container_unauth(client, monkeypatch):
     
-    monkeypatch.setattr(container_api_module.authentications_repo, "is_token_valid", lambda t: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: False)
     resp = client.post("/api/containers/create_container", json={})
     assert resp.status_code == 401
 
 
 def test_create_container_success(client, monkeypatch, token):
     
-    monkeypatch.setattr(container_api_module.authentications_repo, "is_token_valid", lambda t: True)
-    monkeypatch.setattr(container_api_module.authentications_repo, "get_user_id_by_token", lambda t: 7)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: True)
+    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda t: 7)
     captured = {}
     def fake_create_container(**kwargs):
         captured.update(kwargs)
@@ -83,14 +83,14 @@ def test_create_container_success(client, monkeypatch, token):
 
 def test_delete_container_unauth(client, monkeypatch):
     
-    monkeypatch.setattr(container_api_module.authentications_repo, "is_token_valid", lambda t: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: False)
     resp = client.post("/api/containers/delete_container", json={"container_id": 1})
     assert resp.status_code == 401
 
 
 def test_delete_container_success(client, monkeypatch, token):
     
-    monkeypatch.setattr(container_api_module.authentications_repo, "is_token_valid", lambda t: True)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: True)
     monkeypatch.setattr(container_api_module.container_service, "remove_container", lambda container_id=0: True)
     resp = client.post("/api/containers/delete_container", json={"container_id": 1})
     assert resp.status_code == 200
@@ -100,15 +100,15 @@ def test_delete_container_success(client, monkeypatch, token):
 
 def test_add_collaborator_unauth(client, monkeypatch):
     
-    monkeypatch.setattr(container_api_module.authentications_repo, "is_token_valid", lambda t: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: False)
     resp = client.post("/api/containers/add_collaborator", json={})
     assert resp.status_code == 401
 
 
 def test_add_collaborator_success(client, monkeypatch, token):
     
-    monkeypatch.setattr(container_api_module.authentications_repo, "is_token_valid", lambda t: True)
-    monkeypatch.setattr(container_api_module.authentications_repo, "get_user_id_by_token", lambda t: 7)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: True)
+    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda t: 7)
     captured = {}
     def fake_add_collaborator(**kwargs):
         captured.update(kwargs)
@@ -123,14 +123,14 @@ def test_add_collaborator_success(client, monkeypatch, token):
 
 def test_remove_collaborator_unauth(client, monkeypatch):
     
-    monkeypatch.setattr(container_api_module.authentications_repo, "is_token_valid", lambda t: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: False)
     resp = client.post("/api/containers/remove_collaborator", json={})
     assert resp.status_code == 401
 
 
 def test_remove_collaborator_success(client, monkeypatch, token):
     
-    monkeypatch.setattr(container_api_module.authentications_repo, "is_token_valid", lambda t: True)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: True)
     monkeypatch.setattr(container_api_module.container_service, "remove_collaborator", lambda **kwargs: True)
     resp = client.post("/api/containers/remove_collaborator", json={"container_id": 1, "user_id": 1})
     assert resp.status_code == 200
@@ -140,14 +140,14 @@ def test_remove_collaborator_success(client, monkeypatch, token):
 
 def test_update_role_unauth(client, monkeypatch):
     
-    monkeypatch.setattr(container_api_module.authentications_repo, "is_token_valid", lambda t: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: False)
     resp = client.post("/api/containers/update_role", json={})
     assert resp.status_code == 401
 
 
 def test_update_role_success(client, monkeypatch, token):
     
-    monkeypatch.setattr(container_api_module.authentications_repo, "is_token_valid", lambda t: True)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: True)
     monkeypatch.setattr(container_api_module.container_service, "update_role", lambda **kwargs: True)
     resp = client.post("/api/containers/update_role", json={"container_id": 1, "user_id": 1, "updated_role": "ADMIN"})
     assert resp.status_code == 200
@@ -157,14 +157,14 @@ def test_update_role_success(client, monkeypatch, token):
 
 def test_get_container_detail_information_unauth(client, monkeypatch):
     
-    monkeypatch.setattr(container_api_module.authentications_repo, "is_token_valid", lambda t: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: False)
     resp = client.get("/api/containers/get_container_detail_information", json={"container_id": 1})
     assert resp.status_code == 401
 
 
 def test_get_container_detail_information_success(client, monkeypatch, token):
     
-    monkeypatch.setattr(container_api_module.authentications_repo, "is_token_valid", lambda t: True)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: True)
     fake_info = {"id": 1, "name": "c1", "image": "img"}
     monkeypatch.setattr(container_api_module.container_service, "get_container_detail_information", lambda container_id=0: fake_info)
     resp = client.get("/api/containers/get_container_detail_information", json={"container_id": 1})
@@ -176,15 +176,15 @@ def test_get_container_detail_information_success(client, monkeypatch, token):
 
 def test_list_all_containers_bref_information_unauth(client, monkeypatch):
     
-    monkeypatch.setattr(container_api_module.authentications_repo, "is_token_valid", lambda t: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: False)
     resp = client.get("/api/containers/list_all_container_bref_information", json={})
     assert resp.status_code == 401
 
 
 def test_list_all_containers_bref_information_success(client, monkeypatch, token):
     
-    monkeypatch.setattr(container_api_module.authentications_repo, "is_token_valid", lambda t: True)
-    monkeypatch.setattr(container_api_module.authentications_repo, "get_user_id_by_token", lambda t: 7)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: True)
+    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda t: 7)
     fake_item = {"name": "c1", "machine_id": 1}
     captured = {}
     def fake_list_all_container_bref_information(**kwargs):

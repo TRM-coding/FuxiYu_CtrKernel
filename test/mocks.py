@@ -4,16 +4,21 @@ from datetime import datetime, timedelta
 from .conftest import TEST_AUTH_TOKEN, TEST_OPERATOR_TOKEN
 from .factories import create_auth, create_user
 from ..constant import PERMISSION
+from ..api import deps
 
 
 def mock_auth_token(monkeypatch, module, *, user_id: int = 1, valid: bool = True, token: str = TEST_AUTH_TOKEN):
-    monkeypatch.setattr(module.authentications_repo, "is_token_valid", lambda provided_token: valid)
-    monkeypatch.setattr(module.authentications_repo, "get_user_id_by_token", lambda provided_token: user_id)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda provided_token: valid)
+    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda provided_token: user_id)
+    if hasattr(module, "authentications_repo"):
+        monkeypatch.setattr(module.authentications_repo, "is_token_valid", lambda provided_token: valid)
+        monkeypatch.setattr(module.authentications_repo, "get_user_id_by_token", lambda provided_token: user_id)
     return {}
 
 
 def mock_operator_token(monkeypatch, module, *, user_id: int = 1, valid: bool = True, token: str = TEST_OPERATOR_TOKEN):
     headers = mock_auth_token(monkeypatch, module, user_id=user_id, valid=valid, token=token)
+    monkeypatch.setattr(deps.user_repo, "check_permission", lambda provided_token, required_permission: valid)
     if hasattr(module, "user_repo"):
         monkeypatch.setattr(module.user_repo, "check_permission", lambda provided_token, required_permission: valid)
     return headers

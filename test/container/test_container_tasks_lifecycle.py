@@ -14,7 +14,6 @@ def test_create_container_success_sends_node_then_creates_db_record_and_root_bin
     container_info,
     mock_node_send,
 
-    heartbeat_calls,
 ):
     owner = create_user(username="owner_lifecycle")
     machine = create_machine(max_shared_gb=8, max_memory_gb=64)
@@ -38,7 +37,6 @@ def test_create_container_success_sends_node_then_creates_db_record_and_root_bin
     assert getattr(bindings[0]["role"], "value", bindings[0]["role"]) == ROLE.ROOT.value
     assert calls[0]["url"].endswith("/create_container")
     assert calls[0]["payload"]["owner_name"] == owner.username
-    assert heartbeat_calls["start"]
 
 
 def test_create_container_denies_inaccessible_machine(db_session, container_info):
@@ -126,23 +124,16 @@ def test_create_container_node_failure_does_not_create_local_record(
     assert Container.query.filter_by(name=container_info.NAME).first() is None
 
 
-def test_create_container_heartbeat_failure_keeps_creation_success(
-    monkeypatch,
+def test_create_container_success_after_node_ack(
     db_session,
     container_info,
     mock_node_send,
-
 ):
+    # 心跳三件套已退役（WSS 推送接管状态推进）：创建成功即返回 True
     owner = create_user()
     machine = create_machine()
     mock_node_send(NODE_SUCCESS_TRUE)
-    monkeypatch.setattr(
-        container_tasks,
-        "container_starting_status_heartbeat",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("heartbeat")),
-    )
 
-    # 心跳失败不再阻断创建：容器已建成功（Node/DB/绑定已落），返回 True
     assert container_tasks.Create_container(owner.username, machine.id, container_info) is True
 
     assert Container.query.filter_by(name=container_info.NAME).first() is not None
@@ -181,50 +172,38 @@ def test_remove_container_node_failed_raises_and_keeps_local_record(
     assert Container.query.get(container.id) is not None
 
 
-def test_start_container_success_starts_heartbeat(
+def test_start_container_success(
     db_session,
     container_graph,
     mock_node_send,
-
-    heartbeat_calls,
 ):
+    # 心跳三件套已退役：状态推进由 WSS 推送接管，动作成功即返回
     root, _machine, container = container_graph
     mock_node_send(NODE_SUCCESS_TRUE)
 
     assert container_tasks.start_container(container.id, operator_user_id=root.id) is True
 
-    assert heartbeat_calls["start"]
 
-
-def test_stop_container_success_starts_heartbeat(
+def test_stop_container_success(
     db_session,
     container_graph,
     mock_node_send,
-
-    heartbeat_calls,
 ):
     root, _machine, container = container_graph
     mock_node_send(NODE_SUCCESS_TRUE)
 
     assert container_tasks.stop_container(container.id, operator_user_id=root.id) is True
 
-    assert heartbeat_calls["stop"]
 
-
-def test_restart_container_success_marks_offline_and_starts_heartbeat(
+def test_restart_container_success(
     db_session,
     container_graph,
     mock_node_send,
-
-    heartbeat_calls,
 ):
     root, _machine, container = container_graph
     mock_node_send(NODE_SUCCESS_TRUE)
 
     assert container_tasks.restart_container(container.id, operator_user_id=root.id) is True
-
-    assert Container.query.get(container.id).container_status == ContainerStatus.OFFLINE
-    assert heartbeat_calls["restart"]
 
 
 @pytest.mark.parametrize("operation", ["start_container", "stop_container", "restart_container"])

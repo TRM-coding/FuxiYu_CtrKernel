@@ -7,20 +7,16 @@ from flask import Flask, current_app
 from ..repositories import containers_repo
 from ..constant import OperationType
 from ..services import container_tasks
-from ..utils.parallel import parallel_node_calls
 
 logger = logging.getLogger(__name__)
 
 
 def check_all_containers_disk_usage_once(page_size: int = 200) -> None:
-    """遍历所有容器，向各 Node 拉取磁盘使用数据（只读、只记日志）。"""
-    try:
-        _app = current_app._get_current_object()
-        use_parallel = current_app.config.get("NODE_PARALLEL_ENABLED_SSH_REFRESH", True)
-    except RuntimeError:
-        _app = None
-        use_parallel = True
+    """遍历容器，基于 DB 已落库的磁盘用量做阈值评估。
 
+    WSS 推送已接管采集（apply_disk_usage_snapshot 落库 disk_* 字段）；
+    本调度只读 DB + 评估（阈值/冻结/邮件），不再主动查 Node。
+    """
     offset = 0
     while True:
         containers = containers_repo.list_containers(
@@ -32,43 +28,30 @@ def check_all_containers_disk_usage_once(page_size: int = 200) -> None:
         if not containers:
             break
 
-        if use_parallel and _app is not None:
-            _callables = [
-                lambda cid=c.id, a=_app: _disk_check_one(cid, a)
-                for c in containers
-            ]
-            _raw = parallel_node_calls(_callables, timeout_per_call=22.0)
-            for c, r in zip(containers, _raw):
-                if isinstance(r, Exception):
-                    logger.warning("[disk-check] failed for container id=%s name=%s: %s",
-                                   getattr(c, 'id', '?'), getattr(c, 'name', '?'), r)
-                elif isinstance(r, dict):
-                    _evaluate_limits(c, r)
-        else:
-            for c in containers:
-                try:
-                    usage = container_tasks.get_container_disk_usage(c.id)
-                    if isinstance(usage, dict):
-                        _evaluate_limits(c, usage)
-                except Exception as e:
-                    logger.warning("[disk-check] failed for container id=%s name=%s: %s",
-                                   getattr(c, 'id', '?'), getattr(c, 'name', '?'), e)
+        for c in containers:
+            usage = _usage_from_db(c)
+            if usage is not None:
+                _evaluate_limits(c, usage)
 
         if len(containers) < page_size:
             break
         offset += page_size
 
 
-def _disk_check_one(container_id: int, app: Flask) -> None:
-    """在 app context 内查询单个容器的磁盘使用。"""
-    with app.app_context():
-        usage = container_tasks.get_container_disk_usage(container_id)
-        if isinstance(usage, dict):
-            # fetch container obj within app context for limit evaluation
-            container = containers_repo.get_by_id(container_id)
-            if container:
-                _evaluate_limits(container, usage)
-        return usage
+def _usage_from_db(container) -> dict | None:
+    """从容器 DB 字段构造 usage dict（WSS apply_disk_usage_snapshot 落库的字段）。
+
+    未采集过（disk_total_bytes 为空）→ None，跳过评估。
+    """
+    total = getattr(container, 'disk_total_bytes', None)
+    if total is None:
+        return None
+    return {"container": {
+        "overlay_rw_bytes": getattr(container, 'disk_overlay_rw_bytes', None),
+        "bind_mount_bytes": getattr(container, 'disk_bind_mount_bytes', None),
+        "total_bytes": total,
+        "bind_mount_path": getattr(container, 'bind_mount_path', None),
+    }}
 
 
 def _evaluate_limits(container, usage: dict) -> None:

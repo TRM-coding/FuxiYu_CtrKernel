@@ -9,7 +9,7 @@ from .. import create_app
 from ..extensions import db
 from ..models.user import User
 from ..models.authentications import Authentication
-from ..blueprints import machine_api as machine_api_module
+from ..api import machine_api as machine_api_module, deps
 from datetime import datetime, timedelta
 
 # module-level test token placeholder
@@ -58,14 +58,14 @@ from types import SimpleNamespace
 
 
 def test_add_machine_api_unauth(client, monkeypatch):
-    monkeypatch.setattr(machine_api_module.authentications_repo, "is_token_valid", lambda t: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: False)
     resp = client.post("/api/machines/add_machine", json={})
     assert resp.status_code == 401
 
 
 def test_add_machine_api_success(client, monkeypatch, token):
     
-    monkeypatch.setattr(machine_api_module.authentications_repo, "is_token_valid", lambda t: True)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: True)
     monkeypatch.setattr(machine_api_module.machine_service, "Add_machine", lambda **kwargs: True)
     resp = client.post("/api/machines/add_machine", json={"machine_name": "m1"})
     assert resp.status_code == 201
@@ -75,14 +75,14 @@ def test_add_machine_api_success(client, monkeypatch, token):
 
 def test_remove_machine_api_unauth(client, monkeypatch):
     
-    monkeypatch.setattr(machine_api_module.authentications_repo, "is_token_valid", lambda t: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: False)
     resp = client.post("/api/machines/remove_machine", json={"machine_ids": [1]})
     assert resp.status_code == 401
 
 
 def test_remove_machine_api_success(client, monkeypatch, token):
     
-    monkeypatch.setattr(machine_api_module.authentications_repo, "is_token_valid", lambda t: True)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: True)
     monkeypatch.setattr(machine_api_module.machine_service, "Remove_machine", lambda machine_id=None: True)
     resp = client.post("/api/machines/remove_machine", json={"machine_ids": [1]})
     assert resp.status_code == 200
@@ -92,14 +92,14 @@ def test_remove_machine_api_success(client, monkeypatch, token):
 
 def test_update_machine_api_unauth(client, monkeypatch):
     
-    monkeypatch.setattr(machine_api_module.authentications_repo, "is_token_valid", lambda t: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: False)
     resp = client.post("/api/machines/update_machine", json={"machine_id": 1, "fields": {}})
     assert resp.status_code == 401
 
 
 def test_update_machine_api_success(client, monkeypatch, token):
     
-    monkeypatch.setattr(machine_api_module.authentications_repo, "is_token_valid", lambda t: True)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: True)
     monkeypatch.setattr(machine_api_module.machine_service, "Update_machine", lambda machine_id=0, **fields: True)
     resp = client.post("/api/machines/update_machine", json={"machine_id": 1, "fields": {"machine_name": "new"}})
     assert resp.status_code == 200
@@ -109,14 +109,14 @@ def test_update_machine_api_success(client, monkeypatch, token):
 
 def test_get_detail_information_api_unauth(client, monkeypatch):
     
-    monkeypatch.setattr(machine_api_module.authentications_repo, "is_token_valid", lambda t: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: False)
     resp = client.get("/api/machines/get_detail_information", json={"machine_id": 1})
     assert resp.status_code == 401
 
 
 def test_get_detail_information_api_success(client, monkeypatch, token):
     
-    monkeypatch.setattr(machine_api_module.authentications_repo, "is_token_valid", lambda t: True)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: True)
     fake_machine = SimpleNamespace(
         id=1,
         machine_name="m",
@@ -139,14 +139,14 @@ def test_get_detail_information_api_success(client, monkeypatch, token):
 
 def test_list_all_machine_bref_information_api_unauth(client, monkeypatch):
     
-    monkeypatch.setattr(machine_api_module.authentications_repo, "is_token_valid", lambda t: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: False)
     resp = client.get("/api/machines/list_all_machine_bref_information", json={})
     assert resp.status_code == 401
 
 
 def test_list_all_machine_bref_information_api_success(client, monkeypatch, token):
     
-    monkeypatch.setattr(machine_api_module.authentications_repo, "is_token_valid", lambda t: True)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda t: True)
     fake_machine = SimpleNamespace(machine_ip="1.2.3.4", machine_type="t", machine_status="up")
     monkeypatch.setattr(machine_api_module.machine_service, "List_all_machine_bref_information", lambda page_number=0, page_size=10: [fake_machine])
     resp = client.get("/api/machines/list_all_machine_bref_information", json={})

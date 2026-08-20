@@ -1,12 +1,12 @@
 from types import SimpleNamespace
 
-from ...blueprints import machine_api
+from ...api import machine_api, deps
 
 
 def test_list_machine_bref_resolves_token_from_header(client, monkeypatch):
     captured = {}
-    monkeypatch.setattr(machine_api.authentications_repo, "is_token_valid", lambda token: True)
-    monkeypatch.setattr(machine_api.authentications_repo, "get_user_id_by_token", lambda token: 7)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: True)
+    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token: 7)
     def _list(page_number, page_size, user_id=None):
         captured["user_id"] = user_id
         return [], 0
@@ -20,8 +20,8 @@ def test_list_machine_bref_resolves_token_from_header(client, monkeypatch):
 
 
 def test_list_machine_bref_resolves_token_from_cookie(client, monkeypatch):
-    monkeypatch.setattr(machine_api.authentications_repo, "is_token_valid", lambda token: True)
-    monkeypatch.setattr(machine_api.authentications_repo, "get_user_id_by_token", lambda token: 7)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: True)
+    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token: 7)
     monkeypatch.setattr(machine_api.machine_service, "List_all_machine_bref_information", lambda page_number, page_size, user_id=None: ([], 0))
 
     resp = client.post("/api/machines/list_all_machine_bref_information", json={})
@@ -30,7 +30,7 @@ def test_list_machine_bref_resolves_token_from_cookie(client, monkeypatch):
 
 
 def test_list_machine_bref_requires_token(client, monkeypatch):
-    monkeypatch.setattr(machine_api.authentications_repo, "is_token_valid", lambda token: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: False)
 
     resp = client.post("/api/machines/list_all_machine_bref_information", json={})
 
@@ -40,8 +40,8 @@ def test_list_machine_bref_requires_token(client, monkeypatch):
 def test_list_machine_bref_success_passes_user_id_to_service(client, monkeypatch):
     captured = {}
     machine = SimpleNamespace(id=1, machine_name="m", machine_ip="127.0.0.1", machine_type="GPU", machine_status="online")
-    monkeypatch.setattr(machine_api.authentications_repo, "is_token_valid", lambda token: True)
-    monkeypatch.setattr(machine_api.authentications_repo, "get_user_id_by_token", lambda token: 42)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: True)
+    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token: 42)
 
     def _list(page_number, page_size, user_id=None):
         captured.update(page_number=page_number, page_size=page_size, user_id=user_id)

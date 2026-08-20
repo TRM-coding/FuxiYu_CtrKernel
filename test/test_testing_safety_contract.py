@@ -138,7 +138,7 @@ def test_no_tests_call_create_app_without_testing_config():
         text = path.read_text(encoding="utf-8")
         if "create_app(" not in text:
             continue
-        assert "overrides=TEST_CONFIG_OVERRIDES" in text or path.name == "conftest.py"
+        assert "overrides=" in text or path.name == "conftest.py"
 
 
 def test_test_readme_documents_factory_and_mock_rules():

@@ -83,18 +83,5 @@ def mock_node_send(monkeypatch):
 
 @pytest.fixture()
 def heartbeat_calls(monkeypatch):
-    calls = {"start": [], "stop": [], "restart": []}
-
-    monkeypatch.setattr(
-        "FuxiYu_CtrKernel.services.container_tasks.container_starting_status_heartbeat",
-        lambda *args, **kwargs: calls["start"].append((args, kwargs)),
-    )
-    monkeypatch.setattr(
-        "FuxiYu_CtrKernel.services.container_tasks.container_stopping_status_heartbeat",
-        lambda *args, **kwargs: calls["stop"].append((args, kwargs)),
-    )
-    monkeypatch.setattr(
-        "FuxiYu_CtrKernel.services.container_tasks.container_restart_status_heartbeat",
-        lambda *args, **kwargs: calls["restart"].append((args, kwargs)),
-    )
-    return calls
+    """心跳三件套已退役（WSS 推送接管状态推进）；保留空壳 fixture 以兼容引用，无副作用。"""
+    return {"start": [], "stop": [], "restart": []}

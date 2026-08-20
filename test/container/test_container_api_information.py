@@ -1,12 +1,12 @@
-from ...blueprints import container_api
+from ...api import container_api, deps
 from ...models.containers import Container
 from ...services import container_tasks
 from ..factories import create_container
 
 
 def _auth(monkeypatch, *, valid=True, user_id=1):
-    monkeypatch.setattr(container_api.authentications_repo, "is_token_valid", lambda token: valid)
-    monkeypatch.setattr(container_api.authentications_repo, "get_user_id_by_token", lambda token: user_id)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: valid)
+    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token: user_id)
 
 
 def test_get_container_detail_api_not_found(client, monkeypatch):

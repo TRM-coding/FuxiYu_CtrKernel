@@ -33,7 +33,14 @@ def _model_data(model, *, exclude_none: bool = False) -> dict[str, Any]:
 
     if hasattr(model, "model_dump"):
         return model.model_dump(exclude_none=exclude_none)
-    return model.dict(exclude_none=exclude_none)
+    if hasattr(model, "dict"):
+        try:
+            return model.dict(exclude_none=exclude_none)
+        except TypeError:
+            return model.dict()
+    if isinstance(model, dict):
+        return model
+    return dict(getattr(model, "__dict__", {}))
 
 
 def _error(status_code: int, message: str, error_reason: str | None = None) -> JSONResponse:
@@ -49,7 +56,7 @@ def _error(status_code: int, message: str, error_reason: str | None = None) -> J
 # 添加机器
 
 
-@router.post("/add_machine", response_model=AddMachineResponse)
+@router.post("/add_machine", response_model=AddMachineResponse, status_code=201)
 def add_machine_api(
     request: Request,
     message: AddMachineRequest,
@@ -101,20 +108,34 @@ def add_machine_api(
 def register_machine_api(
     request: Request,
     message: RegisterMachineByTrustAnchorRequest,
-    _: int = Depends(require_operator),
+    operator_user_id: int = Depends(require_operator),
 ):
     """TOFU 建档一体接入：管理员填最小信任锚（name/ip）→ 首连完成 TLS pin + UID 下发 →
     Node 返回硬件 → 建档（默认分配比例）。之后用 update_machine 调整分配限制。"""
 
+    from ..services.operation_log_tasks import write_operation_log as write_op_log
+    from ..constant import OperationType
+
+    detail = {"name": message.machine_name, "ip": message.machine_ip, "trigger": "tofu_register"}
     try:
         with request.app.state.flask_app.app_context():
-            result = node_comms.register_machine(message.machine_name, message.machine_ip)
+            result = node_comms.register_machine(
+                message.machine_name,
+                message.machine_ip,
+                message.machine_description,
+            )
     except Exception as e:
         err_reason = getattr(e, "error_reason", None)
+        write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE,
+                     target_type="machine", target_id=0, detail=detail,
+                     error_reason=err_reason or str(e))
         if err_reason:
             return _error(422, str(e), err_reason)
         return _error(500, f"Internal error: {e}", "internal_error")
 
+    write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE,
+                 target_type="machine", target_id=result["machine_id"],
+                 detail={**detail, "uid": result["uid"]})
     return {
         "success": 1,
         "message": "Machine enrolled successfully",

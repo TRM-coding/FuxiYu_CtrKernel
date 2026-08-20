@@ -12,3 +12,8 @@ from .registration_code import RegistrationCode  # noqa: F401
 from .announcement import Announcement, AnnouncementTemplate, AnnouncementDraft  # noqa: F401
 from .authentications import Authentication  # noqa: F401
 from .operation_log import OperationLog  # noqa: F401
+
+from .auth_entity import AuthEntity  # noqa: F401
+from .auth_group import AuthGroup, AuthGroupEntity  # noqa: F401
+from .user_group import UserGroup  # noqa: F401
+from .userimage import UserImage  # noqa: F401

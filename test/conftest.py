@@ -51,12 +51,15 @@ def _safe_test_environment():
 
 
 @pytest.fixture(scope="session")
-def app():
-    """FastAPI 迁移后：返回 Flask runtime（legacy 端点 + db context 宿主）。
+def fastapi_app():
+    """FastAPI 主应用（全量迁移完成后所有 API 都在 FastAPI 侧）。"""
+    app = create_app(overrides=TEST_CONFIG_OVERRIDES)
+    return app
 
-    已迁移到 FastAPI 的端点（如 machine_api）用 TestClient 测；legacy 端点用 flask client。
-    """
-    fastapi_app = create_app(overrides=TEST_CONFIG_OVERRIDES)
+
+@pytest.fixture(scope="session")
+def app(fastapi_app):
+    """Flask runtime（db context 宿主；repositories 仍走 Flask-SQLAlchemy）。"""
     flask_app = fastapi_app.state.flask_app
     _assert_sqlite_database_uri(flask_app)
     with flask_app.app_context():
@@ -69,8 +72,11 @@ def app():
 
 
 @pytest.fixture()
-def client(app):
-    return app.test_client()
+def client(fastapi_app):
+    """FastAPI TestClient（全量迁移后 API 都在 FastAPI 侧）。"""
+    from starlette.testclient import TestClient
+
+    return TestClient(fastapi_app)
 
 
 @pytest.fixture(autouse=True)
@@ -126,13 +132,7 @@ def mock_external_services(monkeypatch, request):
     monkeypatch.setattr("FuxiYu_CtrKernel.services.announcement_tasks.send_batch", _mail_send_batch)
     monkeypatch.setattr("FuxiYu_CtrKernel.schedulers.container_cleanup_task.send_mail", _mail_send)
     monkeypatch.setattr("FuxiYu_CtrKernel.utils.heartbeat.start_machine_maintenance_transition_heartbeat", _fake_thread)
-    monkeypatch.setattr("FuxiYu_CtrKernel.utils.heartbeat.container_starting_status_heartbeat", _fake_thread)
-    monkeypatch.setattr("FuxiYu_CtrKernel.utils.heartbeat.container_stopping_status_heartbeat", _fake_thread)
-    monkeypatch.setattr("FuxiYu_CtrKernel.utils.heartbeat.container_restart_status_heartbeat", _fake_thread)
     monkeypatch.setattr("FuxiYu_CtrKernel.services.machine_tasks.start_machine_maintenance_transition_heartbeat", _fake_thread)
-    monkeypatch.setattr("FuxiYu_CtrKernel.services.container_tasks.container_starting_status_heartbeat", _fake_thread)
-    monkeypatch.setattr("FuxiYu_CtrKernel.services.container_tasks.container_stopping_status_heartbeat", _fake_thread)
-    monkeypatch.setattr("FuxiYu_CtrKernel.services.container_tasks.container_restart_status_heartbeat", _fake_thread)
     yield
 
 
@@ -143,4 +143,31 @@ def _clear_reachability_cache():
     machine_tasks._reach_cache.clear()
     yield
     machine_tasks._reach_cache.clear()
+@pytest.fixture()
+def client(fastapi_app):
+    """FastAPI TestClient with Flask-test-client compatibility helpers."""
+    from starlette.testclient import TestClient
 
+    class CompatTestClient(TestClient):
+        def post(self, url, *, content_type=None, headers=None, **kwargs):
+            if content_type:
+                headers = dict(headers or {})
+                headers.setdefault("content-type", content_type)
+            return super().post(url, headers=headers, **kwargs)
+
+        def set_cookie(self, name, value):
+            """Flask test client 兼容：写入 cookie jar。"""
+            self.cookies.set(name, value)
+
+        def request(self, method, url, **kwargs):
+            content_type = kwargs.pop("content_type", None)
+            if content_type:
+                headers = dict(kwargs.pop("headers", {}) or {})
+                headers.setdefault("content-type", content_type)
+                kwargs["headers"] = headers
+            response = super().request(method, url, **kwargs)
+            if not hasattr(response, "get_json"):
+                response.get_json = response.json
+            return response
+
+    return CompatTestClient(fastapi_app)

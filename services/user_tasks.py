@@ -1,7 +1,6 @@
 #限制：注册用户名必须是英文
 from ..models.user import User
 from werkzeug.security import check_password_hash, generate_password_hash
-from ..extensions import db
 from ..repositories.user_repo import *
 from ..repositories import authentications_repo
 from ..repositories import registration_code_repo

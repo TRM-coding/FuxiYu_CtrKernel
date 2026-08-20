@@ -31,18 +31,6 @@ def test_default_container_tests_do_not_call_requests_post():
         container_tasks.requests.post("http://127.0.0.1")
 
 
-def test_container_heartbeats_are_mocked_by_default(container_graph):
-    _root, machine, container = container_graph
-
-    thread = container_tasks.container_starting_status_heartbeat(
-        machine.machine_ip,
-        container.name,
-        container_id=container.id,
-    )
-
-    assert thread.is_alive() is True
-
-
 def test_machine_online_check_is_mocked_by_default(container_graph):
     from ...services.container_module import node_comms
 

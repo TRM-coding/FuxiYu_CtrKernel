@@ -31,7 +31,14 @@ def _model_data(model, *, exclude_none: bool = False) -> dict[str, Any]:
 
     if hasattr(model, "model_dump"):
         return model.model_dump(exclude_none=exclude_none)
-    return model.dict(exclude_none=exclude_none)
+    if hasattr(model, "dict"):
+        try:
+            return model.dict(exclude_none=exclude_none)
+        except TypeError:
+            return model.dict()
+    if isinstance(model, dict):
+        return model
+    return dict(getattr(model, "__dict__", {}))
 
 
 def _error(status_code: int, message: str, error_reason: str | None = None) -> JSONResponse:

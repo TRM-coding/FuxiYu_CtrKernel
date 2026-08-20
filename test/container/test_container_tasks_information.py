@@ -10,19 +10,21 @@ from ..factories import create_container, create_machine, create_user
 from .conftest import NODE_STATUS_404, NODE_STATUS_OFFLINE, NODE_STATUS_ONLINE
 
 
-def test_get_container_detail_success_skips_node_when_machine_offline(
-    monkeypatch,
-    db_session,
-    container_graph,
-):
+def test_get_container_detail_reads_status_from_db(db_session, container_graph):
+    # getter 只查库：状态读 WSS 推送落库的 container_status 字段
     _root, machine, container = container_graph
-    machine.machine_status = MachineStatus.OFFLINE
+    container.container_status = ContainerStatus.OFFLINE
     db_session.commit()
-    monkeypatch.setattr(
-        container_tasks,
-        "get_container_status",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not call node")),
-    )
+
+    info = container_tasks.get_container_detail_information(container.id)
+
+    assert info["container_id"] == container.id
+    assert info["container_status"] == ContainerStatus.OFFLINE.value
+
+
+def test_get_container_detail_keeps_default_status_from_db(db_session, container_graph):
+    # 工厂默认 ONLINE：不写 DB 状态时读默认值，不触发任何 Node 调用
+    _root, _machine, container = container_graph
 
     info = container_tasks.get_container_detail_information(container.id)
 
@@ -30,52 +32,10 @@ def test_get_container_detail_success_skips_node_when_machine_offline(
     assert info["container_status"] == ContainerStatus.ONLINE.value
 
 
-def test_get_container_detail_updates_status_when_node_returns_status(
-    monkeypatch,
-    db_session,
-    container_graph,
-):
-    _root, _machine, container = container_graph
-    monkeypatch.setattr(container_tasks, "get_container_status", lambda *args, **kwargs: NODE_STATUS_OFFLINE)
-
-    info = container_tasks.get_container_detail_information(container.id)
-
-    assert info["container_id"] == container.id
-    assert Container.query.get(container.id).container_status == ContainerStatus.OFFLINE
-
-
-def test_get_container_detail_node_404_deletes_local_container_and_raises(
-    monkeypatch,
-    db_session,
-    container_graph,
-):
-    _root, _machine, container = container_graph
-    monkeypatch.setattr(container_tasks, "get_container_status", lambda *args, **kwargs: NODE_STATUS_404)
-
-    with pytest.raises(ValueError, match="Container not found"):
-        container_tasks.get_container_detail_information(container.id)
-
-    assert Container.query.get(container.id) is None
-
-
-def test_get_container_detail_ignores_node_network_error(monkeypatch, db_session, container_graph):
-    _root, _machine, container = container_graph
-    monkeypatch.setattr(
-        container_tasks,
-        "get_container_status",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("network")),
-    )
-
-    info = container_tasks.get_container_detail_information(container.id)
-
-    assert info["container_id"] == container.id
-
-
 def test_list_container_bref_operator_can_filter_by_user(monkeypatch, db_session):
     operator = create_user(permission=PERMISSION.OPERATOR)
     target = create_user()
     _root, machine, container = container_tasks_test_graph_for_user(target)
-    monkeypatch.setattr(container_tasks, "get_container_status", lambda *args, **kwargs: NODE_STATUS_ONLINE)
 
     result = container_tasks.list_all_container_bref_information(
         machine_id=None,
@@ -97,7 +57,6 @@ def test_list_container_bref_non_operator_filters_by_machine_permission(monkeypa
     blocked_container = create_container(machine=blocked_machine)
     container_tasks.add_binding(user.id, allowed_container.id, role=container_tasks.ROLE.ROOT, username="root")
     container_tasks.add_binding(user.id, blocked_container.id, role=container_tasks.ROLE.ROOT, username="root")
-    monkeypatch.setattr(container_tasks, "get_container_status", lambda *args, **kwargs: NODE_STATUS_ONLINE)
 
     result = container_tasks.list_all_container_bref_information(
         machine_id=None,
@@ -110,29 +69,10 @@ def test_list_container_bref_non_operator_filters_by_machine_permission(monkeypa
     assert [c.container_id for c in result["containers"]] == [allowed_container.id]
 
 
-def test_list_container_bref_node_404_removes_and_skips_container(monkeypatch, db_session, container_graph):
-    from ...services.container_module import node_comms
-
-    root, _machine, container = container_graph
-    monkeypatch.setattr(node_comms, "get_container_status", lambda *args, **kwargs: NODE_STATUS_404)
-
-    result = container_tasks.list_all_container_bref_information(
-        machine_id=None,
-        request_user_id=root.id,
-        page_number=0,
-        page_size=10,
-        user_id=root.id,
-    )
-
-    assert result["containers"] == []
-    assert Container.query.get(container.id) is None
-
-
 def test_list_container_bref_includes_cleanup_info_from_ssh_record(monkeypatch, db_session, container_graph):
     from ...services.container_module import node_comms
 
     root, machine, container = container_graph
-    monkeypatch.setattr(node_comms, "get_container_status", lambda *args, **kwargs: NODE_STATUS_ONLINE)
     last_time = (datetime.utcnow() - timedelta(days=1)).isoformat()
     container_ssh_login_repo.upsert_last_ssh_login_time(machine.id, container.id, last_time)
 
@@ -151,12 +91,10 @@ def test_list_container_bref_includes_cleanup_info_from_ssh_record(monkeypatch, 
 
 
 def test_list_container_bref_includes_long_term_remaining_when_user_filter_present(
-    monkeypatch,
     db_session,
     container_graph,
 ):
     root, _machine, container = container_graph
-    monkeypatch.setattr(container_tasks, "get_container_status", lambda *args, **kwargs: NODE_STATUS_ONLINE)
     long_term_container_repo.add(container.id, created_by_user_id=root.id)
 
     result = container_tasks.list_all_container_bref_information(

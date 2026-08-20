@@ -42,9 +42,9 @@ class AddMachineRequest(MachineAllocationLimit):
     后续 register_machine 会成为主建档入口；该请求保留给预登记/兼容流程。
     """
 
-    machine_name: str
-    machine_ip: str
-    machine_type: MachineType
+    machine_name: str = ""
+    machine_ip: str = ""
+    machine_type: MachineType = "CPU"
     machine_description: str = ""
     cpu_core_number: int = Field(default=0, ge=0)
     gpu_number: int = Field(default=0, ge=0)
@@ -147,10 +147,10 @@ class MachineIdRequest(BaseModel):
 
 
 class MachineDetailResponse(NodeHardwareProfile, MachineAllocationLimit):
-    machine_name: str
-    machine_ip: str
-    machine_type: MachineType
-    machine_status: MachineStatus
+    machine_name: str = ""
+    machine_ip: str = ""
+    machine_type: MachineType = "CPU"
+    machine_status: MachineStatus = "offline"
     machine_description: str | None = None
     containers: list[int] = Field(default_factory=list)
 
@@ -235,7 +235,6 @@ class SysSnapshotDisk(BaseModel):
     """sys_snapshot.payload.disk。"""
 
     total_gb: float | None = Field(default=None, ge=0)
-    memory_used_gb: float | None = Field(default=None, ge=0)
     used_gb: float | None = Field(default=None, ge=0)
     free_gb: float | None = Field(default=None, ge=0)
     percent: float | None = Field(default=None, ge=0)

@@ -11,7 +11,6 @@ from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPubl
 from pydantic import BaseModel, Field
 
 from ..constant import *
-from ..utils.parallel import parallel_node_calls
 from sqlalchemy.exc import IntegrityError
 from ..repositories import containers_repo, machine_repo, machine_permission_repo, user_repo, long_term_container_repo
 from .operation_log_tasks import write_operation_log as write_op_log
@@ -22,11 +21,6 @@ from ..repositories.user_repo import *
 from ..utils.Container import Container_info
 from ..repositories.containers_repo import *
 from ..repositories.usercontainer_repo import *
-from ..utils.heartbeat import (
-    container_starting_status_heartbeat,
-    container_stopping_status_heartbeat,
-    container_restart_status_heartbeat,
-)
 from ..models.containers import Container
 import math
 from ..utils import sanitizer as _sanitizer
@@ -34,9 +28,7 @@ from ..utils import sanitizer as _sanitizer
 from .container_module.node_comms import (
     send,
     get_full_url,
-    get_container_status,
     _ensure_machine_online_for_operation,
-    _node_probe_container,
 )
 from .container_module.exceptions import NodeServiceError, _raise_on_node_error
 from .container_module.pydantic_models import (
@@ -54,10 +46,9 @@ logger = logging.getLogger(__name__)
 
 
 def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -> str | None:
-    """
-    通过中心端向集群客户端请求容器上次 SSH 登录时间。
-    入参: container_id
-    返回: 时间字符串或 None
+    """读容器上次 SSH 登录时间。
+
+    WSS 推送已接管采集（last_ssh 快照落库 container_ssh_login_records），getter 只查库。
     """
     try:
         container_id = int(container_id)
@@ -66,89 +57,12 @@ def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -
         return None
 
     try:
-        container = containers_repo.get_by_id(container_id)
+        record = container_ssh_login_repo.get_by_container(container_id)
     except Exception:
-        logger.error("Error querying container info for id=%s: %s", container_id, traceback.format_exc())
+        logger.error("Error querying ssh login record for id=%s: %s", container_id, traceback.format_exc())
         return None
 
-    if not container:
-        return None
-    try:
-        machine_id = container.machine_id
-        machine_ip = get_machine_ip_by_id(machine_id)
-        url = get_full_url(machine_ip, "/container_last_ssh_time")
-    except Exception:
-        logger.error("Error retrieving machine info for container id=%s: %s", container_id, traceback.format_exc())
-        return None
-
-    container_name = getattr(container, 'name', None)
-    payload = {"config": {"container_name": container_name}}
-    try:
-        res = send(url, payload, timeout=timeout)
-    except Exception as e:
-        logger.error("Error sending request to %s: %s", url, e)
-        # Node 不可达时，以 DB 已有记录兜底
-        record = container_ssh_login_repo.get_by_machine_container(machine_id, container.id)
-        return record.last_ssh_login_time if record else None
-    logger.debug("DEBUG: get_container_last_ssh_login_time: sent request to %s with payload %s", url, payload)
-    logger.debug("get_container_last_ssh_login_time: NODE response: %s", res)
-
-    if not isinstance(res, dict):
-        raise NodeServiceError(
-            f"NODE get_last_ssh_login_time unexpected response: {res}",
-            reason="unexpected_response",
-        )
-
-    status_code = res.get("status_code")
-    err_reason = res.get("error_reason")
-
-    # 这类 404 通常是 Node 尚未部署该接口（返回 HTML 404），不是"容器没有SSH记录"
-    if status_code == 404 and not err_reason:
-        txt = str(res.get("text") or "")
-        if "<!doctype html" in txt.lower() or "not found" in txt.lower():
-            raise NodeServiceError(
-                f"NODE get_last_ssh_login_time failed: endpoint /container_last_ssh_time not found on node {machine_ip}",
-                reason="node_endpoint_not_found",
-            )
-
-    # 节点明确声明"未找到SSH登录记录"才返回空值
-    if err_reason == "not_found":
-        last_time = None
-    elif res.get("success") in (1, True):
-        raw = res.get("last_ssh_connect_time")
-        last_time = str(raw) if raw is not None else None
-    else:
-        # 其余情况都作为错误抛出，避免被静默吞掉
-        _raise_on_node_error(res, "get_last_ssh_login_time")
-        raise NodeServiceError(
-            f"NODE get_last_ssh_login_time failed: {res}",
-            reason=err_reason or "NODE_error",
-        )
-
-    # 归一化为 ISO 8601 UTC 格式存储（Node 现已用 TZ=UTC，无需再减 8h）
-    if last_time is not None:
-        parsed = _parse_last_ssh_time(last_time)
-        if parsed is not None:
-            last_time = parsed.strftime('%Y-%m-%dT%H:%M:%S')
-
-    # 记录请求结果（空值不覆写，保护初始创建时间，使从未 SSH 的容器也可被清理）
-    if last_time is not None:
-        try:
-            container_ssh_login_repo.upsert_last_ssh_login_time(
-                machine_id=machine_id,
-                container_id=container.id,
-                last_ssh_login_time=last_time,
-            )
-        except Exception as e:
-            logger.warning("failed to persist last ssh login time for container %s: %s", container.id, e)
-
-    # Node 返回空值时，以 DB 已有记录兜底
-    if last_time is None:
-        record = container_ssh_login_repo.get_by_machine_container(machine_id, container.id)
-        if record and record.last_ssh_login_time:
-            last_time = record.last_ssh_login_time
-
-    return last_time
+    return record.last_ssh_login_time if record else None
 
 
 
@@ -246,15 +160,7 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
         last_ssh_login_time=datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
     )
 
-    # start heartbeat in background (non-blocking)
-    try:
-        container_starting_status_heartbeat(machine_ip, container.NAME, container_id=container_id,
-                                         timeout=180, interval=3)
-    except Exception as e:
-        # 容器已创建成功（Node/DB/绑定均已落），心跳只是状态推进器；
-        # 失败不应让调用方误判创建失败（重试会撞重名），状态由后续查询的实时探测纠正。
-        logger.warning("Heartbeat for container %s failed to start or encountered an error: %s. Container may be stuck in CREATING status.", container_id, e)
-
+    # 状态推进已由 WSS 推送接管（status_cache 转换态 → Ctrl 落库），心跳轮询已退役
     write_op_log(success=True,
         operator_user_id=operator_user_id,
         operation=OperationType.CREATE_CONTAINER,
@@ -458,10 +364,9 @@ def unpause_container(container_id: int, operator_user_id: int | None = None) ->
 
 
 def get_container_disk_usage(container_id: int, timeout: float = 20.0) -> dict | None:
-    """
-    通过 Node 查询容器磁盘使用情况（只读）。
-    入参: container_id
-    返回: dict 包含 machine_disk 和 container 信息，或 None
+    """读容器磁盘用量（WSS 推送落库 disk_* 字段，getter 只查库）。
+
+    返回形状兼容原 Node 响应：{"success": 1, "container": {...}}。
     """
     try:
         container_id = int(container_id)
@@ -477,36 +382,16 @@ def get_container_disk_usage(container_id: int, timeout: float = 20.0) -> dict |
 
     if not container:
         return None
-    try:
-        machine_id = container.machine_id
-        machine_ip = get_machine_ip_by_id(machine_id)
-        url = get_full_url(machine_ip, "/check_disk_usage")
-    except Exception:
-        logger.error("Error retrieving machine info for container id=%s: %s", container_id, traceback.format_exc())
-        return None
 
-    container_name = getattr(container, 'name', None)
-    payload = {"config": {"container_name": container_name}}
-    try:
-        res = send(url, payload, timeout=timeout)
-    except Exception as e:
-        logger.error("Error sending disk check request to %s: %s", url, e)
-        return None
-
-    if not isinstance(res, dict):
-        logger.error("get_container_disk_usage: unexpected response type: %s", type(res))
-        return None
-
-    _raise_on_node_error(res, 'check_disk')
-    if res.get('success') != 1:
-        logger.error("get_container_disk_usage: Node returned failure: %s", res)
-        return None
-
-    cd = res.get("container", {})
-    _errs = {k: cd[k] for k in ("overlay_rw_error", "bind_mount_error", "bind_mount_path") if k in cd}
-    logger.info("[disk-check] ctrl received: container=%s overlay=%sB bind=%sB total=%sB errs=%s",
-                container_name, cd.get('overlay_rw_bytes'), cd.get('bind_mount_bytes'), cd.get('total_bytes'), _errs)
-    return res
+    return {
+        "success": 1,
+        "container": {
+            "overlay_rw_bytes": getattr(container, 'disk_overlay_rw_bytes', None),
+            "bind_mount_bytes": getattr(container, 'disk_bind_mount_bytes', None),
+            "total_bytes": getattr(container, 'disk_total_bytes', None),
+            "bind_mount_path": getattr(container, 'bind_mount_path', None),
+        },
+    }
 
 
 ####################################################
@@ -836,11 +721,7 @@ def start_container(container_id:int, operator_user_id:int|None=None)->bool:
     _raise_on_node_error(res, 'start')
     # Expect success truthy
     if res.get('success') in (1, True):
-        # start controller-side heartbeat to watch for ONLINE
-        try:
-            container_starting_status_heartbeat(machine_ip, container_name, container_id=container_id)
-        except Exception as e:
-            logger.warning("Failed to start start-heartbeat: %s", e)
+        # 状态推进由 WSS 推送接管（转换态 → Ctrl 落库），心跳轮询已退役
         write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.START_CONTAINER,
                      target_type="container", target_id=container_id,
                      detail={"name": container_name})
@@ -869,11 +750,7 @@ def stop_container(container_id:int, operator_user_id:int|None=None)->bool:
 
     _raise_on_node_error(res, 'stop')
     if res.get('success') in (1, True):
-        # start controller-side heartbeat to watch for OFFLINE
-        try:
-            container_stopping_status_heartbeat(machine_ip, container_name, container_id=container_id)
-        except Exception as e:
-            logger.warning("Failed to start stop-heartbeat: %s", e)
+        # 状态推进由 WSS 推送接管，心跳轮询已退役
         write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.STOP_CONTAINER,
                      target_type="container", target_id=container_id,
                      detail={"name": container_name})
@@ -901,16 +778,7 @@ def restart_container(container_id:int, operator_user_id:int|None=None)->bool:
 
     _raise_on_node_error(res, 'restart')
     if res.get('success') in (1, True):
-        #先t finished
-        try:
-            update_container(container_id, container_status=ContainerStatus.OFFLINE)
-        except Exception as e:
-            logger.warning("failed to mark container %s as OFFLINE before restart-heartbeat: %s", container_id, e)
-        # start controller-side heartbeat to watch for ONLINE after restart
-        try:
-            container_restart_status_heartbeat(machine_ip, container_name, container_id=container_id)
-        except Exception as e:
-            logger.warning("Failed to start restart-heartbeat: %s", e)
+        # 状态推进由 WSS 推送接管（转换态 → Ctrl 落库），心跳轮询已退役
         write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.RESTART_CONTAINER,
                      target_type="container", target_id=container_id,
                      detail={"name": container_name})
@@ -922,67 +790,9 @@ def get_container_detail_information(container_id:int)->container_detail_informa
     container=get_by_id(container_id)
     if not container:
         raise ValueError("Container not found")
-    # 这个状态查询主要是为了验证容器是否真的存在于 Node 上，如果 Node 返回 404 则说明容器实际上已经不存在了，这时本地也应该删除记录并返回 not found 错误
-    # 这个方法不处理从未放入数据库的容器（因为它们不应该有 container_id），也不处理网络/其他错误（因为它们不应该阻止返回数据库中的信息）。
-    # 这里先检查机器状态，如果机器离线或维护中，则跳过 Node 检查直接返回数据库内容；如果机器在线，则进行 Node 检查以验证容器状态并尝试更新数据库中的状态信息。
-    # 无论如何，如果 Node 检查失败（网络错误、超时等），都应该忽略错误并继续返回数据库内容，而不是阻止整个请求失败。
-    try:
-        m = machine_repo.get_by_id(container.machine_id)
-    except Exception:
-        m = None
-    do_node_check = True
-    if m is not None:
-        try:
-            status_val = m.machine_status.value.lower() if hasattr(m.machine_status, 'value') else str(m.machine_status).lower()
-        except Exception:
-            status_val = str(getattr(m, 'machine_status', '')).lower()
-        if status_val in ('offline', 'maintenance'):
-            do_node_check = False
-
-    st = None
-    if do_node_check:
-        try:
-            machine_ip = get_machine_ip_by_id(container.machine_id)
-            st = get_container_status(machine_ip, container.name)
-            # 找不到容器（Node 返回 404）时，删除本地记录并返回 not found 错误；其他错误（网络错误、超时、解析错误等）则忽略并继续返回数据库内容
-            if isinstance(st, dict) and st.get('status_code') == 404:
-                try:
-                    remove_binding(0, container_id, all=True)
-                except Exception as e:
-                    logger.warning("failed to remove bindings for %s: %s", container_id, e)
-                try:
-                    delete_container(container_id)
-                except Exception as e:
-                    logger.warning("failed to delete container %s from DB: %s", container_id, e)
-                raise ValueError("Container not found")
-        except Exception as e:
-            # 如果是 ValueError（通常是因为 Node 返回 404 导致的），则需要抛出以终止并返回 not found；如果是其他类型的异常（网络错误、超时、解析错误等），则应该捕获并忽略，以继续返回数据库中的信息。
-            if isinstance(e, ValueError):
-                raise
-            logger.warning("get_container_detail_information: ignored NODE check error: %s", e)
-
-    # If Node returned a status payload, and it's not a 404, try to persist container_status to DB
-    try:
-        if st and isinstance(st, dict) and st.get('status_code') != 404:
-            status_str = st.get('container_status')
-            if status_str:
-                try:
-                    new_status = ContainerStatus(status_str)
-                except Exception:
-                    # try case-insensitive match of enum values
-                    try:
-                        new_status = next(s for s in ContainerStatus if s.value.lower() == str(status_str).lower())
-                    except StopIteration:
-                        new_status = None
-                if new_status:
-                    try:
-                        update_container(container.id, container_status=new_status)
-                    except Exception as e:
-                        logger.warning("failed to update container status for %s: %s", container.id, e)
-    except Exception as e:
-        logger.warning("error while attempting to persist Node status for %s: %s",
-                       container.id if 'container' in locals() and container else '?', e)
-
+    # 状态直接读 WSS 推送落库的 DB 字段（getter 只查库，不打 Node）。
+    # 「容器在 Node 侧消失」的 404 删记录语义由 WSS delete 帧接管
+    # （Node 对账发现消失 → 推送 delete → Ctrl 抹 DB）。
     owener_bindings= get_container_bindings(container_id)
     long_term_state = _build_long_term_container_state(container.id, owener_bindings)
 
@@ -1066,110 +876,10 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
         containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=user_id)
     else:
         containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=None)
-    # --- Phase A: 预过滤，分离需要 NodeKernel 查询的容器 ---
-    try:
-        from flask import current_app
-        use_parallel = current_app.config.get("NODE_PARALLEL_ENABLED_CONTAINERS", True)
-        _app = current_app._get_current_object()
-    except RuntimeError:
-        use_parallel = True
-        _app = None
-
-    _probe_results: dict[int, dict | None] = {}  # container_id → result
-    _deleted: set[int] = set()                     # 404 已删除的容器
-
-    # 预过滤：收集所有容器，确定哪些需要调用 NodeKernel
-    _need_check: list[tuple] = []   # [(container, machine_ip), ...]
-    _skip: list = []                # [container, ...]
-    _container_ip: dict[int, str] = {}
-
-    for container in containers:
-        machine_ip = ""
-        do_node_check = True
-        try:
-            m = machine_repo.get_by_id(container.machine_id)
-        except Exception:
-            m = None
-        if m is not None:
-            try:
-                status_val = m.machine_status.value.lower() if hasattr(m.machine_status, 'value') else str(m.machine_status).lower()
-            except Exception:
-                status_val = str(getattr(m, 'machine_status', '')).lower()
-            if status_val in ('offline', 'maintenance'):
-                do_node_check = False
-            try:
-                machine_ip = get_machine_ip_by_id(container.machine_id)
-            except Exception:
-                machine_ip = None
-
-        _container_ip[container.id] = machine_ip
-        if do_node_check and machine_ip:
-            _need_check.append((container, machine_ip))
-        else:
-            _skip.append(container)
-
-    # --- Phase B: 并发查询 NodeKernel ---
-    if _need_check:
-        if use_parallel and _app is not None:
-            _callables = [
-                lambda c=c, ip=ip, a=_app: _node_probe_container(c, ip, _app=a)
-                for c, ip in _need_check
-            ]
-            _raw = parallel_node_calls(_callables, timeout_per_call=12.0)
-            for (c, _), r in zip(_need_check, _raw):
-                _probe_results[c.id] = r if isinstance(r, (dict, type(None))) else None
-        else:
-            for c, ip in _need_check:
-                _probe_results[c.id] = _node_probe_container(c, ip)
-
-    # --- Phase C: 逐条处理结果（串行，避免 DB session 竞争） ---
+    # WSS 推送已接管状态采集（apply_container_status_snapshot 落库 container_status）；
+    # getter 只查库组装，不再实时打 Node。「容器在 Node 侧消失」由 WSS delete 帧处理。
     res = []
-    _all_containers = _skip + [c for c, _ in _need_check]
-    # 按原始顺序重建
-    _id_order = {c.id: idx for idx, c in enumerate(containers)}
-    _all_containers.sort(key=lambda c: _id_order.get(c.id, 99999))
-
-    for container in _all_containers:
-        if container.id in _deleted:
-            continue
-        machine_ip = _container_ip.get(container.id, "")
-        st = _probe_results.get(container.id)
-        if st is None and container in _need_check:
-            # probe 返回 None 表示异常/超时，保持原逻辑（不更新状态）
-            pass
-        elif st is not None:
-            # If Node reports 404, delete local record
-            if isinstance(st, dict) and st.get('status_code') == 404:
-                try:
-                    remove_binding(0, container.id, all=True)
-                except Exception as e:
-                    logger.warning("failed to remove bindings for %s: %s", container.id, e)
-                try:
-                    delete_container(container.id)
-                except Exception as e:
-                    logger.warning("failed to delete container %s from DB: %s", container.id, e)
-                _deleted.add(container.id)
-                continue
-            else:
-                try:
-                    if st and isinstance(st, dict) and st.get('status_code') is None or (isinstance(st, dict) and st.get('status_code') != 404):
-                        status_str = st.get('container_status')
-                        if status_str:
-                            try:
-                                new_status = ContainerStatus(status_str)
-                            except Exception:
-                                try:
-                                    new_status = next(s for s in ContainerStatus if s.value.lower() == str(status_str).lower())
-                                except StopIteration:
-                                    new_status = None
-                            if new_status:
-                                try:
-                                    update_container(container.id, container_status=new_status)
-                                except Exception as e:
-                                    logger.warning("failed to update container status for %s: %s", container.id, e)
-                except Exception as e:
-                    logger.warning("list_all_container_bref_information: ignored error while persisting status for %s: %s", container.name, e)
-
+    for container in containers:
         bindings = get_container_bindings(container.id) or []
         long_term_state = _build_long_term_container_state(container.id, bindings)
         # 冻结升级状态
@@ -1205,6 +915,11 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
         disk_total_gb = round(d_total / (1024**3), 1) if d_total is not None else None
         disk_limit_gb = round(d_limit / (1024**3), 1) if d_limit else None
         disk_usage_percent = round((d_total / d_limit * 100) if (d_total is not None and d_limit > 0) else 0, 1)
+
+        try:
+            machine_ip = get_machine_ip_by_id(container.machine_id)
+        except Exception:
+            machine_ip = ""
 
         info = container_bref_information(
             container_id=container.id,

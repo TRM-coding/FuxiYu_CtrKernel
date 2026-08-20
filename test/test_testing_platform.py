@@ -56,10 +56,10 @@ def test_auth_token_factory_can_create_expired_token(db_session):
 def test_mock_node_response_records_calls(monkeypatch):
     calls = mocks.mock_node_response(monkeypatch, container_tasks, {"success": 1})
 
-    result = container_tasks.send(b"cipher", b"sig", "http://node")
+    result = container_tasks.send("http://node", {"config": {}})
 
     assert result == {"success": 1}
-    assert calls[0]["args"] == (b"cipher", b"sig", "http://node")
+    assert calls[0]["args"] == ("http://node", {"config": {}})
 
 
 def test_mock_mail_success_records_recipient_subject_content(monkeypatch):

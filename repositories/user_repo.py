@@ -12,6 +12,10 @@ from .authentications_repo import get_user_id_by_token
 def get_by_id(user_id: int) -> User | None:
 	return User.query.get(user_id)
 
+def list_all_users() -> Sequence[User]:
+	"""全部用户（RBAC seed 存量映射用）。"""
+	return User.query.all()
+
 def get_name_by_id(user_id:int)->str|None:
     user=User.query.get(user_id)
     if user:

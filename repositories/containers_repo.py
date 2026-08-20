@@ -14,6 +14,21 @@ from .machine_repo import get_max_gpu_number, get_max_shared_gb, get_max_cpu_cor
 def get_by_id(container_id: int) -> Container | None:
 	return Container.query.get(container_id)
 
+def get_status(container_id: int):
+	"""读容器状态（WSS 推送落库的 DB 字段；getter 用，不打 Node）。
+
+	区别于 node_comms.get_container_status（HTTP 探测，回退/连通判定用）。
+	"""
+	container = get_by_id(container_id)
+	return getattr(container, 'container_status', None) if container else None
+
+def apply_snapshot_updates() -> None:
+	"""提交 WSS 快照批量更新。
+
+	WSS 解析层只表达“快照已应用”，不直接暴露通用 commit 语义。
+	"""
+	db.session.commit()
+
 def get_id_by_name_machine(container_name: str, machine_id: int) -> int | None:
 	container = Container.query.filter_by(name=container_name, machine_id=machine_id).first()
 	return container.id if container else None

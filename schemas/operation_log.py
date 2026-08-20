@@ -42,6 +42,9 @@ class OperationLogListResponse(BaseModel):
 class OperationLogStatsResponse(BaseModel):
     success: int | bool = 1
     total: int | None = None
+    succeeded: int | None = None
+    failed: int | None = None
     by_day: list[dict[str, Any]] | dict[str, Any] | None = None
     by_operation: list[dict[str, Any]] | dict[str, Any] | None = None
+    by_target_type: list[dict[str, Any]] | dict[str, Any] | None = None
     by_error_reason: list[dict[str, Any]] | dict[str, Any] | None = None

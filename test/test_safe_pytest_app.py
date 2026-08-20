@@ -8,19 +8,16 @@ from .conftest import TEST_CONFIG_OVERRIDES
 def test_app_factory_testing_does_not_start_background_tasks(monkeypatch):
     calls = []
 
-    def _record_ssh(*args, **kwargs):
-        calls.append("ssh")
-
     def _record_cleanup(*args, **kwargs):
         calls.append("cleanup")
 
-    monkeypatch.setattr("FuxiYu_CtrKernel.start_container_ssh_refresh_scheduler", _record_ssh)
     monkeypatch.setattr("FuxiYu_CtrKernel.start_container_cleanup_scheduler", _record_cleanup)
 
-    app = create_app(overrides=TEST_CONFIG_OVERRIDES)
+    fastapi_app = create_app(overrides=TEST_CONFIG_OVERRIDES)
+    flask_app = fastapi_app.state.flask_app
 
-    assert app.config["TESTING"] is True
-    assert app.config["DISABLE_BACKGROUND_TASKS"] is True
+    assert flask_app.config["TESTING"] is True
+    assert flask_app.config["DISABLE_BACKGROUND_TASKS"] is True
     assert calls == []
 
 

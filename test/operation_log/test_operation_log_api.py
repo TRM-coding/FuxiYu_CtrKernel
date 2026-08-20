@@ -1,12 +1,12 @@
 """operation_log 管理端 API 契约测试（只测鉴权与响应形状，数据查询在 repo 测试覆盖）。"""
 
-from ...blueprints import operation_log_api
+from ...api import operation_log_api, deps
 from ...services import operation_log_tasks
 
 
 def _auth(monkeypatch, *, valid=True, operator=True):
-    monkeypatch.setattr(operation_log_api.authentications_repo, "is_token_valid", lambda token: valid)
-    monkeypatch.setattr(operation_log_api.user_repo, "check_permission", lambda token, required_permission: operator)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: valid)
+    monkeypatch.setattr(deps.user_repo, "check_permission", lambda token, required_permission: operator)
 
 
 def _fake_log_dict():

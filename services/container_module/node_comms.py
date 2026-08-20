@@ -35,10 +35,49 @@ def get_full_url(machine_ip:str, endpoint:str)->str:
 # Node 自签证书 pin 文件：首连时 Ctrl 从 TLS 层取对端证书导出为 PEM，
 # 存 pinned_certs/{machine_ip}.pem，之后 send 以 verify=该文件做证书 pin。
 PINNED_CERTS_DIR = os.getenv("CTRL_PINNED_CERTS_DIR", str(Path(__file__).resolve().parents[2] / "pinned_certs"))
+WSS_RELOAD_MARKER = os.getenv(
+    "CTRL_WSS_RELOAD_MARKER",
+    str(Path(PINNED_CERTS_DIR) / "_wss_reload_requested"),
+)
 
 
 def _pin_file(machine_ip: str) -> Path:
     return Path(PINNED_CERTS_DIR) / f"{machine_ip}.pem"
+
+
+def wss_reload_marker() -> Path:
+    """返回 Ctrl WSS 接收器自重启 marker 文件路径。"""
+
+    return Path(WSS_RELOAD_MARKER)
+
+
+def request_wss_restart(reason: str = "pin_bundle_changed") -> dict:
+    """重建 WSS pin bundle，并通知旁挂 WSS 接收器自动重启。
+
+    WSS 服务端的 SSLContext 不会自动重新读取 ca_certs 文件；注册新 Node 后必须
+    让 run_wss.py 重新创建 SSLContext。这里通过 marker 文件做轻量跨进程通知。
+    """
+
+    chain = rebuild_pinned_chain()
+    marker = wss_reload_marker()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(
+        json.dumps(
+            {
+                "reason": reason,
+                "requested_at": datetime.datetime.utcnow().isoformat(),
+                "pin_bundle": str(chain) if chain else None,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "wss_reload_required": True,
+        "wss_restart_requested": True,
+        "pin_bundle": str(chain) if chain else None,
+        "reload_marker": str(marker),
+    }
 
 
 def _resolve_tls(url: str, cert=None, verify=None):
@@ -222,7 +261,12 @@ def _default_resource_limits(hardware: dict) -> dict:
     return limits
 
 
-def register_machine(machine_name: str, machine_ip: str, timeout: float = 8.0) -> dict:
+def register_machine(
+    machine_name: str,
+    machine_ip: str,
+    machine_description: str = "",
+    timeout: float = 8.0,
+) -> dict:
     """TOFU 建档一体接入（机器建档主入口）：信任锚（name/ip）→ TLS 首连 → 指纹 →
     硬件上报 → UID 下发 → 建档（默认分配比例）→ 落库双凭据。
 
@@ -294,7 +338,7 @@ def register_machine(machine_name: str, machine_ip: str, timeout: float = 8.0) -
             machinename=machine_name,
             machine_ip=machine_ip,
             machine_type=machine_type,
-            machine_description=f"enrolled via TOFU register ({machine_ip})",
+            machine_description=machine_description or f"enrolled via TOFU register ({machine_ip})",
             cpu_core_number=limits["cpu_core_number"],
             gpu_number=limits["gpu_number"],
             gpu_type=limits["gpu_type"],
@@ -321,6 +365,16 @@ def register_machine(machine_name: str, machine_ip: str, timeout: float = 8.0) -
         raise NodeServiceError(f"register_machine failed: persist credentials for machine {machine.id}: {e}",
                                reason="persist_failed") from e
 
+    try:
+        wss_reload = request_wss_restart(reason=f"node_enrolled:{machine.id}")
+    except Exception as e:
+        logger.warning("register_machine: failed to request WSS restart for %s: %s", machine_ip, e)
+        wss_reload = {
+            "wss_reload_required": True,
+            "wss_restart_requested": False,
+            "wss_restart_error": str(e),
+        }
+
     logger.info("machine %s (%s) enrolled: id=%s uid=%s fingerprint=%s hardware=%s",
                 machine_name, machine_ip, machine.id, uid, fingerprint, hardware)
     return {
@@ -329,6 +383,7 @@ def register_machine(machine_name: str, machine_ip: str, timeout: float = 8.0) -
         "certificate_fingerprint": fingerprint,
         "machine_id": machine.id,
         "hardware": hardware,
+        **wss_reload,
     }
 
 
@@ -385,8 +440,7 @@ def apply_container_status_snapshot(data: dict) -> dict:
             skipped += 1
     if updated:
         try:
-            from ...extensions import db
-            db.session.commit()
+            containers_repo.apply_snapshot_updates()
         except Exception as e:
             logger.warning("commit status snapshot failed: %s", e)
     return {"updated": updated, "skipped": skipped}
@@ -452,8 +506,7 @@ def apply_disk_usage_snapshot(data: dict) -> dict:
             skipped += 1
     if updated:
         try:
-            from ...extensions import db
-            db.session.commit()
+            containers_repo.apply_snapshot_updates()
         except Exception as e:
             logger.warning("commit disk snapshot failed: %s", e)
     return {"updated": updated, "skipped": skipped}
@@ -620,10 +673,24 @@ def _handle_container_deleted(container_name: str) -> None:
         if container is None:
             logger.debug("handle_node_ws delete: container %r already gone (skip)", container_name)
             return
-        remove_binding(0, container.id, all=True)
-        containers_repo.delete_container(container.id)
+        container_id, machine_id = container.id, container.machine_id
+        remove_binding(0, container_id, all=True)
+        containers_repo.delete_container(container_id)
         logger.warning("handle_node_ws delete: container %r (id=%s) removed from DB (vanished on node)",
-                       container_name, container.id)
+                       container_name, container_id)
+        # 审计：外部消失是删除的另一条路径（trigger=node_vanished），与 api/cleanup 一致入 op-log
+        try:
+            from ...services.operation_log_tasks import write_operation_log as write_op_log
+            from ...constant import OperationType
+            write_op_log(success=True,
+                         operator_user_id=None,
+                         operation=OperationType.DELETE_CONTAINER,
+                         target_type="container",
+                         target_id=container_id,
+                         detail={"name": container_name, "machine_id": machine_id,
+                                 "trigger": "node_vanished"})
+        except Exception as le:
+            logger.warning("handle_node_ws delete: op-log failed for %r: %s", container_name, le)
     except Exception as e:
         logger.warning("handle_node_ws delete: failed to remove container %r: %s", container_name, e)
 
@@ -721,5 +788,3 @@ async def handle_node_ws(websocket) -> None:
             await websocket.close()
         except Exception:
             pass
-
-

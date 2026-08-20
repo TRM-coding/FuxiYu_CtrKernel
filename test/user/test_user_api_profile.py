@@ -2,15 +2,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from ...blueprints import user_api
+from ...api import user_api, deps
 
 
 def _valid_token(monkeypatch):
-    monkeypatch.setattr(user_api.authentications_repo, "is_token_valid", lambda token: True)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: True)
 
 
 def test_get_user_detail_requires_token(client, monkeypatch):
-    monkeypatch.setattr(user_api.authentications_repo, "is_token_valid", lambda token: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: False)
 
     resp = client.get("/api/users/get_user_detail_information?user_id=1")
 
@@ -47,7 +47,7 @@ def test_get_user_detail_success(client, monkeypatch):
 
 
 def test_list_users_requires_token(client, monkeypatch):
-    monkeypatch.setattr(user_api.authentications_repo, "is_token_valid", lambda token: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: False)
 
     resp = client.get("/api/users/list_all_user_bref_information")
 
@@ -77,7 +77,7 @@ def test_list_users_task_failure(client, monkeypatch):
 
 def test_change_password_success(client, monkeypatch):
     _valid_token(monkeypatch)
-    monkeypatch.setattr(user_api.user_repo, "get_by_id", lambda user_id: SimpleNamespace(id=user_id))
+    monkeypatch.setattr(deps.user_repo, "get_by_id", lambda user_id: SimpleNamespace(id=user_id))
     monkeypatch.setattr(user_api.user_tasks, "Change_password", lambda user, old, new: True)
 
     resp = client.post("/api/users/change_password", json={"user_id": 1, "old_password": "old", "new_password": "new"} )
@@ -87,7 +87,7 @@ def test_change_password_success(client, monkeypatch):
 
 def test_change_password_wrong_old_password(client, monkeypatch):
     _valid_token(monkeypatch)
-    monkeypatch.setattr(user_api.user_repo, "get_by_id", lambda user_id: SimpleNamespace(id=user_id))
+    monkeypatch.setattr(deps.user_repo, "get_by_id", lambda user_id: SimpleNamespace(id=user_id))
     monkeypatch.setattr(user_api.user_tasks, "Change_password", lambda user, old, new: False)
 
     resp = client.post("/api/users/change_password", json={"user_id": 1, "old_password": "bad", "new_password": "new"} )
