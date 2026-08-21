@@ -1011,39 +1011,6 @@ class TestHandleFreezeEscalation:
         assert "已被清除" in sent[0]["subject"]
         assert "8 天" in sent[0]["content"]
 
-    def test_escalation_writes_operation_log(self, app, db_session, monkeypatch):
-        """升级时写入操作日志。"""
-        _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id, session=db_session)
-
-        logs = []
-        monkeypatch.setattr(
-            container_disk_check_task.container_tasks, "remove_container",
-            lambda cid: True
-        )
-        monkeypatch.setattr(
-            container_disk_check_task.container_tasks,
-            "get_container_root_owner_emails",
-            lambda cid: []
-        )
-        from ...services import operation_log_tasks
-        monkeypatch.setattr(
-            operation_log_tasks,
-            "write_operation_log",
-            lambda **kwargs: logs.append(kwargs)
-        )
-        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
-
-        usage = _usage_exceeding_hard_limit()
-        container_disk_check_task._handle_freeze_escalation(
-            container, usage, app, days_frozen=8
-        )
-
-        assert len(logs) == 1
-        assert logs[0]["operation"] == "remove_container"
-        assert logs[0]["detail"]["reason"] == "disk_freeze_escalation"
-        assert logs[0]["detail"]["days_frozen"] == 8
-
     def test_escalation_email_cooled_down_24h(self, app, db_session, monkeypatch):
         """同一容器 24h 内不重复发升级邮件（验证 cooldown 状态）。"""
         _root, machine, container = create_container_graph()

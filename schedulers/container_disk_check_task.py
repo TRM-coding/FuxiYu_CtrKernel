@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 from ..config import AppConfig
 from ..extensions import session_scope
 from ..repositories import containers_repo
-from ..constant import OperationType
 from ..services import container_tasks
 
 logger = logging.getLogger(__name__)
@@ -374,17 +373,6 @@ def _handle_freeze_escalation(container, usage: dict, app, days_frozen: int) -> 
         container_tasks.remove_container(container.id)
         logger.warning("[disk-check] escalation: removed container %s (%s) after %sd frozen",
                        container.id, getattr(container, 'name', '?'), days_frozen)
-        from ..services.operation_log_tasks import write_operation_log as write_op_log
-        write_op_log(success=True,
-            operation=OperationType.REMOVE_CONTAINER,
-            target_type="container",
-            target_id=container.id,
-            detail={
-                "reason": "disk_freeze_escalation",
-                "days_frozen": days_frozen,
-                "usage": f"{total_gb:.1f}GB/{limit_gb:.1f}GB",
-            },
-        )
 
         # 升级删除：立刻清理 mount（宽限期已是最后机会）
         _clean_mount_immediately(container)

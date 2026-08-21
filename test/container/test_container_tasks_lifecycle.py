@@ -161,6 +161,13 @@ def test_remove_container_success_deletes_bindings_and_container(
     assert db_session.get(Container, container_id) is None
     assert container_tasks.get_container_bindings(container_id) == []
 
+    # 审计：删除日志统一 DELETE_CONTAINER（来源由 trigger 区分，operator=系统时为 cleanup）
+    from ...models.operation_log import OperationLog
+    logs = db_session.scalars(select(OperationLog)).all()
+    assert len(logs) == 1
+    assert logs[0].operation == "delete_container"
+    assert logs[0].detail.get("trigger") == "api"
+
 
 def test_remove_container_node_failed_raises_and_keeps_local_record(
     db_session,

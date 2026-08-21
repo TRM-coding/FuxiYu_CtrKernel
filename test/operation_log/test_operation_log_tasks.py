@@ -36,7 +36,7 @@ def test_list_enriches_machine_name(db_session):
     operation_log_repo.write(
         session=db_session,
         operator_user_id=None,
-        operation=OperationType.MACHINE_STATUS_TRANSITION.value,
+        operation=OperationType.UPDATE_MACHINE.value,
         target_type="machine",
         target_id=machine.id,
         detail={"before": {"machine_status": "online"}, "after": {"machine_status": "offline"}},

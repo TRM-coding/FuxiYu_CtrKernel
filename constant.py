@@ -79,5 +79,3 @@ class OperationType(str, Enum):
     SEND_CLEANUP_REMINDER = "send_cleanup_reminder"
     PAUSE_CONTAINER = "pause_container"
     # 系统事件（非用户操作，仅审计记录；RBAC / 告警维度请勿把它当"操作"）
-    MACHINE_STATUS_TRANSITION = "machine_status_transition"
-    REMOVE_CONTAINER = "remove_container"  # 磁盘超硬限，系统自动删除（区别于用户删除 delete_container）

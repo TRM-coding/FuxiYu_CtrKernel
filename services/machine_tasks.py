@@ -352,28 +352,6 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
     return True
 
 
-def _log_machine_status_transition(mid: int, new_status: MachineStatus) -> None:
-    """机器状态真正变化时记一条系统日志（前→后），未变化不记。
-
-    从 utils/heartbeat.py 迁入：状态机转换（WSS 驱动 ①② / 手动开关 ③④）的公共审计点。
-    """
-    try:
-        with session_scope(commit=False) as session:
-            old = get_by_id(mid, session=session)
-        if old is None:
-            return  # 机器已不存在（如过渡期间被删除），跳过记录
-        old_val = getattr(old, 'machine_status', None)
-        old_str = old_val.value if hasattr(old_val, 'value') else str(old_val) if old_val is not None else None
-    except Exception:
-        return
-    new_str = new_status.value if hasattr(new_status, 'value') else str(new_status)
-    if old_str is not None and str(old_str).lower() == str(new_str).lower():
-        return
-    write_op_log(success=True, operator_user_id=None, operation=OperationType.MACHINE_STATUS_TRANSITION,
-                 target_type="machine", target_id=mid,
-                 detail={"before": {"machine_status": old_str}, "after": {"machine_status": new_str}})
-
-
 #######################################
 
 
@@ -500,29 +478,14 @@ def List_all_machine_bref_information(
         online = _probe_results.get(machine.id, False)
 
         try:
-            try:
-                current_status_val = machine.machine_status.value.lower() if hasattr(machine.machine_status, 'value') else str(machine.machine_status).lower()
-            except Exception:
-                current_status_val = str(getattr(machine, 'machine_status', '')).lower()
-
-            def _log_status_transition(mid, before, after):
-                """状态真正变化时记一条系统日志（前→后），未变化不记。"""
-                if before is not None and str(before).lower() == str(after).lower():
-                    return
-                write_op_log(success=True, operator_user_id=None, operation=OperationType.MACHINE_STATUS_TRANSITION,
-                             target_type="machine", target_id=mid,
-                             detail={"before": {"machine_status": before}, "after": {"machine_status": after}})
-
             if online:
                 try:
-                    _log_status_transition(machine.id, current_status_val, MachineStatus.ONLINE.value)
                     with session_scope() as session:
                         update_machine(machine.id, machine_status=MachineStatus.ONLINE, session=session)
                 except Exception:
                     pass
             else:
                 try:
-                    _log_status_transition(machine.id, current_status_val, MachineStatus.OFFLINE.value)
                     with session_scope() as session:
                         update_machine(machine.id, machine_status=MachineStatus.OFFLINE, session=session)
                 except Exception:

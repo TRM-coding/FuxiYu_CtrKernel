@@ -91,7 +91,16 @@ class _ThreadedServer:
                 pass
 
         self.server = _Server(config)
-        self.thread = threading.Thread(target=self.server.run, daemon=True)
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self):
+        try:
+            self.server.run()
+        except Exception as e:
+            if e.__class__.__name__ == "InvalidState" and "connection is closing" in str(e):
+                logging.getLogger(__name__).debug("test server ignored websocket close race: %s", e)
+                return
+            raise
 
     def start(self, port: int):
         self.thread.start()
@@ -101,6 +110,8 @@ class _ThreadedServer:
     def stop(self):
         self.server.should_exit = True
         self.thread.join(timeout=5)
+        if self.thread.is_alive():
+            logging.getLogger(__name__).warning("test server thread did not exit cleanly")
 
 
 @contextmanager

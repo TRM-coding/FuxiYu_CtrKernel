@@ -1,11 +1,31 @@
+import asyncio
+
 import pytest
 
 from ...constant import ContainerStatus, MachineStatus, PERMISSION
 from ...models.containers import Container
 from ...models.machine import Machine
+from ...repositories import machine_repo
+from ...extensions import session_scope
 from ...services import machine_tasks
 from ...services.container_module import node_comms
 from ..factories import bind_user_container, create_container, create_machine, create_user
+
+
+class _ClosingWebSocket:
+    def __init__(self, uid: str):
+        self.scope = {"query_string": f"uid={uid}".encode("utf-8")}
+        self.accepted = False
+        self.close_calls = []
+
+    async def accept(self):
+        self.accepted = True
+
+    async def receive_text(self):
+        raise RuntimeError("wss closed")
+
+    async def close(self, code=None):
+        self.close_calls.append(code)
 
 
 def test_update_machine_missing_machine_returns_false(db_session):
@@ -81,6 +101,52 @@ def test_is_machine_online_remote_false_when_send_raises(monkeypatch, db_session
     monkeypatch.setattr(node_comms, "send", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("network")))
 
     assert machine_tasks.is_machine_online_remote(machine.id) is False
+
+
+def test_handle_node_ws_marks_machine_online_on_accept(monkeypatch, db_session):
+    uid = "wss-online-uid"
+    machine = create_machine(machine_status=MachineStatus.OFFLINE)
+    with session_scope() as session:
+        machine_repo.update_machine(machine.id, node_uid=uid, session=session)
+    monkeypatch.setattr(node_comms, "probe_machine_connectivity", lambda machine_id: True)
+
+    ws = _ClosingWebSocket(uid)
+    asyncio.run(node_comms.handle_node_ws(ws))
+
+    db_session.expire_all()
+    assert ws.accepted is True
+    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.ONLINE
+
+
+def test_handle_node_ws_marks_machine_offline_when_disconnect_probe_fails(monkeypatch, db_session):
+    uid = "wss-offline-uid"
+    machine = create_machine(machine_status=MachineStatus.ONLINE)
+    with session_scope() as session:
+        machine_repo.update_machine(machine.id, node_uid=uid, session=session)
+    monkeypatch.setattr(node_comms, "probe_machine_connectivity", lambda machine_id: False)
+
+    ws = _ClosingWebSocket(uid)
+    asyncio.run(node_comms.handle_node_ws(ws))
+
+    db_session.expire_all()
+    assert ws.accepted is True
+    assert ws.close_calls
+    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.OFFLINE
+
+
+def test_handle_node_ws_keeps_machine_online_when_disconnect_probe_succeeds(monkeypatch, db_session):
+    uid = "wss-probe-ok-uid"
+    machine = create_machine(machine_status=MachineStatus.ONLINE)
+    with session_scope() as session:
+        machine_repo.update_machine(machine.id, node_uid=uid, session=session)
+    monkeypatch.setattr(node_comms, "probe_machine_connectivity", lambda machine_id: True)
+
+    ws = _ClosingWebSocket(uid)
+    asyncio.run(node_comms.handle_node_ws(ws))
+
+    db_session.expire_all()
+    assert ws.accepted is True
+    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.ONLINE
 
 
 def test_list_machine_bref_marks_online_machine_online(monkeypatch, db_session):

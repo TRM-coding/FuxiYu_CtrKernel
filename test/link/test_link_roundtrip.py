@@ -1,22 +1,20 @@
-"""Ctrl ↔ Node 真实链路 roundtrip 测试（integration）。
+"""Ctrl -> Node HTTP 链路集成测试。
 
-链路：Ctrl HTTPS 明文 JSON（check_keys 已退役，TLS 承担身份）→ 真实 HTTP
-（进程内 Node FastAPI 服务）→ 服务层（stub）→ 响应 → Ctrl 解析。
-
-WSS 迁移约定：本文件的断言只依赖 transport 抽象（test/link/transport.py），
-迁移时新增 WssNodeLinkTransport 实现，本文件不用改。
-
-运行：WSL 下 `pytest test/link -m integration`；默认集排除（需要跨仓库）。
+这些用例拉起真实 Node FastAPI 服务，并通过 Ctrl 的 node_comms/send 路径
+发起 HTTP 请求。测试重点是跨仓库 HTTP 协议、路由和响应契约；Docker 与宿主
+目录副作用在 endpoint 绑定的服务函数处 stub 掉。
 """
+
 import time
 
 import pytest
 
-from .conftest import NODE_ROOT, node_pkg  # noqa: F401  (导入 conftest 以完成跨仓库准备)
+from .conftest import NODE_ROOT, node_pkg  # noqa: F401
 
 pytestmark = pytest.mark.integration
 
 node_service = node_pkg.services.container_service
+node_api = node_pkg.network.api
 
 
 VALID_CFG = {
@@ -31,14 +29,15 @@ VALID_CFG = {
 
 
 def test_create_container_roundtrip(node_transport, monkeypatch):
-    """真实方向：Ctrl 构造创建指令 → Node 服务层（stub）→ 响应。"""
+    """Ctrl 构造创建指令，Node FastAPI 接收后进入创建服务函数。"""
+
     calls = []
 
     def _stub(owner_name, cfg, public_key=None):
         calls.append((owner_name, cfg.name, public_key))
-        return node_pkg.services.container_service.CreateContainerReturn("cid123", cfg.name)
+        return node_service.CreateContainerReturn("cid123", cfg.name)
 
-    monkeypatch.setattr(node_service, "create_container", _stub)
+    monkeypatch.setattr(node_api, "create_container", _stub)
 
     payload = {"owner_name": "admin", "config": VALID_CFG}
     res = node_transport.post("/api/create_container", payload)
@@ -46,14 +45,14 @@ def test_create_container_roundtrip(node_transport, monkeypatch):
     assert res.get("success") == 1
     assert res.get("container_status") == "creating"
     assert res.get("container_name") == "link_c"
-    time.sleep(0.1)  # 等 Node 端后台线程调用 stub
-    assert len(calls) == 1
-    assert calls[0] == ("admin", "link_c", None)
+    time.sleep(0.1)
+    assert calls == [("admin", "link_c", None)]
 
 
 def test_add_collaborator_roundtrip_echo(node_transport, monkeypatch):
-    """消息层闭环锚点：Node 回显 decrypted_message == Ctrl 发送的原始 dict。"""
-    monkeypatch.setattr(node_service, "add_collaborator", lambda *a: True)
+    """Node 响应应回显 Ctrl 发送的原始消息体。"""
+
+    monkeypatch.setattr(node_api, "add_collaborator", lambda *args: True)
 
     payload = {"config": {"container_name": "link_c", "user_name": "u1", "role": "admin"}}
     res = node_transport.post("/api/add_collaborator", payload)
@@ -63,35 +62,19 @@ def test_add_collaborator_roundtrip_echo(node_transport, monkeypatch):
 
 
 def test_container_status_roundtrip(node_transport, monkeypatch):
-    """真实链路下 container_status 的 online 判定（fake 容器 + exec 成功 → online）。"""
-    from FuxiYu_NodeKernel import extensions as node_ext
+    """真实 HTTP 链路下读取 Node 的状态快照。"""
 
-    class _Running:
-        def __init__(self):
-            self.name = "link_c"
-            self.attrs = {"State": {"Status": "running"}}
-
-        def exec_run(self, *a, **k):
-            class _R:
-                exit_code = 0
-
-                # 生产代码 getattr(r, 'exit_code', r[0]) 会急切求值 r[0]，必须支持下标
-                def __getitem__(self, idx):
-                    if idx == 0:
-                        return self.exit_code
-                    raise IndexError(idx)
-
-            return _R()
-
-    class _FakeContainers:
-        def get(self, name_or_id):
-            return _Running()
-
-    class _FakeDocker:
-        def __init__(self):
-            self.containers = _FakeContainers()
-
-    monkeypatch.setattr(node_ext, "docker_client", _FakeDocker())
+    monkeypatch.setattr(
+        node_api,
+        "list_container_status",
+        lambda: {
+            "link_c": {
+                "status": "online",
+                "source": "snapshot",
+                "cache_updated_at": "2026-08-21T10:00:00",
+            }
+        },
+    )
 
     payload = {"config": {"container_name": "link_c"}}
     res = node_transport.post("/api/container_status", payload)

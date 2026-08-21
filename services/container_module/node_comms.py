@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -11,11 +12,11 @@ import requests
 import traceback
 
 from ...config import CommsConfig
-from ...constant import ContainerStatus
+from ...constant import ContainerStatus, MachineStatus
 from ...extensions import session_scope
 from ...repositories import machine_repo, containers_repo
 from ...repositories.container_ssh_login_repo import upsert_last_ssh_login_time
-from ..machine_tasks import is_machine_in_maintenance, is_machine_online_remote
+from ..machine_tasks import Update_machine, is_machine_in_maintenance, is_machine_online_remote
 from ...utils.parallel import parallel_node_calls
 from .exceptions import NodeServiceError
 from .utils import _parse_last_ssh_time
@@ -751,6 +752,7 @@ async def handle_node_ws(websocket) -> None:
         return
 
     machine_ip = getattr(machine, 'machine_ip', '?')
+    machine_id = machine.id
     logger.info("node WSS connected: uid=%s machine=%s ip=%s", uid, machine.id, machine_ip)
 
     try:
@@ -758,6 +760,10 @@ async def handle_node_ws(websocket) -> None:
     except Exception as e:
         logger.warning("handle_node_ws: accept failed for uid=%s: %s", uid, e)
         return
+
+    Update_machine(machine_id, machine_status=MachineStatus.ONLINE)
+    close_reason = None
+    reachable_after_close = None
 
     try:
         while True:
@@ -781,8 +787,15 @@ async def handle_node_ws(websocket) -> None:
             else:
                 logger.warning("handle_node_ws: unknown frame type %r (uid=%s)", frame.get("type"), uid)
     except Exception as e:
-        logger.info("handle_node_ws: connection closed for uid=%s: %s", uid, e)
+        close_reason = e
+        logger.info("handle_node_ws: retrying... | uid=%s: %s", uid, e)
+        # probe 是同步 HTTP（最多 attempts 次），丢到线程池避免阻塞 WSS 事件循环
+        reachable_after_close = await asyncio.to_thread(probe_machine_connectivity, machine_id)
     finally:
+        if reachable_after_close is False:
+            Update_machine(machine_id, machine_status=MachineStatus.OFFLINE)
+
+        logger.info("handle_node_ws: connection closed for uid=%s: %s", uid, close_reason)
         try:
             await websocket.close()
         except Exception:
