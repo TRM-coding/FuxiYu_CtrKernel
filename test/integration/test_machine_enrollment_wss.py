@@ -192,6 +192,14 @@ def test_register_machine_builds_record_pin_chain_and_wss_reload_request(app, tm
             assert machine.node_cert_fingerprint == result["certificate_fingerprint"]
             assert machine.cert_pinned_at is not None
 
+        status = node_comms.send(
+            node_comms.get_full_url("127.0.0.1", "/machine_status"),
+            {"config": {}},
+            timeout=5.0,
+        )
+        assert status["success"] == 1
+        assert status["machine_status"] == "online"
+
     pin_file = pin_dir / "127.0.0.1.pem"
     chain_file = pin_dir / "_chain_bundle.pem"
     assert pin_file.exists()

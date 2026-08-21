@@ -45,6 +45,18 @@ def test_container_status_api_missing_fields_returns_none(client, monkeypatch):
     assert resp.json()["container_status"] is None
 
 
+def test_container_status_api_blank_machine_id_returns_none(client, monkeypatch):
+    _auth(monkeypatch)
+
+    resp = client.post(
+        "/api/containers/container_status",
+        json={"machine_id": "", "container_name": "pending-container"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["container_status"] is None
+
+
 def test_container_status_api_success(client, monkeypatch, db_session):
     _auth(monkeypatch)
     container = create_container()
@@ -111,3 +123,23 @@ def test_list_container_bref_api_includes_long_term_limit_when_user_filter_prese
     payload = resp.json()
     assert payload["long_term_container_remaining"] == 0
     assert payload["long_term_container_limit"] == 1
+
+
+def test_list_container_bref_api_treats_blank_user_id_as_no_filter(client, monkeypatch):
+    _auth(monkeypatch)
+    captured = {}
+
+    def _list(**kwargs):
+        captured.update(kwargs)
+        return {"containers": [], "total_page": 1}
+
+    monkeypatch.setattr(container_api.container_service, "list_all_container_bref_information", _list)
+
+    resp = client.post(
+        "/api/containers/list_all_container_bref_information",
+        json={"machine_id": "", "user_id": "", "page_number": 0, "page_size": 10},
+    )
+
+    assert resp.status_code == 200
+    assert captured["machine_id"] is None
+    assert captured["user_id"] is None

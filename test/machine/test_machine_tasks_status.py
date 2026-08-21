@@ -78,6 +78,21 @@ def test_update_machine_rejects_maintenance_as_machine_status(db_session):
         machine_tasks.Update_machine(machine.id, machine_status="maintenance")
 
 
+def test_set_maintenance_updates_switch_without_status_change(db_session):
+    machine = create_machine(machine_status=MachineStatus.ONLINE, is_maintenance=False)
+
+    assert machine_tasks.Set_maintenance(machine.id, True) is True
+
+    db_session.expire_all()
+    refreshed = db_session.get(Machine, machine.id)
+    assert refreshed.machine_status == MachineStatus.ONLINE
+    assert refreshed.is_maintenance is True
+
+
+def test_set_maintenance_missing_machine_returns_false(db_session):
+    assert machine_tasks.Set_maintenance(999999, True) is False
+
+
 def test_is_machine_online_remote_true_when_node_online(monkeypatch, db_session):
     machine = create_machine(machine_ip="10.0.0.8")
     monkeypatch.setattr(node_comms, "send", lambda url, payload, timeout=2.0: {"success": 1, "machine_status": "online"})

@@ -84,9 +84,9 @@ class AppConfig(SqlConfig, KeyConfig):
     # SSL / HTTPS (development toggle)
     # Set ENABLE_SSL=false to disable HTTPS in development. 默认开了启，除非明确设置为 false（字符串）。--- IGNORE ---
     SSL_ENABLED = os.getenv("ENABLE_SSL", "true").lower() == "true"
-    # P这些都是相对于web根目录存的/certs/localhost.pem。与现有架构有出入 可调整
-    SSL_CERT_PATH = os.getenv("SSL_CERT_PATH", "certs/localhost.pem")
-    SSL_KEY_PATH = os.getenv("SSL_KEY_PATH", "certs/localhost-key.pem")
+    # Ctrl HTTPS 默认读取本仓库 certs/ 下的 ctrl.pem / ctrl-key.pem。
+    SSL_CERT_PATH = os.getenv("SSL_CERT_PATH", "certs/ctrl.pem")
+    SSL_KEY_PATH = os.getenv("SSL_KEY_PATH", "certs/ctrl-key.pem")
     # 容器自动清理阈值（天）。这里只用于计算和展示，不在此处执行实际清理动作。
     CONTAINER_CLEANUP_AFTER_DAYS = int(os.getenv("CONTAINER_CLEANUP_AFTER_DAYS", "7"))
     # 每个用户最多可设置的长期容器数量。

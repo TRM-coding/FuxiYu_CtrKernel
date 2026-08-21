@@ -30,6 +30,27 @@ def test_register_success(client, monkeypatch):
     assert resp.json()["success"] == 1
 
 
+def test_register_blank_graduation_year_is_optional(client, monkeypatch):
+    captured = {}
+
+    def _register(username, email, password, graduation_year, registration_code):
+        captured["graduation_year"] = graduation_year
+        return True, _fake_user(), None
+
+    monkeypatch.setattr(user_api.user_tasks, "Register_with_code", _register)
+
+    resp = client.post("/api/register", json={
+        "username": "api_user",
+        "email": "api_user@bjtu.edu.cn",
+        "password": "Password_123",
+        "graduation_year": "",
+        "registration_code": "123456",
+    })
+
+    assert resp.status_code == 201
+    assert captured["graduation_year"] is None
+
+
 def test_register_invalid_json(client):
     resp = client.post("/api/register", content="not-json", headers={"content-type": "application/json"})
 

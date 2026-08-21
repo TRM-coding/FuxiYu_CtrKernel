@@ -25,7 +25,8 @@ from cryptography.x509.oid import NameOID
 logger = logging.getLogger(__name__)
 
 # 默认证书目录：本文件上两级的 CtrKernel/certs
-_DEFAULT_CERTS_DIR = Path(__file__).resolve().parents[1] / "certs"
+_PROJECT_DIR = Path(__file__).resolve().parents[1]
+_DEFAULT_CERTS_DIR = _PROJECT_DIR / "certs"
 
 
 @dataclass(frozen=True)
@@ -37,21 +38,30 @@ class CtrlCertificateFiles:
 
 
 def _certs_dir() -> Path:
-    return Path(os.getenv("CTRL_CERTS_DIR", str(_DEFAULT_CERTS_DIR)))
+    return _resolve_cert_path(os.getenv("CTRL_CERTS_DIR"), _DEFAULT_CERTS_DIR)
+
+
+def _resolve_cert_path(value: str | None, default: Path) -> Path:
+    path = Path(value) if value else default
+    if not path.is_absolute():
+        path = _PROJECT_DIR / path
+    return path
 
 
 def _certificate_files() -> CtrlCertificateFiles:
     d = _certs_dir()
     return CtrlCertificateFiles(
-        ca_cert=Path(os.getenv("CTRL_CA_CERT_FILE", str(d / "ctrl_ca.pem"))),
-        ca_key=Path(os.getenv("CTRL_CA_KEY_FILE", str(d / "ctrl_ca_key.pem"))),
-        cert_file=Path(os.getenv("CTRL_CERT_FILE", str(d / "ctrl_cert.pem"))),
-        key_file=Path(os.getenv("CTRL_KEY_FILE", str(d / "ctrl_key.pem"))),
+        ca_cert=_resolve_cert_path(os.getenv("CTRL_CA_CERT_FILE"), d / "ctrl_ca.pem"),
+        ca_key=_resolve_cert_path(os.getenv("CTRL_CA_KEY_FILE"), d / "ctrl_ca-key.pem"),
+        cert_file=_resolve_cert_path(os.getenv("CTRL_CERT_FILE"), d / "ctrl.pem"),
+        key_file=_resolve_cert_path(os.getenv("CTRL_KEY_FILE"), d / "ctrl-key.pem"),
     )
 
 
 def _generate_self_signed_ca(ca_cert: Path, ca_key: Path, common_name: str) -> None:
     """生成自签 CA（仅本地私有信任域，用于签发 Ctrl 证书）。"""
+    ca_cert.parent.mkdir(parents=True, exist_ok=True)
+    ca_key.parent.mkdir(parents=True, exist_ok=True)
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -83,6 +93,8 @@ def _generate_self_signed_ca(ca_cert: Path, ca_key: Path, common_name: str) -> N
 
 def _issue_ctrl_cert(ca_cert: Path, ca_key: Path, cert_file: Path, key_file: Path, common_name: str) -> None:
     """用 CA 签发 Ctrl 服务端证书（serverAuth + clientAuth，双角色一张证书）。"""
+    cert_file.parent.mkdir(parents=True, exist_ok=True)
+    key_file.parent.mkdir(parents=True, exist_ok=True)
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     ca_cert_obj = x509.load_pem_x509_certificate(ca_cert.read_bytes())
     ca_key_obj = serialization.load_pem_private_key(ca_key.read_bytes(), password=None)
@@ -122,18 +134,22 @@ def _issue_ctrl_cert(ca_cert: Path, ca_key: Path, cert_file: Path, key_file: Pat
 def ensure_ctrl_certificates() -> CtrlCertificateFiles:
     """确保 Ctrl 有一套 CA + 服务端证书（缺失即生成，幂等）。"""
     files = _certificate_files()
-    if files.cert_file.exists() and files.key_file.exists():
+    ca_exists = files.ca_cert.exists() and files.ca_key.exists()
+    cert_exists = files.cert_file.exists() and files.key_file.exists()
+    if ca_exists and cert_exists:
         return files
 
     files.ca_cert.parent.mkdir(parents=True, exist_ok=True)
-    if not (files.ca_cert.exists() and files.ca_key.exists()):
+    if not ca_exists:
         _generate_self_signed_ca(files.ca_cert, files.ca_key, os.getenv("CTRL_CA_COMMON_NAME", "FuxiYu Ctrl CA"))
         logger.info("generated Ctrl CA: %s", files.ca_cert)
-    _issue_ctrl_cert(
-        files.ca_cert, files.ca_key, files.cert_file, files.key_file,
-        os.getenv("CTRL_CERT_COMMON_NAME", "FuxiYu Ctrl Server"),
-    )
-    logger.info("generated Ctrl server cert: %s", files.cert_file)
+        cert_exists = False
+    if not cert_exists:
+        _issue_ctrl_cert(
+            files.ca_cert, files.ca_key, files.cert_file, files.key_file,
+            os.getenv("CTRL_CERT_COMMON_NAME", "FuxiYu Ctrl Server"),
+        )
+        logger.info("generated Ctrl server cert: %s", files.cert_file)
     return files
 
 

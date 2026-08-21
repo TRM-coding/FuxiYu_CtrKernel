@@ -140,6 +140,17 @@ class UpdateMachineResponse(SuccessMessageResponse):
     pass
 
 
+class SetMachineMaintenanceRequest(BaseModel):
+    """独立设置机器维护开关。"""
+
+    machine_id: int = Field(..., ge=1)
+    is_maintenance: bool
+
+
+class SetMachineMaintenanceResponse(SuccessMessageResponse):
+    pass
+
+
 #####################
 # 查询机器详情
 

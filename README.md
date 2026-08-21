@@ -29,7 +29,7 @@ SECRET_KEY=change-me
 ### 3. 初始化基础数据
 
 ```bash
-python -m FuxiYu_CtrKernel.seed
+python seed.py
 ```
 
 数据库表会在应用启动时按当前模型创建；手写迁移脚本位于 `migrations/`。
@@ -37,7 +37,7 @@ python -m FuxiYu_CtrKernel.seed
 ### 4. 启动服务
 
 ```bash
-python -m FuxiYu_CtrKernel.run
+python run.py
 ```
 
 默认访问地址：

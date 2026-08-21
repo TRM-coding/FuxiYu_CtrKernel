@@ -352,6 +352,43 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
     return True
 
 
+def Set_maintenance(machine_id: int, is_maintenance: bool, operator_user_id: int | None = None) -> bool:
+    """设置机器维护开关；真实在线/离线状态仍由连接状态机维护。"""
+
+    with session_scope(commit=False) as session:
+        machine = get_by_id(machine_id, session=session)
+        if not machine:
+            return False
+        before = {"is_maintenance": bool(getattr(machine, "is_maintenance", False))}
+
+    after = {"is_maintenance": bool(is_maintenance)}
+    try:
+        with session_scope() as session:
+            ok = set_maintenance(machine_id, bool(is_maintenance), session=session)
+    except Exception as e:
+        write_op_log(
+            success=False,
+            operator_user_id=operator_user_id,
+            operation=OperationType.UPDATE_MACHINE,
+            target_type="machine",
+            target_id=machine_id,
+            detail={"before": before, "after": after, "field": "is_maintenance"},
+            error_reason=getattr(e, "error_reason", None) or str(e),
+        )
+        raise
+
+    write_op_log(
+        success=bool(ok),
+        operator_user_id=operator_user_id,
+        operation=OperationType.UPDATE_MACHINE,
+        target_type="machine",
+        target_id=machine_id,
+        detail={"before": before, "after": after, "field": "is_maintenance"},
+        error_reason=None if ok else "machine_not_found",
+    )
+    return bool(ok)
+
+
 #######################################
 
 

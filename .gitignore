@@ -16,4 +16,5 @@ certs/*.key
 
 docs/audit/*
 
-*.db
+*.db# TOFU 信任锚：register_machine 落盘的 Node pin 证书（公有材料，但按机器动态生成）
+/pinned_certs/

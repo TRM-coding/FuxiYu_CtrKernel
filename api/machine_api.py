@@ -19,6 +19,8 @@ from ..schemas.machine import (
     RegisterMachineWithProfileResponse,
     RemoveMachineRequest,
     RemoveMachineResponse,
+    SetMachineMaintenanceRequest,
+    SetMachineMaintenanceResponse,
     UpdateMachineRequest,
     UpdateMachineResponse,
 )
@@ -195,6 +197,34 @@ def update_machine_api(
     if success:
         return {"success": 1, "message": "Machine updated successfully"}
     return _error(500, "Failed to update machine", "update_failed")
+
+
+#####################
+# 设置机器维护开关
+
+
+@router.post("/set_maintenance", response_model=SetMachineMaintenanceResponse)
+def set_machine_maintenance_api(
+    message: SetMachineMaintenanceRequest,
+    operator_user_id: int = Depends(require_operator),
+):
+    """独立切换维护模式；不改写真实在线/离线状态。"""
+
+    try:
+        success = machine_service.Set_maintenance(
+            machine_id=message.machine_id,
+            is_maintenance=message.is_maintenance,
+            operator_user_id=operator_user_id,
+        )
+    except Exception as e:
+        err_reason = getattr(e, "error_reason", None)
+        if err_reason:
+            return _error(422, str(e), err_reason)
+        return _error(500, f"Internal error: {e}", "internal_error")
+
+    if success:
+        return {"success": 1, "message": "Machine maintenance updated successfully"}
+    return _error(404, "Machine not found", "machine_not_found")
 
 
 #####################

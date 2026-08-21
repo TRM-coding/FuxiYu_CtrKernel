@@ -7,9 +7,11 @@ import time
 import base64
 import datetime
 import ssl
+import warnings
 from pathlib import Path
 import requests
 import traceback
+from urllib3.exceptions import InsecureRequestWarning
 
 from ...config import CommsConfig
 from ...constant import ContainerStatus, MachineStatus
@@ -296,7 +298,9 @@ def register_machine(
     # 2. 首连登记资料（身份状态 + 静态硬件，不返回指纹）
     try:
         profile_url = get_full_url(machine_ip, "/node_identity/enrollment_profile")
-        profile_resp = requests.get(profile_url, timeout=timeout, verify=False, cert=client_cert)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", InsecureRequestWarning)
+            profile_resp = requests.get(profile_url, timeout=timeout, verify=False, cert=client_cert)
         profile = profile_resp.json()
     except Exception as e:
         raise NodeServiceError(f"register_machine failed: enrollment_profile error from {machine_ip}: {e}",
@@ -310,7 +314,9 @@ def register_machine(
     uid = secrets.token_urlsafe(24)
     try:
         issue_url = get_full_url(machine_ip, "/node_identity/issue_uid")
-        issue_resp = requests.post(issue_url, json={"uid": uid}, timeout=timeout, verify=False, cert=client_cert)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", InsecureRequestWarning)
+            issue_resp = requests.post(issue_url, json={"uid": uid}, timeout=timeout, verify=False, cert=client_cert)
         issue = issue_resp.json()
     except Exception as e:
         raise NodeServiceError(f"register_machine failed: issue_uid error from {machine_ip}: {e}",

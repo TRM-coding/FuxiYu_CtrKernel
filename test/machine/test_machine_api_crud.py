@@ -126,6 +126,50 @@ def test_update_machine_validation_error_returns_422(client, monkeypatch):
     assert resp.status_code == 422
 
 
+def test_set_maintenance_requires_token(client, monkeypatch):
+    _auth(monkeypatch, valid=False)
+
+    resp = client.post("/api/machines/set_maintenance", json={"machine_id": 1, "is_maintenance": True})
+
+    assert resp.status_code == 401
+
+
+def test_set_maintenance_requires_operator(client, monkeypatch):
+    _auth(monkeypatch, operator=False)
+
+    resp = client.post("/api/machines/set_maintenance", json={"machine_id": 1, "is_maintenance": True})
+
+    assert resp.status_code == 403
+
+
+def test_set_maintenance_success(client, monkeypatch):
+    _auth(monkeypatch)
+    called = {}
+
+    def _set(machine_id, is_maintenance, operator_user_id=None):
+        called["machine_id"] = machine_id
+        called["is_maintenance"] = is_maintenance
+        return True
+
+    monkeypatch.setattr(machine_api.machine_service, "Set_maintenance", _set)
+
+    resp = client.post("/api/machines/set_maintenance", json={"machine_id": 1, "is_maintenance": True})
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] == 1
+    assert called == {"machine_id": 1, "is_maintenance": True}
+
+
+def test_set_maintenance_missing_machine_returns_404(client, monkeypatch):
+    _auth(monkeypatch)
+    monkeypatch.setattr(machine_api.machine_service, "Set_maintenance", lambda **kwargs: False)
+
+    resp = client.post("/api/machines/set_maintenance", json={"machine_id": 1, "is_maintenance": True})
+
+    assert resp.status_code == 404
+    assert resp.json()["error_reason"] == "machine_not_found"
+
+
 def test_get_machine_detail_requires_token(client, monkeypatch):
     _auth(monkeypatch, valid=False)
 

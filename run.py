@@ -4,29 +4,27 @@ from importlib import import_module
 
 import uvicorn
 
-from FuxiYu_CtrKernel.config import AppConfig
-
 pkg_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(pkg_dir)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
+from FuxiYu_CtrKernel.config import AppConfig
+
 package_name = os.path.basename(pkg_dir)
-try:
-    create_app = import_module(package_name).create_app
-except Exception:
-    create_app = import_module("__init__").create_app
+create_app = import_module(package_name).create_app
 
 app = create_app()
 
 if __name__ == "__main__":
     ssl_enabled = getattr(AppConfig, "SSL_ENABLED", False)
-    cert_path = getattr(AppConfig, "SSL_CERT_PATH", None)
-    key_path = getattr(AppConfig, "SSL_KEY_PATH", None)
 
     ssl_kwargs = {}
-    if ssl_enabled and cert_path and key_path and os.path.exists(cert_path) and os.path.exists(key_path):
-        ssl_kwargs = {"ssl_certfile": cert_path, "ssl_keyfile": key_path}
+    if ssl_enabled:
+        from FuxiYu_CtrKernel.utils.cert_utils import ensure_ctrl_certificates
+
+        certs = ensure_ctrl_certificates()
+        ssl_kwargs = {"ssl_certfile": str(certs.cert_file), "ssl_keyfile": str(certs.key_file)}
 
     uvicorn.run(
         app,

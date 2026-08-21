@@ -131,6 +131,25 @@ def test_update_user_success(client, monkeypatch):
     assert resp.json()["user"] == "updated"
 
 
+def test_update_user_blank_graduation_year_does_not_block_other_updates(client, monkeypatch):
+    _valid_token(monkeypatch)
+    captured = {}
+
+    def _update(user_id, **fields):
+        captured.update(fields)
+        return SimpleNamespace(username="updated")
+
+    monkeypatch.setattr(user_api.user_tasks, "Update_user", _update)
+
+    resp = client.post(
+        "/api/users/update_user",
+        json={"user_id": 1, "fields": {"username": "updated", "graduation_year": ""}},
+    )
+
+    assert resp.status_code == 200
+    assert captured == {"username": "updated"}
+
+
 @pytest.mark.parametrize("reason", ["invalid_username", "no_none_ascii"])
 def test_update_user_validation_errors(client, monkeypatch, reason):
     _valid_token(monkeypatch)

@@ -5,11 +5,19 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 try:  # Pydantic v2
-    from pydantic import ConfigDict
+    from pydantic import ConfigDict, field_validator
 except ImportError:  # pragma: no cover
     ConfigDict = None
+    field_validator = None
+    from pydantic import validator
 
 from .common import ApiErrorResponse, SuccessMessageResponse
+
+
+def _blank_to_none(value):
+    """将前端可选筛选条件里的空字符串视为未传。"""
+
+    return None if value == "" else value
 
 
 class _CompatBaseModel(BaseModel):
@@ -125,6 +133,11 @@ class ContainerStatusRequest(_CompatBaseModel):
     machine_id: int | None = Field(default=None, ge=0)
     container_name: str = ""
 
+    if field_validator is not None:
+        _normalize_blank_machine_id = field_validator("machine_id", mode="before")(_blank_to_none)
+    else:  # pragma: no cover
+        _normalize_blank_machine_id = validator("machine_id", pre=True, allow_reuse=True)(_blank_to_none)
+
 
 class ContainerStatusResponse(_CompatBaseModel):
     container_status: str | None = None
@@ -158,6 +171,11 @@ class ListAllContainerBrefInformationRequest(_CompatBaseModel):
     user_id: int | None = Field(default=None, ge=0)
     page_number: int = Field(default=0, ge=0)
     page_size: int = Field(default=10, ge=1)
+
+    if field_validator is not None:
+        _normalize_blank_ids = field_validator("machine_id", "user_id", mode="before")(_blank_to_none)
+    else:  # pragma: no cover
+        _normalize_blank_ids = validator("machine_id", "user_id", pre=True, allow_reuse=True)(_blank_to_none)
 
 
 class ContainerAccountEntry(_CompatBaseModel):
