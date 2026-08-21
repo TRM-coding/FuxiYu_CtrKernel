@@ -6,10 +6,13 @@
 import datetime as dt
 import json
 
+from sqlalchemy import select
+
 from ..config import AppConfig
 from pydantic import BaseModel
 
 from ..constant import AnnouncementStatus, AnnouncementTargetType
+from ..extensions import session_scope
 from ..models.containers import Container
 from ..models.machine import Machine
 from ..models.machine_permission import MachinePermission
@@ -69,72 +72,72 @@ class BatchSendResult(BaseModel):
 
 
 def resolve_recipients(targets: list[TargetEntry]) -> ResolveResult:
-    """将融合版 targets 解析为去重后的收件人列表 + 展示摘要。
+    """Resolve targets into unique recipients and display summaries."""
 
-    machine / container 均展开为关联用户集合，与单 user 平权，
-    最终按 user_id 去重。
-    """
     recipients_map: dict[int, RecipientEntry] = {}
     summaries: list[TargetSummaryEntry] = []
 
-    for entry in targets:
-        users: list[User] = []
+    with session_scope(commit=False) as session:
+        for entry in targets:
+            users: list[User] = []
 
-        if entry.type == AnnouncementTargetType.MACHINE.value:
-            machine = Machine.query.get(entry.id)
-            if machine is None:
-                continue
-            user_ids = [mp.user_id for mp in MachinePermission.query.filter_by(machine_id=entry.id).all()]
-            users = User.query.filter(User.id.in_(user_ids)).all() if user_ids else []
-            summaries.append(
-                TargetSummaryEntry(
-                    type=entry.type,
-                    id=entry.id,
-                    display_name=f"{machine.machine_name} ({machine.machine_ip})",
+            if entry.type == AnnouncementTargetType.MACHINE.value:
+                machine = session.get(Machine, int(entry.id))
+                if machine is None:
+                    continue
+                user_ids = list(
+                    session.scalars(
+                        select(MachinePermission.user_id).where(MachinePermission.machine_id == int(entry.id))
+                    ).all()
                 )
-            )
-        elif entry.type == AnnouncementTargetType.CONTAINER.value:
-            container = Container.query.get(entry.id)
-            if container is None:
-                continue
-            user_ids = [uc.user_id for uc in UserContainer.query.filter_by(container_id=entry.id).all()]
-            users = User.query.filter(User.id.in_(user_ids)).all() if user_ids else []
-            summaries.append(
-                TargetSummaryEntry(
-                    type=entry.type,
-                    id=entry.id,
-                    display_name=f"{container.name} (:{container.port})",
+                users = list(session.scalars(select(User).where(User.id.in_(user_ids))).all()) if user_ids else []
+                summaries.append(
+                    TargetSummaryEntry(
+                        type=entry.type,
+                        id=entry.id,
+                        display_name=f"{machine.machine_name} ({machine.machine_ip})",
+                    )
                 )
-            )
-        elif entry.type == AnnouncementTargetType.USER.value:
-            user = User.query.get(entry.id)
-            if user is None:
-                continue
-            users = [user]
-            summaries.append(
-                TargetSummaryEntry(
-                    type=entry.type,
-                    id=entry.id,
-                    display_name=f"{user.username} ({user.email})",
+            elif entry.type == AnnouncementTargetType.CONTAINER.value:
+                container = session.get(Container, int(entry.id))
+                if container is None:
+                    continue
+                user_ids = list(
+                    session.scalars(
+                        select(UserContainer.user_id).where(UserContainer.container_id == int(entry.id))
+                    ).all()
                 )
-            )
-        elif entry.type == "all":
-            users = User.query.all()
-            summaries.append(
-                TargetSummaryEntry(
-                    type="all",
-                    id=0,
-                    display_name="全员",
+                users = list(session.scalars(select(User).where(User.id.in_(user_ids))).all()) if user_ids else []
+                summaries.append(
+                    TargetSummaryEntry(
+                        type=entry.type,
+                        id=entry.id,
+                        display_name=f"{container.name} (:{container.port})",
+                    )
                 )
-            )
+            elif entry.type == AnnouncementTargetType.USER.value:
+                user = session.get(User, int(entry.id))
+                if user is None:
+                    continue
+                users = [user]
+                summaries.append(
+                    TargetSummaryEntry(
+                        type=entry.type,
+                        id=entry.id,
+                        display_name=f"{user.username} ({user.email})",
+                    )
+                )
+            elif entry.type == "all":
+                users = list(session.scalars(select(User)).all())
+                summaries.append(TargetSummaryEntry(type="all", id=0, display_name="??"))
 
-        for u in users:
-            if u.id not in recipients_map:
-                recipients_map[u.id] = RecipientEntry(
-                    user_id=u.id,
-                    username=u.username,
-                    email=u.email,
-                )
+            for user in users:
+                if user.id not in recipients_map:
+                    recipients_map[user.id] = RecipientEntry(
+                        user_id=user.id,
+                        username=user.username,
+                        email=user.email,
+                    )
 
     max_recipients = getattr(AppConfig, "ANNOUNCEMENT_MAX_RECIPIENTS", 200)
     if len(recipients_map) > max_recipients:
@@ -145,12 +148,6 @@ def resolve_recipients(targets: list[TargetEntry]) -> ResolveResult:
         summary=summaries,
         total_count=len(recipients_map),
     )
-
-
-# ══════════════════════════════════════════════════════════════════════
-# 草稿发送（核心）
-# ══════════════════════════════════════════════════════════════════════
-
 
 def send_draft_service(
     draft_id: int,
@@ -163,10 +160,16 @@ def send_draft_service(
 
     元素快填在编辑时已完成，此处不再做变量渲染。
     """
-    # 1. 查草稿
-    draft = announcement_repo.get_draft_by_id(draft_id)
-    if draft is None:
-        raise ValueError("draft_not_found")
+    # 1. 查草稿，先取出发送所需字段，避免发送邮件时长事务占用。
+    with session_scope(commit=False) as session:
+        draft = announcement_repo.get_draft_by_id(draft_id, session=session)
+        if draft is None:
+            raise ValueError("draft_not_found")
+        draft_title = draft.title
+        draft_content = draft.content
+        draft_raw_content = draft.raw_content
+        draft_created_by = draft.created_by
+        draft_template_id = draft.template_id
 
     # 2. 校验并解析收件人
     if not targets:
@@ -175,25 +178,30 @@ def send_draft_service(
     targets_json = json.dumps([t.model_dump() for t in targets])
 
     # 3. 公告内容即草稿当前内容（编辑时已包含元素快填结果）
-    content = draft.content
+    content = draft_content
 
     # 4. 创建公告（SENDING）
-    announcement = announcement_repo.create_announcement(
-        title=draft.title,
-        content=content,
-        raw_content=draft.raw_content or content,
-        created_by=draft.created_by,
-        status=AnnouncementStatus.SENDING,
-        targets=targets_json,
-        target_snapshot=json.dumps([s.model_dump() for s in resolve_result.summary]),
-        recipient_count=resolve_result.total_count,
-        template_id=draft.template_id,
-        source_draft_id=draft.id,
-    )
+    with session_scope() as session:
+        announcement = announcement_repo.create_announcement(
+            title=draft_title,
+            content=content,
+            raw_content=draft_raw_content or content,
+            created_by=draft_created_by,
+            status=AnnouncementStatus.SENDING,
+            targets=targets_json,
+            target_snapshot=json.dumps([s.model_dump() for s in resolve_result.summary]),
+            recipient_count=resolve_result.total_count,
+            template_id=draft_template_id,
+            source_draft_id=draft_id,
+            session=session,
+        )
+        announcement_id = announcement.id
+        announcement_title = announcement.title
+        announcement_content = announcement.content
 
     # 5. 批量发送邮件（复用 SMTP 连接）
     messages = [
-        {"to": r.email, "subject": announcement.title, "content": announcement.content}
+        {"to": r.email, "subject": announcement_title, "content": announcement_content}
         for r in resolve_result.recipients
     ]
     results = send_batch(messages)
@@ -216,20 +224,22 @@ def send_draft_service(
     else:
         new_status = AnnouncementStatus.PARTIAL
 
-    announcement_repo.update_announcement_status(
-        announcement.id,
-        status=new_status,
-        success_count=success,
-        fail_count=fail,
-        sent_at=dt.datetime.utcnow(),
-    )
+    with session_scope() as session:
+        announcement_repo.update_announcement_status(
+            announcement_id,
+            status=new_status,
+            success_count=success,
+            fail_count=fail,
+            sent_at=dt.datetime.utcnow(),
+            session=session,
+        )
 
-    # 7. 删除已发送的草稿
-    announcement_repo.delete_draft(draft_id)
+        # 7. 删除已发送的草稿
+        announcement_repo.delete_draft(draft_id, session=session)
 
     return SendResult(
         draft_id=draft_id,
-        announcement_id=announcement.id,
+        announcement_id=announcement_id,
         status=new_status.value,
         recipient_count=resolve_result.total_count,
         success_count=success,
@@ -287,18 +297,20 @@ def batch_send_drafts_service(
 
 def delete_announcement_service(announcement_id: int) -> bool:
     """删除单条已发送公告。"""
-    return announcement_repo.delete_announcement(announcement_id)
+    with session_scope() as session:
+        return announcement_repo.delete_announcement(announcement_id, session=session)
 
 
 def batch_delete_announcements_service(announcement_ids: list[int]) -> dict:
     """批量删除公告，返回 {deleted: N, not_found: N}。"""
     deleted = 0
     not_found = 0
-    for aid in announcement_ids:
-        if announcement_repo.delete_announcement(aid):
-            deleted += 1
-        else:
-            not_found += 1
+    with session_scope() as session:
+        for aid in announcement_ids:
+            if announcement_repo.delete_announcement(aid, session=session):
+                deleted += 1
+            else:
+                not_found += 1
     return {"deleted": deleted, "not_found": not_found}
 
 
@@ -309,23 +321,32 @@ def batch_delete_announcements_service(announcement_ids: list[int]) -> dict:
 
 def resend_announcement_service(announcement_id: int) -> SendResult:
     """对已发送公告重新发送邮件，沿用原 targets。"""
-    ann = announcement_repo.get_announcement_by_id(announcement_id)
-    if ann is None:
-        raise ValueError("announcement_not_found")
-    if ann.status == AnnouncementStatus.SENDING:
-        raise ValueError("announcement_still_sending")
+    with session_scope() as session:
+        ann = announcement_repo.get_announcement_by_id(announcement_id, session=session)
+        if ann is None:
+            raise ValueError("announcement_not_found")
+        if ann.status == AnnouncementStatus.SENDING:
+            raise ValueError("announcement_still_sending")
+        ann_id = ann.id
+        ann_title = ann.title
+        ann_content = ann.content
+        ann_targets = ann.targets
 
-    # 更新为 SENDING
-    announcement_repo.update_announcement_status(ann.id, status=AnnouncementStatus.SENDING)
+        # 更新为 SENDING
+        announcement_repo.update_announcement_status(
+            ann_id,
+            status=AnnouncementStatus.SENDING,
+            session=session,
+        )
 
     # 解析原 targets
-    raw_targets = json.loads(ann.targets) if ann.targets else []
+    raw_targets = json.loads(ann_targets) if ann_targets else []
     targets = [TargetEntry(**t) for t in raw_targets]
     resolve_result = resolve_recipients(targets)
 
     # 发送（复用 SMTP 连接）
     messages = [
-        {"to": r.email, "subject": ann.title, "content": ann.content}
+        {"to": r.email, "subject": ann_title, "content": ann_content}
         for r in resolve_result.recipients
     ]
     results = send_batch(messages)
@@ -348,17 +369,19 @@ def resend_announcement_service(announcement_id: int) -> SendResult:
     else:
         new_status = AnnouncementStatus.PARTIAL
 
-    announcement_repo.update_announcement_status(
-        ann.id,
-        status=new_status,
-        success_count=success,
-        fail_count=fail,
-        sent_at=dt.datetime.utcnow(),
-    )
+    with session_scope() as session:
+        announcement_repo.update_announcement_status(
+            ann_id,
+            status=new_status,
+            success_count=success,
+            fail_count=fail,
+            sent_at=dt.datetime.utcnow(),
+            session=session,
+        )
 
     return SendResult(
         draft_id=None,
-        announcement_id=ann.id,
+        announcement_id=ann_id,
         status=new_status.value,
         recipient_count=resolve_result.total_count,
         success_count=success,
@@ -376,19 +399,20 @@ def copy_announcement_as_draft_service(
     announcement_id: int, *, created_by: int
 ) -> "AnnouncementDraft":
     """将已发送公告的内容复制为一条新草稿。"""
-    ann = announcement_repo.get_announcement_by_id(announcement_id)
-    if ann is None:
-        raise ValueError("announcement_not_found")
+    with session_scope() as session:
+        ann = announcement_repo.get_announcement_by_id(announcement_id, session=session)
+        if ann is None:
+            raise ValueError("announcement_not_found")
 
-    draft = announcement_repo.save_draft(
-        title=ann.title,
-        content=ann.raw_content or ann.content,
-        raw_content=ann.raw_content,
-        created_by=created_by,
-        targets=ann.targets,
-        template_id=ann.template_id,
-    )
-    return draft
+        return announcement_repo.save_draft(
+            title=ann.title,
+            content=ann.raw_content or ann.content,
+            raw_content=ann.raw_content,
+            created_by=created_by,
+            targets=ann.targets,
+            template_id=ann.template_id,
+            session=session,
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -400,15 +424,16 @@ def convert_announcement_to_template_service(
     announcement_id: int, *, created_by: int
 ) -> "AnnouncementTemplate":
     """从已发送公告内容直接生成新模板（纯文字，不含变量）。"""
-    ann = announcement_repo.get_announcement_by_id(announcement_id)
-    if ann is None:
-        raise ValueError("announcement_not_found")
+    with session_scope() as session:
+        ann = announcement_repo.get_announcement_by_id(announcement_id, session=session)
+        if ann is None:
+            raise ValueError("announcement_not_found")
 
-    template = announcement_repo.create_template(
-        name=f"来自公告: {ann.title}",
-        subject_template=ann.title,
-        body_template=ann.raw_content or ann.content,
-        created_by=created_by,
-        source_announcement_id=ann.id,
-    )
-    return template
+        return announcement_repo.create_template(
+            name=f"来自公告: {ann.title}",
+            subject_template=ann.title,
+            body_template=ann.raw_content or ann.content,
+            created_by=created_by,
+            source_announcement_id=ann.id,
+            session=session,
+        )

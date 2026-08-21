@@ -35,7 +35,9 @@ def test_get_container_detail_keeps_default_status_from_db(db_session, container
 def test_list_container_bref_operator_can_filter_by_user(monkeypatch, db_session):
     operator = create_user(permission=PERMISSION.OPERATOR)
     target = create_user()
-    _root, machine, container = container_tasks_test_graph_for_user(target)
+    _root, machine, container = container_tasks_test_graph_for_user(target, db_session)
+
+    db_session.commit()
 
     result = container_tasks.list_all_container_bref_information(
         machine_id=None,
@@ -52,11 +54,13 @@ def test_list_container_bref_non_operator_filters_by_machine_permission(monkeypa
     user = create_user()
     allowed_machine = create_machine()
     blocked_machine = create_machine()
-    machine_permission_repo.add_permission(allowed_machine.id, user.id)
+    machine_permission_repo.add_permission(allowed_machine.id, user.id, session=db_session)
     allowed_container = create_container(machine=allowed_machine)
     blocked_container = create_container(machine=blocked_machine)
     container_tasks.add_binding(user.id, allowed_container.id, role=container_tasks.ROLE.ROOT, username="root")
     container_tasks.add_binding(user.id, blocked_container.id, role=container_tasks.ROLE.ROOT, username="root")
+
+    db_session.commit()
 
     result = container_tasks.list_all_container_bref_information(
         machine_id=None,
@@ -74,7 +78,9 @@ def test_list_container_bref_includes_cleanup_info_from_ssh_record(monkeypatch, 
 
     root, machine, container = container_graph
     last_time = (datetime.utcnow() - timedelta(days=1)).isoformat()
-    container_ssh_login_repo.upsert_last_ssh_login_time(machine.id, container.id, last_time)
+    container_ssh_login_repo.upsert_last_ssh_login_time(machine.id, container.id, last_time, session=db_session)
+
+    db_session.commit()
 
     result = container_tasks.list_all_container_bref_information(
         machine_id=None,
@@ -95,7 +101,9 @@ def test_list_container_bref_includes_long_term_remaining_when_user_filter_prese
     container_graph,
 ):
     root, _machine, container = container_graph
-    long_term_container_repo.add(container.id, created_by_user_id=root.id)
+    long_term_container_repo.add(container.id, created_by_user_id=root.id, session=db_session)
+
+    db_session.commit()
 
     result = container_tasks.list_all_container_bref_information(
         machine_id=None,
@@ -109,9 +117,9 @@ def test_list_container_bref_includes_long_term_remaining_when_user_filter_prese
     assert result["long_term_container_remaining"] == 0
 
 
-def container_tasks_test_graph_for_user(user):
+def container_tasks_test_graph_for_user(user, db_session):
     machine = create_machine()
     container = create_container(machine=machine)
-    machine_permission_repo.add_permission(machine.id, user.id)
+    machine_permission_repo.add_permission(machine.id, user.id, session=db_session)
     container_tasks.add_binding(user.id, container.id, role=container_tasks.ROLE.ROOT, username="root")
     return user, machine, container

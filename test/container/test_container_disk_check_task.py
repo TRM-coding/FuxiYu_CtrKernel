@@ -10,7 +10,7 @@
 
 from datetime import datetime, timedelta
 
-from ...extensions import db
+from sqlalchemy import select
 from ...models.containers import Container
 from ...models.container_disk_freeze_state import ContainerDiskFreezeState
 from ...repositories import (
@@ -78,7 +78,7 @@ class TestEvaluateLimitsLongTerm:
     def test_soft_limit_triggers_handler(self, app, db_session, monkeypatch):
         """持久容器超过 soft limit → 触发 _handle_soft_limit。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         soft_calls = []
         hard_calls = []
@@ -90,12 +90,12 @@ class TestEvaluateLimitsLongTerm:
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: hard_calls.append(c.id)
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         usage = _usage_exceeding_soft_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
+        db_session.expire_all()
 
         assert len(soft_calls) == 1
         assert soft_calls[0][0] == container.id
@@ -104,7 +104,7 @@ class TestEvaluateLimitsLongTerm:
     def test_hard_limit_triggers_handler(self, app, db_session, monkeypatch):
         """持久容器超过 hard limit → 触发 _handle_hard_limit。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         soft_calls = []
         hard_calls = []
@@ -116,12 +116,12 @@ class TestEvaluateLimitsLongTerm:
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: hard_calls.append((c.id, u["container"]["total_bytes"]))
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
+        db_session.expire_all()
 
         assert len(hard_calls) == 1
         assert hard_calls[0][0] == container.id
@@ -150,12 +150,11 @@ class TestEvaluateLimitsNonLongTerm:
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: hard_calls.append(c.id)
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         usage = _usage_exceeding_soft_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
         assert len(soft_calls) == 0, "非持久容器不应触发 soft limit 响应"
         assert len(hard_calls) == 0, "非持久容器不应触发 hard limit 响应"
@@ -174,12 +173,11 @@ class TestEvaluateLimitsNonLongTerm:
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: hard_calls.append(c.id)
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
         assert len(soft_calls) == 0
         assert len(hard_calls) == 0, "非持久容器不应触发 hard limit 响应"
@@ -195,7 +193,7 @@ class TestEvaluateLimitsPersistence:
     def test_long_term_container_persists_disk_usage(self, app, db_session, monkeypatch):
         """持久容器：磁盘快照写入 DB。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         monkeypatch.setattr(
             container_disk_check_task, "_handle_soft_limit",
@@ -205,20 +203,18 @@ class TestEvaluateLimitsPersistence:
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: None
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         usage = _usage_exceeding_soft_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
-            # 在 context 内验证持久化（退出 context 时 Flask-SQLAlchemy
-            # 会触发 teardown_appcontext → db.session.remove()，导致后续读到空值）
-            c = db.session.get(Container, container.id)
-            assert c.disk_total_bytes == usage["container"]["total_bytes"]
-            assert c.disk_limit_bytes == int(1024 * 1024 ** 3)
-            assert c.disk_overlay_rw_bytes == usage["container"]["overlay_rw_bytes"]
-            assert c.disk_bind_mount_bytes == usage["container"]["bind_mount_bytes"]
-            assert c.disk_checked_at is not None
+        container_disk_check_task._evaluate_limits(container, usage)
+        db_session.expire_all()
+        c = db_session.get(Container, container.id)
+        assert c.disk_total_bytes == usage["container"]["total_bytes"]
+        assert c.disk_limit_bytes == int(1024 * 1024 ** 3)
+        assert c.disk_overlay_rw_bytes == usage["container"]["overlay_rw_bytes"]
+        assert c.disk_bind_mount_bytes == usage["container"]["bind_mount_bytes"]
+        assert c.disk_checked_at is not None
 
     def test_non_long_term_container_persists_disk_usage(self, app, db_session, monkeypatch):
         """非持久容器：磁盘快照同样写入 DB。"""
@@ -232,16 +228,16 @@ class TestEvaluateLimitsPersistence:
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: None
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
-            c = db.session.get(Container, container.id)
-            assert c.disk_total_bytes == usage["container"]["total_bytes"]
-            assert c.disk_limit_bytes == int(1024 * 1024 ** 3)
-            assert c.disk_checked_at is not None
+        container_disk_check_task._evaluate_limits(container, usage)
+        db_session.expire_all()
+        c = db_session.get(Container, container.id)
+        assert c.disk_total_bytes == usage["container"]["total_bytes"]
+        assert c.disk_limit_bytes == int(1024 * 1024 ** 3)
+        assert c.disk_checked_at is not None
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +250,7 @@ class TestEvaluateLimitsResponseDisabled:
     def test_long_term_skips_when_response_disabled(self, app, db_session, monkeypatch):
         """response 关闭 → 持久容器也不触发 handler。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         soft_calls = []
         hard_calls = []
@@ -266,12 +262,11 @@ class TestEvaluateLimitsResponseDisabled:
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: hard_calls.append(c.id)
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", False)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", False)
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
         assert len(soft_calls) == 0
         assert len(hard_calls) == 0
@@ -290,12 +285,11 @@ class TestEvaluateLimitsResponseDisabled:
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: hard_calls.append(c.id)
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", False)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", False)
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
         assert len(soft_calls) == 0
         assert len(hard_calls) == 0
@@ -311,7 +305,7 @@ class TestEvaluateLimitsCheckDisabled:
     def test_skips_everything_when_check_disabled(self, app, db_session, monkeypatch):
         """检测关闭 → 不持久化、不响应。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         soft_calls = []
         hard_calls = []
@@ -323,17 +317,16 @@ class TestEvaluateLimitsCheckDisabled:
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: hard_calls.append(c.id)
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", False)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", False)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
         assert len(soft_calls) == 0
         assert len(hard_calls) == 0
 
-        c = db.session.get(Container, container.id)
+        c = db_session.get(Container, container.id)
         assert c.disk_checked_at is None, "检测关闭时不应写入磁盘快照"
 
 
@@ -347,7 +340,7 @@ class TestEvaluateLimitsEdgeCases:
     def test_ok_usage_triggers_neither_handler(self, app, db_session, monkeypatch):
         """正常用量不触发任何 handler。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         soft_calls = []
         hard_calls = []
@@ -359,12 +352,11 @@ class TestEvaluateLimitsEdgeCases:
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: hard_calls.append(c.id)
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         usage = _usage_below_soft_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
         assert len(soft_calls) == 0
         assert len(hard_calls) == 0
@@ -379,9 +371,9 @@ class TestEvaluateLimitsEdgeCases:
         user = create_user()
         machine = create_machine(disk_size_gb=0)  # disk_size_gb=0
         container = _create_container(machine=machine)
-        machine_permission_repo.add_permission(machine.id, user.id)
+        machine_permission_repo.add_permission(machine.id, user.id, session=db_session)
         bind_user_container(user, container, role=ROLE.ROOT)
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         soft_calls = []
         hard_calls = []
@@ -393,12 +385,11 @@ class TestEvaluateLimitsEdgeCases:
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: hard_calls.append(c.id)
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
         assert len(soft_calls) == 0
         assert len(hard_calls) == 0
@@ -411,27 +402,27 @@ class TestEvaluateLimitsEdgeCases:
 class TestDiskCheckScheduler:
     """start_container_disk_check_scheduler 调度器测试。"""
 
-    def test_returns_none_when_disabled(self, app):
+    def test_returns_none_when_disabled(self, monkeypatch):
         """检测关闭时调度器返回 None。"""
-        app.config["CONTAINER_DISK_CHECK_ENABLED"] = False
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", False)
         result = container_disk_check_task.start_container_disk_check_scheduler(
-            app, interval_seconds=999
+            interval_seconds=999
         )
         assert result is None
 
-    def test_returns_existing_thread_when_alive(self, app):
+    def test_returns_existing_thread_when_alive(self, monkeypatch):
         """已有存活线程时返回现有线程。"""
-        app.config["CONTAINER_DISK_CHECK_ENABLED"] = True
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
 
         class _Thread:
             def is_alive(self):
                 return True
 
         existing = _Thread()
-        app.extensions["container_disk_check_scheduler"] = {"thread": existing}
+        container_disk_check_task._SCHEDULER_STATE["container_disk_check_scheduler"] = {"thread": existing}
 
         result = container_disk_check_task.start_container_disk_check_scheduler(
-            app, interval_seconds=999
+            interval_seconds=999
         )
         assert result is existing
 
@@ -464,83 +455,83 @@ class TestFreezeStateRepo:
     """container_disk_freeze_state_repo 单元测试。"""
 
     def test_get_returns_none_when_no_record(self, app, db_session):
-        assert container_disk_freeze_state_repo.get(999) is None
+        assert container_disk_freeze_state_repo.get(999, session=db_session) is None
 
     def test_get_returns_record_when_exists(self, app, db_session):
         _root, _machine, container = create_container_graph()
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
-        row = container_disk_freeze_state_repo.get(container.id)
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        row = container_disk_freeze_state_repo.get(container.id, session=db_session)
         assert row is not None
         assert row.container_id == container.id
         assert row.first_frozen_at is not None
 
     def test_upsert_creates_new_record(self, app, db_session):
         _root, _machine, container = create_container_graph()
-        row = container_disk_freeze_state_repo.upsert_first_frozen(container.id)
+        row = container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
         assert row is not None
         assert row.first_frozen_at is not None
         # verify persisted
-        row2 = container_disk_freeze_state_repo.get(container.id)
+        row2 = container_disk_freeze_state_repo.get(container.id, session=db_session)
         assert row2 is not None
 
     def test_upsert_preserves_first_frozen_at(self, app, db_session):
         _root, _machine, container = create_container_graph()
-        row1 = container_disk_freeze_state_repo.upsert_first_frozen(container.id)
+        row1 = container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
         original = row1.first_frozen_at
         # second call
-        row2 = container_disk_freeze_state_repo.upsert_first_frozen(container.id)
+        row2 = container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
         assert row2.first_frozen_at == original
 
     def test_reset_deletes_record(self, app, db_session):
         _root, _machine, container = create_container_graph()
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
-        assert container_disk_freeze_state_repo.get(container.id) is not None
-        container_disk_freeze_state_repo.reset(container.id)
-        assert container_disk_freeze_state_repo.get(container.id) is None
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        assert container_disk_freeze_state_repo.get(container.id, session=db_session) is not None
+        container_disk_freeze_state_repo.reset(container.id, session=db_session)
+        assert container_disk_freeze_state_repo.get(container.id, session=db_session) is None
 
     def test_reset_returns_false_when_no_record(self, app, db_session):
-        assert container_disk_freeze_state_repo.reset(999) is False
+        assert container_disk_freeze_state_repo.reset(999, session=db_session) is False
 
     def test_reset_returns_true_when_record_deleted(self, app, db_session):
         _root, _machine, container = create_container_graph()
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
-        assert container_disk_freeze_state_repo.reset(container.id) is True
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        assert container_disk_freeze_state_repo.reset(container.id, session=db_session) is True
 
     def test_set_grace_sets_grace_until(self, app, db_session):
         _root, _machine, container = create_container_graph()
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
-        assert container_disk_freeze_state_repo.set_grace(container.id, 3) is True
-        row = container_disk_freeze_state_repo.get(container.id)
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        assert container_disk_freeze_state_repo.set_grace(container.id, 3, session=db_session) is True
+        row = container_disk_freeze_state_repo.get(container.id, session=db_session)
         assert row.grace_until is not None
         # should be ~3 days from now
         delta = row.grace_until - datetime.utcnow()
         assert timedelta(days=2, hours=23) < delta < timedelta(days=3, hours=1)
 
     def test_set_grace_returns_false_when_no_record(self, app, db_session):
-        assert container_disk_freeze_state_repo.set_grace(999, 3) is False
+        assert container_disk_freeze_state_repo.set_grace(999, 3, session=db_session) is False
 
     def test_set_grace_overwrites_existing_grace(self, app, db_session):
         _root, _machine, container = create_container_graph()
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
-        container_disk_freeze_state_repo.set_grace(container.id, 3)
-        first = container_disk_freeze_state_repo.get(container.id).grace_until
-        container_disk_freeze_state_repo.set_grace(container.id, 5)
-        second = container_disk_freeze_state_repo.get(container.id).grace_until
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        container_disk_freeze_state_repo.set_grace(container.id, 3, session=db_session)
+        first = container_disk_freeze_state_repo.get(container.id, session=db_session).grace_until
+        container_disk_freeze_state_repo.set_grace(container.id, 5, session=db_session)
+        second = container_disk_freeze_state_repo.get(container.id, session=db_session).grace_until
         assert second > first
 
     def test_clear_grace_sets_null(self, app, db_session):
         _root, _machine, container = create_container_graph()
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
-        container_disk_freeze_state_repo.set_grace(container.id, 3)
-        assert container_disk_freeze_state_repo.clear_grace(container.id) is True
-        row = container_disk_freeze_state_repo.get(container.id)
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        container_disk_freeze_state_repo.set_grace(container.id, 3, session=db_session)
+        assert container_disk_freeze_state_repo.clear_grace(container.id, session=db_session) is True
+        row = container_disk_freeze_state_repo.get(container.id, session=db_session)
         assert row.grace_until is None
 
     def test_clear_grace_returns_false_when_no_grace(self, app, db_session):
         _root, _machine, container = create_container_graph()
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
         # no grace set yet
-        assert container_disk_freeze_state_repo.clear_grace(container.id) is False
+        assert container_disk_freeze_state_repo.clear_grace(container.id, session=db_session) is False
 
 
 # ---------------------------------------------------------------------------
@@ -553,50 +544,47 @@ class TestFreezeEscalation:
     def test_first_frozen_recorded_on_hard_limit(self, app, db_session, monkeypatch):
         """长期容器首次超 hard limit → FreezeState 写入。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         monkeypatch.setattr(
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: None
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
-        row = container_disk_freeze_state_repo.get(container.id)
+        row = container_disk_freeze_state_repo.get(container.id, session=db_session)
         assert row is not None
         assert row.first_frozen_at is not None
 
     def test_first_frozen_not_updated_on_second_hit(self, app, db_session, monkeypatch):
         """第二次超限 → first_frozen_at 不变。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         monkeypatch.setattr(
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: None
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
-        first = container_disk_freeze_state_repo.get(container.id).first_frozen_at
+        container_disk_check_task._evaluate_limits(container, usage)
+        first = container_disk_freeze_state_repo.get(container.id, session=db_session).first_frozen_at
 
         # second hit
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
-        second = container_disk_freeze_state_repo.get(container.id).first_frozen_at
+        container_disk_check_task._evaluate_limits(container, usage)
+        second = container_disk_freeze_state_repo.get(container.id, session=db_session).first_frozen_at
         assert first == second
 
     def test_escalation_after_7_days(self, app, db_session, monkeypatch):
         """冻结满 7 天 → _handle_freeze_escalation 被调用。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         escalated = []
         hard_calls = []
@@ -608,18 +596,17 @@ class TestFreezeEscalation:
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: hard_calls.append(c.id)
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         # pre-create freeze state with first_frozen_at = 8 days ago
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
-        row = container_disk_freeze_state_repo.get(container.id)
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        row = container_disk_freeze_state_repo.get(container.id, session=db_session)
         row.first_frozen_at = datetime.utcnow() - timedelta(days=8)
-        db.session.commit()
+        db_session.commit()
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
         assert len(escalated) == 1
         assert escalated[0][0] == container.id
@@ -629,7 +616,7 @@ class TestFreezeEscalation:
     def test_escalation_not_triggered_before_7_days(self, app, db_session, monkeypatch):
         """冻结 3 天 → 只走 _handle_hard_limit，不升级。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         escalated = []
         hard_calls = []
@@ -641,17 +628,16 @@ class TestFreezeEscalation:
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: hard_calls.append(c.id)
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
-        row = container_disk_freeze_state_repo.get(container.id)
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        row = container_disk_freeze_state_repo.get(container.id, session=db_session)
         row.first_frozen_at = datetime.utcnow() - timedelta(days=3)
-        db.session.commit()
+        db_session.commit()
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
         assert len(escalated) == 0
         assert len(hard_calls) == 1
@@ -671,18 +657,17 @@ class TestFreezeEscalation:
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: hard_calls.append(c.id)
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         # create legacy freeze state
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
-        row = container_disk_freeze_state_repo.get(container.id)
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        row = container_disk_freeze_state_repo.get(container.id, session=db_session)
         row.first_frozen_at = datetime.utcnow() - timedelta(days=8)
-        db.session.commit()
+        db_session.commit()
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
         assert len(escalated) == 0, "短期容器不应升级"
         assert len(hard_calls) == 0, "短期容器不应 pause"
@@ -698,7 +683,7 @@ class TestGracePeriod:
     def test_grace_period_skips_pause(self, app, db_session, monkeypatch):
         """宽限期内超 hard limit → 不触发任何 handler。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         escalated = []
         hard_calls = []
@@ -710,16 +695,15 @@ class TestGracePeriod:
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: hard_calls.append(c.id)
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         # create freeze state with active grace
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
-        container_disk_freeze_state_repo.set_grace(container.id, 3)
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        container_disk_freeze_state_repo.set_grace(container.id, 3, session=db_session)
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
         assert len(escalated) == 0, "宽限期内不应升级"
         assert len(hard_calls) == 0, "宽限期内不应 pause"
@@ -727,7 +711,7 @@ class TestGracePeriod:
     def test_grace_period_skips_escalation_even_if_7_days(self, app, db_session, monkeypatch):
         """宽限期内 + 冻结满 7 天 → 仍跳过升级（宽限优先）。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         escalated = []
         hard_calls = []
@@ -739,18 +723,17 @@ class TestGracePeriod:
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: hard_calls.append(c.id)
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
-        row = container_disk_freeze_state_repo.get(container.id)
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        row = container_disk_freeze_state_repo.get(container.id, session=db_session)
         row.first_frozen_at = datetime.utcnow() - timedelta(days=8)
-        container_disk_freeze_state_repo.set_grace(container.id, 3)
-        db.session.commit()
+        container_disk_freeze_state_repo.set_grace(container.id, 3, session=db_session)
+        db_session.commit()
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
         assert len(escalated) == 0, "宽限期内不应升级（即使已满 7 天）"
         assert len(hard_calls) == 0
@@ -758,7 +741,7 @@ class TestGracePeriod:
     def test_grace_expired_resumes_freeze(self, app, db_session, monkeypatch):
         """宽限期到期 + 仍超限 → 恢复 _handle_hard_limit，清除 grace_until。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         escalated = []
         hard_calls = []
@@ -770,29 +753,29 @@ class TestGracePeriod:
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: hard_calls.append(c.id)
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
         # set grace that expired 1 day ago
-        row = container_disk_freeze_state_repo.get(container.id)
+        row = container_disk_freeze_state_repo.get(container.id, session=db_session)
         row.grace_until = datetime.utcnow() - timedelta(days=1)
-        db.session.commit()
+        db_session.commit()
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
+        db_session.expire_all()
 
         assert len(hard_calls) == 1, "宽限期到期应恢复 pause"
         assert len(escalated) == 0
         # grace_until should be cleared
-        row2 = container_disk_freeze_state_repo.get(container.id)
+        row2 = container_disk_freeze_state_repo.get(container.id, session=db_session)
         assert row2.grace_until is None
 
     def test_grace_expired_triggers_escalation_if_7_days(self, app, db_session, monkeypatch):
         """宽限期到期 + 冻结满 7 天 → 直接升级删除。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         escalated = []
         hard_calls = []
@@ -804,18 +787,17 @@ class TestGracePeriod:
             container_disk_check_task, "_handle_hard_limit",
             lambda c, u, a: hard_calls.append(c.id)
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
-        row = container_disk_freeze_state_repo.get(container.id)
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        row = container_disk_freeze_state_repo.get(container.id, session=db_session)
         row.first_frozen_at = datetime.utcnow() - timedelta(days=8)
         row.grace_until = datetime.utcnow() - timedelta(days=1)  # expired
-        db.session.commit()
+        db_session.commit()
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
         assert len(escalated) == 1, "宽限到期 + 已满 7 天 → 应升级"
         assert escalated[0][0] == container.id
@@ -824,11 +806,11 @@ class TestGracePeriod:
     def test_multiple_unpause_extends_grace(self, app, db_session, monkeypatch):
         """宽限期内再次设宽限 → grace_until 延长。"""
         _root, machine, container = create_container_graph()
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
-        container_disk_freeze_state_repo.set_grace(container.id, 3)
-        first = container_disk_freeze_state_repo.get(container.id).grace_until
-        container_disk_freeze_state_repo.set_grace(container.id, 5)
-        second = container_disk_freeze_state_repo.get(container.id).grace_until
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        container_disk_freeze_state_repo.set_grace(container.id, 3, session=db_session)
+        first = container_disk_freeze_state_repo.get(container.id, session=db_session).grace_until
+        container_disk_freeze_state_repo.set_grace(container.id, 5, session=db_session)
+        second = container_disk_freeze_state_repo.get(container.id, session=db_session).grace_until
         assert second > first
 
 
@@ -842,14 +824,14 @@ class TestFreezeReset:
     def test_freeze_state_reset_on_usage_below_reset(self, app, db_session, monkeypatch):
         """长期容器 + 有冻结记录 + 容量回落 < 95% → 记录删除。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         # first, create a freeze state
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
-        assert container_disk_freeze_state_repo.get(container.id) is not None
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        assert container_disk_freeze_state_repo.get(container.id, session=db_session) is not None
 
         soft_calls = []
         hard_calls = []
@@ -864,10 +846,9 @@ class TestFreezeReset:
 
         # now simulate usage dropping below reset
         usage = _usage_below_reset()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
-        assert container_disk_freeze_state_repo.get(container.id) is None
+        assert container_disk_freeze_state_repo.get(container.id, session=db_session) is None
         assert len(soft_calls) == 0, "重置后不应触发 soft limit"
         assert len(hard_calls) == 0, "重置后不应触发 hard limit"
 
@@ -875,32 +856,31 @@ class TestFreezeReset:
         """短期容器（曾是长期）+ 容量回落 → 状态清除。"""
         _root, machine, container = create_container_graph()
         # NOT long-term, but has legacy freeze state
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
-        assert container_disk_freeze_state_repo.get(container.id) is not None
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        assert container_disk_freeze_state_repo.get(container.id, session=db_session) is not None
 
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         usage = _usage_below_reset()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
-        assert container_disk_freeze_state_repo.get(container.id) is None, (
+        assert container_disk_freeze_state_repo.get(container.id, session=db_session) is None, (
             "短期容器容量回落也应清除冻结状态"
         )
 
     def test_freeze_state_not_reset_on_usage_above_reset(self, app, db_session, monkeypatch):
         """容量 96%（不满足 < 95%）→ 状态保留。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
 
         monkeypatch.setattr(
             container_disk_check_task, "_handle_soft_limit",
             lambda c, u, a: None
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         # 96% — above 95% reset threshold, triggers soft limit
         gb = 1024 ** 3
@@ -911,10 +891,9 @@ class TestFreezeReset:
                 "total_bytes": int(983 * gb),  # 983/1024 ≈ 96.0%
             }
         }
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
-        assert container_disk_freeze_state_repo.get(container.id) is not None, (
+        assert container_disk_freeze_state_repo.get(container.id, session=db_session) is not None, (
             "容量 96% 不满足 < 95% 重置条件，状态应保留"
         )
 
@@ -922,47 +901,46 @@ class TestFreezeReset:
         """切换为短期 → 冻结记录仍在。"""
         _root, machine, container = create_container_graph()
         # was long-term, got frozen
-        long_term_container_repo.add(container.id)
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
 
         # switch to short-term (remove from long_term)
-        long_term_container_repo.remove(container.id)
+        long_term_container_repo.remove(container.id, session=db_session)
 
         # freeze state should still exist
-        assert container_disk_freeze_state_repo.get(container.id) is not None, (
+        assert container_disk_freeze_state_repo.get(container.id, session=db_session) is not None, (
             "切换为短期容器不应清除冻结状态"
         )
 
     def test_freeze_state_cascade_on_container_delete(self, app, db_session):
         """容器删 → FreezeState 可通过 repo.reset 清除（级联由 DB FK 保证）。"""
         _root, machine, container = create_container_graph()
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
         fid = container.id
-        assert container_disk_freeze_state_repo.get(fid) is not None
+        assert container_disk_freeze_state_repo.get(fid, session=db_session) is not None
 
         # 清理时先删 freeze state，再删容器（生产环境由 FK CASCADE 自动处理）
-        container_disk_freeze_state_repo.reset(fid)
-        db.session.delete(container)
-        db.session.commit()
+        container_disk_freeze_state_repo.reset(fid, session=db_session)
+        db_session.delete(container)
+        db_session.commit()
 
-        assert container_disk_freeze_state_repo.get(fid) is None
+        assert container_disk_freeze_state_repo.get(fid, session=db_session) is None
 
     def test_grace_cleared_on_usage_below_reset(self, app, db_session, monkeypatch):
         """宽限期内容量回落 < 95% → 整条记录删除（含 grace_until）。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
-        container_disk_freeze_state_repo.set_grace(container.id, 3)
-        assert container_disk_freeze_state_repo.get(container.id).grace_until is not None
+        long_term_container_repo.add(container.id, session=db_session)
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        container_disk_freeze_state_repo.set_grace(container.id, 3, session=db_session)
+        assert container_disk_freeze_state_repo.get(container.id, session=db_session).grace_until is not None
 
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         usage = _usage_below_reset()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
-        assert container_disk_freeze_state_repo.get(container.id) is None, (
+        assert container_disk_freeze_state_repo.get(container.id, session=db_session) is None, (
             "重置应删除整条记录（含宽限期）"
         )
 
@@ -977,7 +955,7 @@ class TestHandleFreezeEscalation:
     def test_escalation_calls_remove_container(self, app, db_session, monkeypatch):
         """升级时 remove_container 被调用。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         removed = []
         monkeypatch.setattr(
@@ -989,20 +967,19 @@ class TestHandleFreezeEscalation:
             "get_container_root_owner_emails",
             lambda cid: []
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._handle_freeze_escalation(
-                container, usage, app, days_frozen=8
-            )
+        container_disk_check_task._handle_freeze_escalation(
+            container, usage, app, days_frozen=8
+        )
 
         assert container.id in removed
 
     def test_escalation_sends_email(self, app, db_session, monkeypatch):
         """升级时发送通知邮件。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         sent = []
         monkeypatch.setattr(
@@ -1022,13 +999,12 @@ class TestHandleFreezeEscalation:
         monkeypatch.setattr(
             "FuxiYu_CtrKernel.utils.mail.send", _fake_send_mail
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._handle_freeze_escalation(
-                container, usage, app, days_frozen=8
-            )
+        container_disk_check_task._handle_freeze_escalation(
+            container, usage, app, days_frozen=8
+        )
 
         assert len(sent) == 1
         assert sent[0]["to"] == "owner@test.com"
@@ -1038,7 +1014,7 @@ class TestHandleFreezeEscalation:
     def test_escalation_writes_operation_log(self, app, db_session, monkeypatch):
         """升级时写入操作日志。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         logs = []
         monkeypatch.setattr(
@@ -1056,13 +1032,12 @@ class TestHandleFreezeEscalation:
             "write_operation_log",
             lambda **kwargs: logs.append(kwargs)
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._handle_freeze_escalation(
-                container, usage, app, days_frozen=8
-            )
+        container_disk_check_task._handle_freeze_escalation(
+            container, usage, app, days_frozen=8
+        )
 
         assert len(logs) == 1
         assert logs[0]["operation"] == "remove_container"
@@ -1072,7 +1047,7 @@ class TestHandleFreezeEscalation:
     def test_escalation_email_cooled_down_24h(self, app, db_session, monkeypatch):
         """同一容器 24h 内不重复发升级邮件（验证 cooldown 状态）。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
+        long_term_container_repo.add(container.id, session=db_session)
 
         removed_count = []
         monkeypatch.setattr(
@@ -1084,25 +1059,24 @@ class TestHandleFreezeEscalation:
             "get_container_root_owner_emails",
             lambda cid: ["owner@test.com"]
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
 
         # 使用 conftest 已有的 mail.send mock（无需额外 mock）
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            # 首次调用：设下 cooldown
-            container_disk_check_task._handle_freeze_escalation(
-                container, usage, app, days_frozen=8
-            )
-            cooldown_after_first = getattr(app, '_disk_check_cache', {})
-            escalation_key = f"_escalation_last_sent_{container.id}"
-            assert escalation_key in cooldown_after_first, (
-                "首次调用应写入 cooldown key"
-            )
+        # 首次调用：设下 cooldown
+        container_disk_check_task._handle_freeze_escalation(
+            container, usage, app, days_frozen=8
+        )
+        cooldown_after_first = getattr(app, '_disk_check_cache', {})
+        escalation_key = f"_escalation_last_sent_{container.id}"
+        assert escalation_key in cooldown_after_first, (
+            "首次调用应写入 cooldown key"
+        )
 
-            # 第二次调用：仍在 cooldown 内
-            container_disk_check_task._handle_freeze_escalation(
-                container, usage, app, days_frozen=8
-            )
+        # 第二次调用：仍在 cooldown 内
+        container_disk_check_task._handle_freeze_escalation(
+            container, usage, app, days_frozen=8
+        )
 
         # remove 两次都执行（无 cooldown 限制）
         assert len(removed_count) == 2
@@ -1118,18 +1092,17 @@ class TestFreezeObservability:
     def test_reset_still_works_when_response_disabled(self, app, db_session, monkeypatch):
         """response 关闭时容量回落仍清除冻结记录。"""
         _root, machine, container = create_container_graph()
-        long_term_container_repo.add(container.id)
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
-        assert container_disk_freeze_state_repo.get(container.id) is not None
+        long_term_container_repo.add(container.id, session=db_session)
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        assert container_disk_freeze_state_repo.get(container.id, session=db_session) is not None
 
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", False)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", False)
 
         usage = _usage_below_reset()
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
-        assert container_disk_freeze_state_repo.get(container.id) is None, (
+        assert container_disk_freeze_state_repo.get(container.id, session=db_session) is None, (
             "response 关闭时仍应执行重置"
         )
 
@@ -1137,21 +1110,20 @@ class TestFreezeObservability:
         """短期容器 + 遗留冻结记录 → _log_freeze_state_if_exists 不抛异常。"""
         _root, machine, container = create_container_graph()
         # NOT long-term, but has freeze state (was long-term before)
-        container_disk_freeze_state_repo.upsert_first_frozen(container.id)
-        row = container_disk_freeze_state_repo.get(container.id)
+        container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        row = container_disk_freeze_state_repo.get(container.id, session=db_session)
         row.first_frozen_at = datetime.utcnow() - timedelta(days=5)
-        db.session.commit()
+        db_session.commit()
 
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_RESPONSE_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_RESPONSE_ENABLED", True)
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            # should not raise
-            container_disk_check_task._evaluate_limits(container, usage)
+        # should not raise
+        container_disk_check_task._evaluate_limits(container, usage)
 
         # freeze state should still exist (short-term doesn't clear it)
-        assert container_disk_freeze_state_repo.get(container.id) is not None
+        assert container_disk_freeze_state_repo.get(container.id, session=db_session) is not None
 
 
 # ============================================================================
@@ -1164,28 +1136,27 @@ class TestBindMountPathPersistence:
     def test_bind_mount_path_persisted_during_disk_check(self, app, db_session, monkeypatch):
         """磁盘检测时 NodeKernel 返回 bind_mount_path → Container 表记录更新。"""
         _root, machine, container = create_container_graph()
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
 
         mount_path = "/home/alice/containers/test_mount/"
         usage = _usage_below_soft_limit()
         usage["container"]["bind_mount_path"] = mount_path
 
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
-            c = db.session.get(Container, container.id)
-            assert c.bind_mount_path == mount_path
+        container_disk_check_task._evaluate_limits(container, usage)
+        db_session.expire_all()
+        c = db_session.get(Container, container.id)
+        assert c.bind_mount_path == mount_path
 
     def test_bind_mount_path_none_persisted(self, app, db_session, monkeypatch):
         """NodeKernel 不返回 bind_mount_path → 不报错，正常跳过。"""
         _root, machine, container = create_container_graph()
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
 
         usage = _usage_below_soft_limit()
         # no bind_mount_path in usage
-        with app.app_context():
-            container_disk_check_task._evaluate_limits(container, usage)
+        container_disk_check_task._evaluate_limits(container, usage)
 
-        c = db.session.get(Container, container.id)
+        c = db_session.get(Container, container.id)
         # should not crash, value is None (update_container skips None)
 
 
@@ -1198,7 +1169,7 @@ class TestEscalationMountCleanup:
 
         _root, machine, container = create_container_graph()
         container.bind_mount_path = "/home/test/containers/test_esc/"
-        db.session.commit()
+        db_session.commit()
 
         monkeypatch.setattr(
             container_disk_check_task.container_tasks, "remove_container",
@@ -1214,17 +1185,19 @@ class TestEscalationMountCleanup:
             container_disk_check_task.container_tasks, "send",
             lambda url, payload, timeout: {"success": 1}
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._handle_freeze_escalation(
-                container, usage, app, days_frozen=8
-            )
+        container_disk_check_task._handle_freeze_escalation(
+            container, usage, app, days_frozen=8
+        )
+        db_session.expire_all()
 
-        row = db.session.query(ContainerMountCleanup).filter_by(
-            container_id=container.id,
-            escalation=True,
+        row = db_session.scalars(
+            select(ContainerMountCleanup).where(
+                ContainerMountCleanup.container_id == container.id,
+                ContainerMountCleanup.escalation.is_(True),
+            )
         ).first()
         assert row is not None
         assert row.mount_path == "/home/test/containers/test_esc/"
@@ -1234,7 +1207,7 @@ class TestEscalationMountCleanup:
         """升级删除 → NodeKernel /api/clean_mount 被调用。"""
         _root, machine, container = create_container_graph()
         container.bind_mount_path = "/home/test/containers/test_esc2/"
-        db.session.commit()
+        db_session.commit()
 
         monkeypatch.setattr(
             container_disk_check_task.container_tasks, "remove_container",
@@ -1251,13 +1224,12 @@ class TestEscalationMountCleanup:
             container_disk_check_task.container_tasks, "send",
             lambda url, payload, timeout: sent_calls.append(url) or {"success": 1}
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            container_disk_check_task._handle_freeze_escalation(
-                container, usage, app, days_frozen=8
-            )
+        container_disk_check_task._handle_freeze_escalation(
+            container, usage, app, days_frozen=8
+        )
 
         assert len(sent_calls) == 1
         assert "/clean_mount" in sent_calls[0]
@@ -1276,11 +1248,10 @@ class TestEscalationMountCleanup:
             "get_container_root_owner_emails",
             lambda cid: []
         )
-        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
+        monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
 
         usage = _usage_exceeding_hard_limit()
-        with app.app_context():
-            # should not raise
-            container_disk_check_task._handle_freeze_escalation(
-                container, usage, app, days_frozen=8
-            )
+        # should not raise
+        container_disk_check_task._handle_freeze_escalation(
+            container, usage, app, days_frozen=8
+        )

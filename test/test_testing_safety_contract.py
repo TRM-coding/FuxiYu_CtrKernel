@@ -14,6 +14,8 @@ OLD_TEST_FILES = [
     "test/test_user_sql.py",
     "test/test_machine_sql.py",
     "test/test_container_sql.py",
+]
+INTEGRATION_TEST_FILES = [
     "test/test_mail.py",
 ]
 
@@ -79,14 +81,10 @@ def test_docs_testing_mentions_safe_default_command():
     assert "SQLite" in text
 
 
-def test_legacy_tests_are_marked_or_migrated():
+def test_legacy_tests_are_removed():
     for relpath in OLD_TEST_FILES:
         path = ROOT / relpath
-        assert path.exists(), relpath
-        if relpath == "test/test_mail.py":
-            assert _module_has_pytestmark(path, "integration")
-        else:
-            assert _module_has_pytestmark(path, "legacy")
+        assert not path.exists(), relpath
 
 
 def test_default_safe_collection_excludes_legacy_tests():
@@ -94,7 +92,8 @@ def test_default_safe_collection_excludes_legacy_tests():
 
 
 def test_integration_tests_are_not_selected_by_safe_command():
-    assert _module_has_pytestmark(ROOT / "test/test_mail.py", "integration")
+    for relpath in INTEGRATION_TEST_FILES:
+        assert _module_has_pytestmark(ROOT / relpath, "integration")
 
 
 def test_integration_tests_are_not_forced_through_safe_external_mocks():
@@ -108,6 +107,9 @@ def test_legacy_migration_doc_lists_all_old_test_files():
     text = (ROOT / "docs/testing_legacy_migration.md").read_text(encoding="utf-8")
 
     for relpath in OLD_TEST_FILES:
+        assert f"`{relpath}`" in text
+        assert "deleted" in text
+    for relpath in INTEGRATION_TEST_FILES:
         assert f"`{relpath}`" in text
 
 
@@ -132,9 +134,6 @@ def test_no_tests_import_requests_without_integration_marker():
 
 def test_no_tests_call_create_app_without_testing_config():
     for path in (ROOT / "test").rglob("test_*.py"):
-        # as_posix 统一分隔符，Windows 下 backslash 路径不会漏判
-        if path.relative_to(ROOT).as_posix() in OLD_TEST_FILES:
-            continue
         text = path.read_text(encoding="utf-8")
         if "create_app(" not in text:
             continue

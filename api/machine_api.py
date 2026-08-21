@@ -1,9 +1,10 @@
-from typing import Any
+﻿from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
+from ..constant import OperationType
 from ..schemas.machine import (
     AddMachinePermissionRequest,
     AddMachinePermissionResponse,
@@ -23,6 +24,7 @@ from ..schemas.machine import (
 )
 from ..services import machine_tasks as machine_service
 from ..services.container_module import node_comms
+from ..services.operation_log_tasks import write_operation_log as write_op_log
 from .deps import require_current_user, require_operator
 
 router = APIRouter(prefix="/machines", tags=["machines"])
@@ -58,34 +60,29 @@ def _error(status_code: int, message: str, error_reason: str | None = None) -> J
 
 @router.post("/add_machine", response_model=AddMachineResponse, status_code=201)
 def add_machine_api(
-    request: Request,
     message: AddMachineRequest,
     operator_user_id: int = Depends(require_operator),
 ):
-    """人工添加机器。
-
-    迁移期兼容入口；后续主建档流程会收敛到 register_machine。
-    """
+    """人工添加机器；后续主建档入口会收敛到 register_machine。"""
 
     data = _model_data(message)
     try:
-        with request.app.state.flask_app.app_context():
-            success = machine_service.Add_machine(
-                machine_name=data.get("machine_name", ""),
-                machine_ip=data.get("machine_ip", ""),
-                machine_type=data.get("machine_type", ""),
-                machine_description=data.get("machine_description", ""),
-                cpu_core_number=data.get("cpu_core_number", 0),
-                gpu_number=data.get("gpu_number", 0),
-                gpu_type=data.get("gpu_type", ""),
-                memory_size=data.get("memory_size", 0),
-                max_shared_gb=data.get("max_shared_gb", 2),
-                disk_size=data.get("disk_size", 0),
-                max_memory_gb=data.get("max_memory_gb", 0),
-                max_gpu_number=data.get("max_gpu_number", 0),
-                max_cpu_core_number=data.get("max_cpu_core_number", 0),
-                operator_user_id=operator_user_id,
-            )
+        success = machine_service.Add_machine(
+            machine_name=data.get("machine_name", ""),
+            machine_ip=data.get("machine_ip", ""),
+            machine_type=data.get("machine_type", ""),
+            machine_description=data.get("machine_description", ""),
+            cpu_core_number=data.get("cpu_core_number", 0),
+            gpu_number=data.get("gpu_number", 0),
+            gpu_type=data.get("gpu_type", ""),
+            memory_size=data.get("memory_size", 0),
+            max_shared_gb=data.get("max_shared_gb", 2),
+            disk_size=data.get("disk_size", 0),
+            max_memory_gb=data.get("max_memory_gb", 0),
+            max_gpu_number=data.get("max_gpu_number", 0),
+            max_cpu_core_number=data.get("max_cpu_core_number", 0),
+            operator_user_id=operator_user_id,
+        )
     except IntegrityError as e:
         detail = str(e.orig) if hasattr(e, "orig") else str(e)
         return _error(409, f"Duplicate entry: {detail}", "duplicate_entry")
@@ -106,36 +103,41 @@ def add_machine_api(
 
 @router.post("/register_machine", response_model=RegisterMachineWithProfileResponse)
 def register_machine_api(
-    request: Request,
     message: RegisterMachineByTrustAnchorRequest,
     operator_user_id: int = Depends(require_operator),
 ):
-    """TOFU 建档一体接入：管理员填最小信任锚（name/ip）→ 首连完成 TLS pin + UID 下发 →
-    Node 返回硬件 → 建档（默认分配比例）。之后用 update_machine 调整分配限制。"""
-
-    from ..services.operation_log_tasks import write_operation_log as write_op_log
-    from ..constant import OperationType
+    """TOFU 建档入口：首连 pin、下发 UID、采集硬件并创建机器记录。"""
 
     detail = {"name": message.machine_name, "ip": message.machine_ip, "trigger": "tofu_register"}
     try:
-        with request.app.state.flask_app.app_context():
-            result = node_comms.register_machine(
-                message.machine_name,
-                message.machine_ip,
-                message.machine_description,
-            )
+        result = node_comms.register_machine(
+            message.machine_name,
+            message.machine_ip,
+            message.machine_description,
+        )
     except Exception as e:
         err_reason = getattr(e, "error_reason", None)
-        write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE,
-                     target_type="machine", target_id=0, detail=detail,
-                     error_reason=err_reason or str(e))
+        write_op_log(
+            success=False,
+            operator_user_id=operator_user_id,
+            operation=OperationType.ADD_MACHINE,
+            target_type="machine",
+            target_id=0,
+            detail=detail,
+            error_reason=err_reason or str(e),
+        )
         if err_reason:
             return _error(422, str(e), err_reason)
         return _error(500, f"Internal error: {e}", "internal_error")
 
-    write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE,
-                 target_type="machine", target_id=result["machine_id"],
-                 detail={**detail, "uid": result["uid"]})
+    write_op_log(
+        success=True,
+        operator_user_id=operator_user_id,
+        operation=OperationType.ADD_MACHINE,
+        target_type="machine",
+        target_id=result["machine_id"],
+        detail={**detail, "uid": result["uid"]},
+    )
     return {
         "success": 1,
         "message": "Machine enrolled successfully",
@@ -152,17 +154,15 @@ def register_machine_api(
 
 @router.post("/remove_machine", response_model=RemoveMachineResponse)
 def remove_machine_api(
-    request: Request,
     message: RemoveMachineRequest,
     operator_user_id: int = Depends(require_operator),
 ):
     """删除一组机器记录。"""
 
-    with request.app.state.flask_app.app_context():
-        success = machine_service.Remove_machine(
-            machine_id=message.machine_ids,
-            operator_user_id=operator_user_id,
-        )
+    success = machine_service.Remove_machine(
+        machine_id=message.machine_ids,
+        operator_user_id=operator_user_id,
+    )
     if success:
         return {"success": 1, "message": "Machine(s) removed successfully"}
     return _error(500, "Failed to remove machine(s)", "remove_failed")
@@ -174,7 +174,6 @@ def remove_machine_api(
 
 @router.post("/update_machine", response_model=UpdateMachineResponse)
 def update_machine_api(
-    request: Request,
     message: UpdateMachineRequest,
     operator_user_id: int = Depends(require_operator),
 ):
@@ -182,12 +181,11 @@ def update_machine_api(
 
     fields = _model_data(message.fields, exclude_none=True)
     try:
-        with request.app.state.flask_app.app_context():
-            success = machine_service.Update_machine(
-                machine_id=message.machine_id,
-                operator_user_id=operator_user_id,
-                **fields,
-            )
+        success = machine_service.Update_machine(
+            machine_id=message.machine_id,
+            operator_user_id=operator_user_id,
+            **fields,
+        )
     except Exception as e:
         err_reason = getattr(e, "error_reason", None)
         if err_reason:
@@ -205,14 +203,12 @@ def update_machine_api(
 
 @router.post("/get_detail_information", response_model=MachineDetailResponse)
 def get_detail_information_api(
-    request: Request,
     message: MachineIdRequest,
     _: int = Depends(require_current_user),
 ):
     """查询机器详情。"""
 
-    with request.app.state.flask_app.app_context():
-        machine_info = machine_service.Get_detail_information(machine_id=message.machine_id)
+    machine_info = machine_service.Get_detail_information(machine_id=message.machine_id)
     if not machine_info:
         return _error(404, "Machine not found", "machine_not_found")
     return _model_data(machine_info)
@@ -224,18 +220,16 @@ def get_detail_information_api(
 
 @router.post("/list_all_machine_bref_information", response_model=ListMachineBriefResponse)
 def list_all_machine_bref_information_api(
-    request: Request,
     message: ListMachineBriefRequest,
     user_id: int = Depends(require_current_user),
 ):
     """分页查询机器概要。"""
 
-    with request.app.state.flask_app.app_context():
-        machines_info, total_pages = machine_service.List_all_machine_bref_information(
-            page_number=message.page_number,
-            page_size=message.page_size,
-            user_id=user_id,
-        )
+    machines_info, total_pages = machine_service.List_all_machine_bref_information(
+        page_number=message.page_number,
+        page_size=message.page_size,
+        user_id=user_id,
+    )
     machines = []
     for machine in machines_info:
         machine_type = machine.machine_type.value if hasattr(machine.machine_type, "value") else machine.machine_type
@@ -260,19 +254,17 @@ def list_all_machine_bref_information_api(
 
 @router.post("/add_machine_permission", response_model=AddMachinePermissionResponse)
 def add_machine_permission_api(
-    request: Request,
     message: AddMachinePermissionRequest,
     operator_user_id: int = Depends(require_operator),
 ):
     """给用户添加机器权限。"""
 
     try:
-        with request.app.state.flask_app.app_context():
-            machine_service.Add_machine_permission(
-                message.machine_id,
-                message.user_id,
-                operator_user_id=operator_user_id,
-            )
+        machine_service.Add_machine_permission(
+            message.machine_id,
+            message.user_id,
+            operator_user_id=operator_user_id,
+        )
     except ValueError as e:
         reason = str(e)
         status = 404 if reason in ("machine_not_found", "user_not_found") else 400
@@ -286,12 +278,10 @@ def add_machine_permission_api(
 
 @router.get("/list_machine_permissions", response_model=ListMachinePermissionsResponse)
 def list_machine_permissions_api(
-    request: Request,
     machine_id: int = Query(..., ge=1),
     _: int = Depends(require_current_user),
 ):
     """查询机器授权用户 id 列表。"""
 
-    with request.app.state.flask_app.app_context():
-        user_ids = machine_service.List_machine_permissions(machine_id)
+    user_ids = machine_service.List_machine_permissions(machine_id)
     return {"success": 1, "machine_id": machine_id, "user_ids": user_ids}

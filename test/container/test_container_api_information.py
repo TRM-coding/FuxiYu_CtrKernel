@@ -5,8 +5,8 @@ from ..factories import create_container
 
 
 def _auth(monkeypatch, *, valid=True, user_id=1):
-    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: valid)
-    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token: user_id)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: valid)
+    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token, **kwargs: user_id)
 
 
 def test_get_container_detail_api_not_found(client, monkeypatch):
@@ -33,7 +33,7 @@ def test_get_container_detail_api_success(client, monkeypatch):
     resp = client.post("/api/containers/get_container_detail_information", json={"container_id": 1} )
 
     assert resp.status_code == 200
-    assert resp.get_json()["container_info"]["container_name"] == "c"
+    assert resp.json()["container_info"]["container_name"] == "c"
 
 
 def test_container_status_api_missing_fields_returns_none(client, monkeypatch):
@@ -42,7 +42,7 @@ def test_container_status_api_missing_fields_returns_none(client, monkeypatch):
     resp = client.post("/api/containers/container_status", json={} )
 
     assert resp.status_code == 200
-    assert resp.get_json()["container_status"] is None
+    assert resp.json()["container_status"] is None
 
 
 def test_container_status_api_success(client, monkeypatch, db_session):
@@ -55,7 +55,7 @@ def test_container_status_api_success(client, monkeypatch, db_session):
     )
 
     assert resp.status_code == 200
-    assert resp.get_json()["container_status"] == container.container_status.value
+    assert resp.json()["container_status"] == container.container_status.value
 
 
 def test_refresh_last_ssh_login_time_api_node_endpoint_missing_returns_502(client, monkeypatch, db_session):
@@ -86,7 +86,7 @@ def test_refresh_last_ssh_login_time_api_success(client, monkeypatch, db_session
     )
 
     assert resp.status_code == 200
-    assert resp.get_json()["last_ssh_login_time"] == "2026-05-25T10:00:00"
+    assert resp.json()["last_ssh_login_time"] == "2026-05-25T10:00:00"
 
 
 def test_list_container_bref_api_includes_long_term_limit_when_user_filter_present(client, monkeypatch):
@@ -108,6 +108,6 @@ def test_list_container_bref_api_includes_long_term_limit_when_user_filter_prese
     )
 
     assert resp.status_code == 200
-    payload = resp.get_json()
+    payload = resp.json()
     assert payload["long_term_container_remaining"] == 0
     assert payload["long_term_container_limit"] == 1

@@ -5,8 +5,8 @@ from ...services import container_tasks
 
 
 def _auth(monkeypatch, *, valid=True, user_id=1):
-    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: valid)
-    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token: user_id)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: valid)
+    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token, **kwargs: user_id)
 
 
 def test_create_container_api_requires_token(client, monkeypatch):
@@ -26,7 +26,7 @@ def test_create_container_api_rejects_invalid_payload(client, monkeypatch):
     )
 
     assert resp.status_code == 400
-    assert resp.get_json()["error_reason"] == "invalid_payload"
+    assert resp.json()["error_reason"] == "invalid_payload"
 
 
 def test_create_container_api_duplicate_returns_409(client, monkeypatch):
@@ -68,7 +68,7 @@ def test_create_container_api_success(client, monkeypatch):
     )
 
     assert resp.status_code == 200
-    assert resp.get_json()["success"] == 1
+    assert resp.json()["success"] == 1
 
 
 def test_delete_container_api_not_found_returns_404(client, monkeypatch):

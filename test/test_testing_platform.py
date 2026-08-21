@@ -42,7 +42,7 @@ def test_auth_token_factory_creates_valid_token(db_session):
 
     token = mocks.auth_token_factory(user, token=TEST_AUTH_TOKEN)
 
-    assert authentications_repo.is_token_valid(token) is True
+    assert authentications_repo.is_token_valid(token, session=db_session) is True
 
 
 def test_auth_token_factory_can_create_expired_token(db_session):
@@ -50,7 +50,7 @@ def test_auth_token_factory_can_create_expired_token(db_session):
 
     token = mocks.auth_token_factory(user, expired=True, token="expired-platform-token")
 
-    assert authentications_repo.is_token_valid(token) is False
+    assert authentications_repo.is_token_valid(token, session=db_session) is False
 
 
 def test_mock_node_response_records_calls(monkeypatch):

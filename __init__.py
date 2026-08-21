@@ -1,4 +1,4 @@
-from contextlib import asynccontextmanager
+﻿from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -17,7 +17,8 @@ from .utils.logging_config import configure_daily_logging
 
 
 def _apply_overrides(overrides: dict | None) -> None:
-    """测试/本地启动覆盖配置；后续可替换为 settings 对象。"""
+    """Apply test or local configuration overrides."""
+
     if not overrides:
         return
     for key, value in overrides.items():
@@ -25,31 +26,36 @@ def _apply_overrides(overrides: dict | None) -> None:
 
 
 def _init_database() -> None:
-    """导入模型并建表，随后执行最小 seed。"""
+    """Import models, create tables, and seed minimal RBAC defaults."""
+
     from . import models  # noqa: F401
 
     db.create_all()
     try:
         from .services.rbac_service import seed_rbac_defaults
+
         seed_rbac_defaults()
     except Exception as e:
         import logging
+
         logging.getLogger(__name__).warning("rbac seed skipped: %s", e)
 
 
 def _should_start_background_tasks() -> bool:
-    """判断是否启动 Ctrl 后台任务。"""
+    """Return whether Ctrl background tasks should start."""
+
     return not getattr(AppConfig, "TESTING", False) and not getattr(AppConfig, "DISABLE_BACKGROUND_TASKS", False)
 
 
 def _start_background_tasks() -> None:
-    """启动 Ctrl 后台任务。"""
-    # Flask 清退期间，scheduler 会单独迁到显式 session 版本后再接回 lifespan。
+    """Start Ctrl background tasks after their DB access is migrated."""
+
     return None
 
 
 def create_app(config: str | None = None, overrides: dict | None = None) -> FastAPI:
-    """创建 Ctrl FastAPI 应用。"""
+    """Create the Ctrl FastAPI application."""
+
     _apply_overrides(overrides)
     configure_database(AppConfig.SQLALCHEMY_DATABASE_URI)
     configure_daily_logging(AppConfig)

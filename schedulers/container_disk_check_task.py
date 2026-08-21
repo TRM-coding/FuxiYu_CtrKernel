@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timedelta
 
 from ..config import AppConfig
+from ..extensions import session_scope
 from ..repositories import containers_repo
 from ..constant import OperationType
 from ..services import container_tasks
@@ -20,12 +21,14 @@ def check_all_containers_disk_usage_once(page_size: int = 200) -> None:
     """
     offset = 0
     while True:
-        containers = containers_repo.list_containers(
-            limit=page_size,
-            offset=offset,
-            machine_id=None,
-            user_id=None,
-        )
+        with session_scope(commit=False) as session:
+            containers = containers_repo.list_containers(
+                limit=page_size,
+                offset=offset,
+                machine_id=None,
+                user_id=None,
+                session=session,
+            )
         if not containers:
             break
 
@@ -94,16 +97,17 @@ def _evaluate_limits(container, usage: dict) -> None:
     # 持久化磁盘用量到 DB
     try:
         bind_mount_path = container_data.get("bind_mount_path")
-        containers_repo.update_container(
-            container.id,
-            commit=True,
-            disk_overlay_rw_bytes=int(overlay_rw),
-            disk_bind_mount_bytes=int(bind_mount),
-            disk_total_bytes=int(total_bytes),
-            disk_limit_bytes=int(limit_bytes),
-            disk_checked_at=datetime.utcnow(),
-            bind_mount_path=bind_mount_path,
-        )
+        with session_scope() as session:
+            containers_repo.update_container(
+                container.id,
+                disk_overlay_rw_bytes=int(overlay_rw),
+                disk_bind_mount_bytes=int(bind_mount),
+                disk_total_bytes=int(total_bytes),
+                disk_limit_bytes=int(limit_bytes),
+                disk_checked_at=datetime.utcnow(),
+                bind_mount_path=bind_mount_path,
+                session=session,
+            )
     except Exception as e:
         logger.warning("[disk-check] failed to persist disk usage for container %s: %s", container.id, e)
 
@@ -119,7 +123,9 @@ def _evaluate_limits(container, usage: dict) -> None:
     # 此检查先于全局 CONTAINER_DISK_RESPONSE_ENABLED 判断，
     # 方便在关闭响应的情况下从日志验证行为，无影响上线。
     from ..repositories.long_term_container_repo import is_long_term
-    if not is_long_term(container.id):
+    with session_scope(commit=False) as session:
+        long_term = is_long_term(container.id, session=session)
+    if not long_term:
         logger.info("[disk-check] container %s (%s) is not long-term, skip response",
                     container.id, getattr(container, 'name', '?'))
         response_enabled = False
@@ -128,7 +134,9 @@ def _evaluate_limits(container, usage: dict) -> None:
     from ..repositories import container_disk_freeze_state_repo as freeze_state_repo
     reset_pct = getattr(_app, "CONTAINER_DISK_FREEZE_RESET_PERCENT", 95)
     if usage_percent < reset_pct:
-        if freeze_state_repo.reset(container.id):
+        with session_scope() as session:
+            reset_done = freeze_state_repo.reset(container.id, session=session)
+        if reset_done:
             logger.info("[disk-check] freeze state reset: container %s (%s) usage %.1f%% < %s%%",
                         container.id, getattr(container, 'name', '?'), usage_percent, reset_pct)
             logger.info("[disk-check] OK: %s", log_msg)
@@ -274,7 +282,8 @@ def _handle_hard_limit_with_escalation(container, usage: dict, app) -> None:
     from ..repositories import container_disk_freeze_state_repo as freeze_state_repo
 
     # 记录/确认冻结状态（首次设 first_frozen_at，后续不动）
-    freeze_state = freeze_state_repo.upsert_first_frozen(container.id)
+    with session_scope() as session:
+        freeze_state = freeze_state_repo.upsert_first_frozen(container.id, session=session)
 
     # ── 宽限期检查 ──
     if freeze_state.grace_until and datetime.utcnow() < freeze_state.grace_until:
@@ -284,7 +293,8 @@ def _handle_hard_limit_with_escalation(container, usage: dict, app) -> None:
 
     # 宽限期已过期，清除
     if freeze_state.grace_until:
-        freeze_state_repo.clear_grace(container.id)
+        with session_scope() as session:
+            freeze_state_repo.clear_grace(container.id, session=session)
         logger.info("[disk-check] grace period expired for container %s (%s)",
                     container.id, getattr(container, 'name', '?'))
 
@@ -301,7 +311,8 @@ def _log_freeze_state_if_exists(container) -> None:
     """短期容器超 hard limit 时：不做动作，但记录是否存在遗留冻结状态。"""
     from ..repositories import container_disk_freeze_state_repo as freeze_state_repo
 
-    existing = freeze_state_repo.get(container.id)
+    with session_scope(commit=False) as session:
+        existing = freeze_state_repo.get(container.id, session=session)
     if existing is None:
         return
 
@@ -397,21 +408,22 @@ def _clean_mount_immediately(container) -> None:
         from ..repositories.container_mount_cleanup_repo import insert as insert_mount_cleanup
         from datetime import datetime as dt
 
-        insert_mount_cleanup(
-            container_id=container.id,
-            container_name=container.name,
-            machine_id=container.machine_id,
-            mount_path=bind_mount,
-            escalation=True,
-            removed_at=dt.utcnow(),
-            cleaned_at=dt.utcnow(),
-        )
+        with session_scope() as session:
+            insert_mount_cleanup(
+                container_id=container.id,
+                container_name=container.name,
+                machine_id=container.machine_id,
+                mount_path=bind_mount,
+                escalation=True,
+                removed_at=dt.utcnow(),
+                cleaned_at=dt.utcnow(),
+                session=session,
+            )
     except Exception as e:
         logger.warning("[disk-check] escalation: failed to record mount cleanup for %s: %s", container.id, e)
 
     try:
-        from ..repositories.machine_repo import get_machine_ip_by_id
-        machine_ip = get_machine_ip_by_id(container.machine_id)
+        machine_ip = container_tasks.get_machine_ip_by_id(container.machine_id)
         url = container_tasks.get_full_url(machine_ip, "/clean_mount")
         payload = {"config": {"mount_path": bind_mount}}
         res = container_tasks.send(url, payload, timeout=10.0)

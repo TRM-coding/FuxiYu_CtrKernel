@@ -11,6 +11,7 @@ import logging
 from datetime import datetime, timedelta
 
 from ..config import AppConfig
+from ..extensions import session_scope
 from ..repositories import container_mount_cleanup_repo, machine_repo
 from ..services.container_tasks import get_full_url, send
 
@@ -23,7 +24,8 @@ def run_mount_cleanup_once() -> None:
     after_days = int(getattr(AppConfig, "CONTAINER_MOUNT_CLEANUP_AFTER_DAYS", 14) or 14)
 
     cutoff = datetime.utcnow() - timedelta(days=after_days)
-    rows = container_mount_cleanup_repo.list_pending(cutoff)
+    with session_scope(commit=False) as session:
+        rows = container_mount_cleanup_repo.list_pending(cutoff, session=session)
 
     if not rows:
         return
@@ -32,7 +34,8 @@ def run_mount_cleanup_once() -> None:
 
     for row in rows:
         try:
-            machine_ip = machine_repo.get_machine_ip_by_id(row.machine_id)
+            with session_scope(commit=False) as session:
+                machine_ip = machine_repo.get_machine_ip_by_id(row.machine_id, session=session)
             if not machine_ip:
                 logger.warning("[mount-cleanup] skip row %s: machine %s not found", row.id, row.machine_id)
                 continue
@@ -42,7 +45,8 @@ def run_mount_cleanup_once() -> None:
             res = send(url, payload, timeout=10.0)
 
             if isinstance(res, dict) and res.get("success") == 1:
-                container_mount_cleanup_repo.mark_cleaned(row.id)
+                with session_scope() as session:
+                    container_mount_cleanup_repo.mark_cleaned(row.id, session=session)
                 logger.info("[mount-cleanup] cleaned row %s: container=%s path=%s",
                             row.id, row.container_name, row.mount_path)
             else:

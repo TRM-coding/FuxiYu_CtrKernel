@@ -1,4 +1,4 @@
-"""公告系统 API 路由。
+﻿"""公告系统 API 路由。
 
 全部端点要求 Operator 权限；认证由 FastAPI dependency 完成。
 """
@@ -9,7 +9,7 @@ from fastapi import APIRouter, Body, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
 from ..constant import AnnouncementStatus, AnnouncementTemplateCategory
-from ..models.announcement import Announcement as AnnouncementModel
+from ..extensions import session_scope
 from ..repositories import announcement_repo
 from ..services import announcement_tasks
 from .deps import require_operator
@@ -93,9 +93,15 @@ def list_templates_api(
 ):
     """列出公告模板。"""
 
-    with request.app.state.flask_app.app_context():
-        rows, total = announcement_repo.list_templates(category=category, limit=limit, offset=offset)
-    return {"success": 1, "templates": [_template_view(t) for t in rows], "total": total}
+    with session_scope(commit=False) as session:
+        rows, total = announcement_repo.list_templates(
+            category=category,
+            limit=limit,
+            offset=offset,
+            session=session,
+        )
+        templates = [_template_view(t) for t in rows]
+    return {"success": 1, "templates": templates, "total": total}
 
 
 @router.post("/templates")
@@ -115,7 +121,7 @@ async def create_template_api(
         return _error(400, "subject_template and body_template are required", "missing_field")
 
     try:
-        with request.app.state.flask_app.app_context():
+        with session_scope() as session:
             template = announcement_repo.create_template(
                 name=name,
                 subject_template=subject_template,
@@ -123,6 +129,7 @@ async def create_template_api(
                 created_by=operator_user_id,
                 description=payload.get("description"),
                 category=payload.get("category", "custom"),
+                session=session,
             )
             template_data = _template_view(template)
     except Exception:
@@ -139,8 +146,8 @@ def get_template_api(
 ):
     """查看单个模板。"""
 
-    with request.app.state.flask_app.app_context():
-        template = announcement_repo.get_template_by_id(template_id)
+    with session_scope(commit=False) as session:
+        template = announcement_repo.get_template_by_id(template_id, session=session)
         if template is not None:
             template_data = _template_view(template)
     if template is None:
@@ -157,9 +164,10 @@ async def update_template_api(
 ):
     """更新模板。"""
 
-    with request.app.state.flask_app.app_context():
+    with session_scope() as session:
         template = announcement_repo.update_template(
             template_id,
+            session=session,
             **{k: v for k, v in payload.items() if v is not None},
         )
         if template is not None:
@@ -177,13 +185,13 @@ def delete_template_api(
 ):
     """删除模板。"""
 
-    with request.app.state.flask_app.app_context():
-        template = announcement_repo.get_template_by_id(template_id)
+    with session_scope() as session:
+        template = announcement_repo.get_template_by_id(template_id, session=session)
         if template is None:
             return _error(404, "template not found", "not_found")
         if template.category == AnnouncementTemplateCategory.SYSTEM:
             return _error(400, "cannot delete system template", "cannot_delete_system_template")
-        announcement_repo.delete_template(template_id)
+        announcement_repo.delete_template(template_id, session=session)
     return {"success": 1, "message": "template deleted"}
 
 
@@ -200,9 +208,8 @@ async def resolve_targets_api(
         return _error(400, "targets must not be empty", "empty_targets")
 
     try:
-        with request.app.state.flask_app.app_context():
-            targets = [announcement_tasks.TargetEntry(**target) for target in raw_targets]
-            result = announcement_tasks.resolve_recipients(targets)
+        targets = [announcement_tasks.TargetEntry(**target) for target in raw_targets]
+        result = announcement_tasks.resolve_recipients(targets)
     except ValueError as e:
         return _error(400, str(e), str(e))
 
@@ -224,12 +231,17 @@ def list_announcements_api(
 ):
     """分页查询公告。"""
 
-    with request.app.state.flask_app.app_context():
-        rows, total = announcement_repo.list_announcements(status=status, limit=limit, offset=offset)
+    with session_scope(commit=False) as session:
+        rows, total = announcement_repo.list_announcements(
+            status=status,
+            limit=limit,
+            offset=offset,
+            session=session,
+        )
         announcements = [_announcement_view(row) for row in rows]
-        sent_count = AnnouncementModel.query.filter_by(status=AnnouncementStatus.SENT).count()
-        partial_count = AnnouncementModel.query.filter_by(status=AnnouncementStatus.PARTIAL).count()
-        failed_count = AnnouncementModel.query.filter_by(status=AnnouncementStatus.FAILED).count()
+        sent_count = announcement_repo.count_announcements_by_status(AnnouncementStatus.SENT, session=session)
+        partial_count = announcement_repo.count_announcements_by_status(AnnouncementStatus.PARTIAL, session=session)
+        failed_count = announcement_repo.count_announcements_by_status(AnnouncementStatus.FAILED, session=session)
 
     return {
         "success": 1,
@@ -249,8 +261,8 @@ def get_announcement_api(
 ):
     """查看单个公告。"""
 
-    with request.app.state.flask_app.app_context():
-        ann = announcement_repo.get_announcement_by_id(announcement_id)
+    with session_scope(commit=False) as session:
+        ann = announcement_repo.get_announcement_by_id(announcement_id, session=session)
         if ann is not None:
             announcement_data = _announcement_view(ann)
     if ann is None:
@@ -267,8 +279,7 @@ def resend_announcement_api(
     """重新发送公告。"""
 
     try:
-        with request.app.state.flask_app.app_context():
-            result = announcement_tasks.resend_announcement_service(announcement_id)
+        result = announcement_tasks.resend_announcement_service(announcement_id)
     except ValueError as e:
         reason = str(e)
         if reason == "announcement_still_sending":
@@ -285,15 +296,14 @@ def copy_announcement_as_draft_api(
 ):
     """复制公告为草稿。"""
 
-    with request.app.state.flask_app.app_context():
-        try:
-            draft = announcement_tasks.copy_announcement_as_draft_service(
-                announcement_id,
-                created_by=operator_user_id,
-            )
-            draft_id = draft.id
-        except ValueError as e:
-            return _error(404, str(e), str(e))
+    try:
+        draft = announcement_tasks.copy_announcement_as_draft_service(
+            announcement_id,
+            created_by=operator_user_id,
+        )
+        draft_id = draft.id
+    except ValueError as e:
+        return _error(404, str(e), str(e))
     return {"success": 1, "draft_id": draft_id}
 
 
@@ -305,19 +315,18 @@ def convert_announcement_to_template_api(
 ):
     """将公告转成模板。"""
 
-    with request.app.state.flask_app.app_context():
-        try:
-            template = announcement_tasks.convert_announcement_to_template_service(
-                announcement_id,
-                created_by=operator_user_id,
-            )
-            template_data = {
-                "template_id": template.id,
-                "name": template.name,
-                "body_template": template.body_template,
-            }
-        except ValueError as e:
-            return _error(404, str(e), str(e))
+    try:
+        template = announcement_tasks.convert_announcement_to_template_service(
+            announcement_id,
+            created_by=operator_user_id,
+        )
+        template_data = {
+            "template_id": template.id,
+            "name": template.name,
+            "body_template": template.body_template,
+        }
+    except ValueError as e:
+        return _error(404, str(e), str(e))
     return {"success": 1, **template_data}
 
 
@@ -329,8 +338,7 @@ def delete_announcement_api(
 ):
     """删除公告。"""
 
-    with request.app.state.flask_app.app_context():
-        ok = announcement_tasks.delete_announcement_service(announcement_id)
+    ok = announcement_tasks.delete_announcement_service(announcement_id)
     if not ok:
         return _error(404, "announcement not found", "not_found")
     return {"success": 1, "message": "announcement deleted"}
@@ -348,8 +356,7 @@ async def batch_delete_announcements_api(
     if not announcement_ids:
         return _error(400, "announcement_ids required", "missing_field")
 
-    with request.app.state.flask_app.app_context():
-        result = announcement_tasks.batch_delete_announcements_service(announcement_ids)
+    result = announcement_tasks.batch_delete_announcements_service(announcement_ids)
     return {"success": 1, **result}
 
 
@@ -362,11 +369,12 @@ def list_drafts_api(
 ):
     """列出当前 Operator 的草稿。"""
 
-    with request.app.state.flask_app.app_context():
+    with session_scope(commit=False) as session:
         rows, total = announcement_repo.list_drafts(
             created_by=operator_user_id,
             limit=limit,
             offset=offset,
+            session=session,
         )
         drafts = [_draft_view(row) for row in rows]
     return {"success": 1, "drafts": drafts, "total": total}
@@ -385,8 +393,8 @@ async def save_draft_api(
     if not title or not content:
         return _error(400, "title and content are required", "missing_field")
 
-    with request.app.state.flask_app.app_context():
-        try:
+    try:
+        with session_scope() as session:
             draft = announcement_repo.save_draft(
                 title=title,
                 content=content,
@@ -395,10 +403,11 @@ async def save_draft_api(
                 raw_content=payload.get("raw_content"),
                 targets=payload.get("targets"),
                 template_id=payload.get("template_id"),
+                session=session,
             )
             draft_id = draft.id
-        except ValueError as e:
-            return _error(404, str(e), str(e))
+    except ValueError as e:
+        return _error(404, str(e), str(e))
     return {"success": 1, "draft_id": draft_id}
 
 
@@ -410,8 +419,8 @@ def get_draft_api(
 ):
     """查看草稿。"""
 
-    with request.app.state.flask_app.app_context():
-        draft = announcement_repo.get_draft_by_id(draft_id)
+    with session_scope(commit=False) as session:
+        draft = announcement_repo.get_draft_by_id(draft_id, session=session)
         if draft is not None:
             draft_data = _draft_view(draft)
     if draft is None:
@@ -427,8 +436,8 @@ def delete_draft_api(
 ):
     """删除草稿。"""
 
-    with request.app.state.flask_app.app_context():
-        ok = announcement_repo.delete_draft(draft_id)
+    with session_scope() as session:
+        ok = announcement_repo.delete_draft(draft_id, session=session)
     if not ok:
         return _error(404, "draft not found", "not_found")
     return {"success": 1, "message": "draft deleted"}
@@ -447,8 +456,7 @@ async def batch_send_drafts_api(
     targets = [announcement_tasks.TargetEntry(**target) for target in raw_targets]
 
     try:
-        with request.app.state.flask_app.app_context():
-            result = announcement_tasks.batch_send_drafts_service(draft_ids, targets)
+        result = announcement_tasks.batch_send_drafts_service(draft_ids, targets)
     except ValueError as e:
         reason = str(e)
         status_map = {

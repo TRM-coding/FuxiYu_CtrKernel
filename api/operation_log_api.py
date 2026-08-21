@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query, Request
+﻿from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 
 from ..schemas.operation_log import OperationLogListResponse, OperationLogStatsResponse
@@ -19,7 +19,6 @@ def _error(status_code: int, message: str, error_reason: str) -> JSONResponse:
 
 @router.get("", response_model=OperationLogListResponse)
 def list_operation_logs_api(
-    request: Request,
     _: int = Depends(require_operator),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1),
@@ -31,24 +30,20 @@ def list_operation_logs_api(
     end: str | None = None,
     tz_offset_minutes: int | None = None,
 ):
-    """操作日志查询。
-
-    start/end 按前端本地时间传入，tz_offset_minutes 用于转换库内 UTC 口径。
-    """
+    """操作日志查询。"""
 
     try:
-        with request.app.state.flask_app.app_context():
-            result = operation_log_tasks.list_operation_logs(
-                page=page,
-                page_size=page_size,
-                operator_user_id=operator_user_id,
-                operation=operation,
-                target_type=target_type,
-                success=success,
-                start=start,
-                end=end,
-                tz_offset_minutes=tz_offset_minutes,
-            )
+        result = operation_log_tasks.list_operation_logs(
+            page=page,
+            page_size=page_size,
+            operator_user_id=operator_user_id,
+            operation=operation,
+            target_type=target_type,
+            success=success,
+            start=start,
+            end=end,
+            tz_offset_minutes=tz_offset_minutes,
+        )
     except Exception as e:
         return _error(500, f"query failed: {e}", "list_failed")
 
@@ -57,7 +52,6 @@ def list_operation_logs_api(
 
 @router.get("/stats", response_model=OperationLogStatsResponse)
 def operation_log_stats_api(
-    request: Request,
     _: int = Depends(require_operator),
     start: str | None = None,
     end: str | None = None,
@@ -66,12 +60,11 @@ def operation_log_stats_api(
     """操作日志统计。"""
 
     try:
-        with request.app.state.flask_app.app_context():
-            result = operation_log_tasks.operation_log_stats(
-                start=start,
-                end=end,
-                tz_offset_minutes=tz_offset_minutes,
-            )
+        result = operation_log_tasks.operation_log_stats(
+            start=start,
+            end=end,
+            tz_offset_minutes=tz_offset_minutes,
+        )
     except Exception as e:
         return _error(500, f"stats failed: {e}", "list_failed")
 

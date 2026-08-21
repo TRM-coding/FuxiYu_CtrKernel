@@ -6,11 +6,11 @@ from ...api import user_api, deps
 
 
 def _valid_token(monkeypatch):
-    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: True)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: True)
 
 
 def test_get_user_detail_requires_token(client, monkeypatch):
-    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: False)
 
     resp = client.get("/api/users/get_user_detail_information?user_id=1")
 
@@ -23,7 +23,7 @@ def test_get_user_detail_requires_user_id(client, monkeypatch):
     resp = client.get("/api/users/get_user_detail_information" )
 
     assert resp.status_code == 400
-    assert resp.get_json()["error_reason"] == "missing_user_id"
+    assert resp.json()["error_reason"] == "missing_user_id"
 
 
 def test_get_user_detail_not_found(client, monkeypatch):
@@ -43,11 +43,11 @@ def test_get_user_detail_success(client, monkeypatch):
     resp = client.get("/api/users/get_user_detail_information?user_id=1" )
 
     assert resp.status_code == 200
-    assert resp.get_json()["user_info"]["username"] == "u"
+    assert resp.json()["user_info"]["username"] == "u"
 
 
 def test_list_users_requires_token(client, monkeypatch):
-    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: False)
 
     resp = client.get("/api/users/list_all_user_bref_information")
 
@@ -62,7 +62,7 @@ def test_list_users_success(client, monkeypatch):
     resp = client.get("/api/users/list_all_user_bref_information" )
 
     assert resp.status_code == 200
-    assert resp.get_json()["users"] == [{"user_id": 1, "username": "u"}]
+    assert resp.json()["users"] == [{"user_id": 1, "username": "u"}]
 
 
 def test_list_users_task_failure(client, monkeypatch):
@@ -72,7 +72,7 @@ def test_list_users_task_failure(client, monkeypatch):
     resp = client.get("/api/users/list_all_user_bref_information" )
 
     assert resp.status_code == 500
-    assert resp.get_json()["error_reason"] == "list_failed"
+    assert resp.json()["error_reason"] == "list_failed"
 
 
 def test_change_password_success(client, monkeypatch):
@@ -93,7 +93,7 @@ def test_change_password_wrong_old_password(client, monkeypatch):
     resp = client.post("/api/users/change_password", json={"user_id": 1, "old_password": "bad", "new_password": "new"} )
 
     assert resp.status_code == 400
-    assert resp.get_json()["error_reason"] == "old_password_incorrect"
+    assert resp.json()["error_reason"] == "old_password_incorrect"
 
 
 def test_delete_user_success(client, monkeypatch):
@@ -118,7 +118,7 @@ def test_delete_user_wild_containers(client, monkeypatch):
     resp = client.post("/api/users/delete_user", json={"user_id": 1} )
 
     assert resp.status_code == 400
-    assert resp.get_json()["wild_containers"] == [144]
+    assert resp.json()["wild_containers"] == [144]
 
 
 def test_update_user_success(client, monkeypatch):
@@ -128,7 +128,7 @@ def test_update_user_success(client, monkeypatch):
     resp = client.post("/api/users/update_user", json={"user_id": 1, "fields": {"username": "updated"}} )
 
     assert resp.status_code == 200
-    assert resp.get_json()["user"] == "updated"
+    assert resp.json()["user"] == "updated"
 
 
 @pytest.mark.parametrize("reason", ["invalid_username", "no_none_ascii"])
@@ -139,4 +139,4 @@ def test_update_user_validation_errors(client, monkeypatch, reason):
     resp = client.post("/api/users/update_user", json={"user_id": 1, "fields": {"username": "bad"}} )
 
     assert resp.status_code == 400
-    assert resp.get_json()["error_reason"] == reason
+    assert resp.json()["error_reason"] == reason

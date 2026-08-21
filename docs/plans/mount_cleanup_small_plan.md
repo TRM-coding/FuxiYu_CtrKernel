@@ -1,4 +1,4 @@
-# Plan: 已删除容器的 mount 清理
+﻿# Plan: 已删除容器的 mount 清理
 
 ## 方针
 
@@ -119,8 +119,8 @@ if bind_mount:
         escalation=False,
         removed_at=datetime.utcnow(),
     )
-    db.session.add(row)
-    db.session.commit()
+    session.add(row)
+    session.flush()
 ```
 
 ### 3. 升级删除（冻结升级时，立刻清理）
@@ -144,8 +144,8 @@ if bind_mount:
         removed_at=datetime.utcnow(),
         cleaned_at=datetime.utcnow(),  # 立刻标记已清理
     )
-    db.session.add(row)
-    db.session.commit()
+    session.add(row)
+    session.flush()
     # 异步清理 Node 端：rm -rf mount_path
     _async_clean_mount(container.machine_id, bind_mount, container.name)
 ```
@@ -224,3 +224,4 @@ POST /api/clean_mount
 2. 删除容器 → 确认 `container_mount_cleanup` 有新记录
 3. mock `removed_at` 为 15 天前 → 跑清理任务 → 确认 NodeKernel 收到清理请求
 4. 触发冻结升级 → 确认 mount 被立刻清理
+

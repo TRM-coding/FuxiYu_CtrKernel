@@ -63,7 +63,6 @@ def create_user(
 def update_user(
     user_id: int,
     *,
-    commit: bool = True,
     session: Session,
     **fields,
 ) -> User | None:
@@ -71,7 +70,6 @@ def update_user(
     部分更新用户字段。
     使用示例:
         update_user(1, email="new@x.com", graduation_year=2026)
-        update_user(1, username="alice2", commit=False)  # 由调用方稍后统一提交
     """
     user = get_by_id(user_id, session=session)
     if not user:
@@ -90,10 +88,7 @@ def update_user(
             dirty = True
 
     if dirty:
-       if commit:
-           session.commit()
-       else:
-           session.flush()
+        session.flush()
     return user
 
 

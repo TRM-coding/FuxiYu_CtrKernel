@@ -1,4 +1,4 @@
-# 串行 NodeKernel 调用并发化 —— 重构契约
+﻿# 串行 NodeKernel 调用并发化 —— 重构契约
 
 ## 背景
 
@@ -11,8 +11,8 @@ N 个实体产生 N 次网络往返，延迟线性叠加。
 | 文件 | 改动 | 效果 |
 |------|------|------|
 | `services/container_service.py:463-469` | `exec_run` 前检查容器状态，stopped/exited/dead 直接 return None | 停止容器的 SSH 刷新从 4-5s → 毫秒级 |
-| `blueprints/__init__.py:231-237` | SSH 检测 4 个 `exec_run`（ss/netstat/pgrep/ps）合并为 1 个 `\|\|` 链 | 运行中容器的 SSH 检测从最多 4 次 Docker roundtrip → 1 次 |
-| `run.py:11` | `app.run()` 加 `threaded=True` | 防止慢请求阻塞其他请求排队 |
+| `api/__init__.py:231-237` | SSH 检测 4 个 `exec_run`（ss/netstat/pgrep/ps）合并为 1 个 `\|\|` 链 | 运行中容器的 SSH 检测从最多 4 次 Docker roundtrip → 1 次 |
+| `run.py:11` | `uvicorn.run()` 加 `threaded=True` | 防止慢请求阻塞其他请求排队 |
 
 ## 总体策略
 
@@ -88,7 +88,7 @@ def parallel_node_calls(
 ### 1.2 完整数据流（改后）
 
 ```
-blueprint/machine_api.py
+api/machine_api.py
   └─ list_all_machine_bref_information_api()
        │ 解析 request JSON → page_number, page_size, token, ...
        │ 验 token
@@ -186,7 +186,7 @@ for machine, probe_result in zip(machines, _probe_results):
 ### 2.2 完整数据流（改后）
 
 ```
-blueprint/container_api.py
+api/container_api.py
   └─ list_all_containers_bref_information_api()
        └─ container_tasks.list_all_container_bref_information(...)
             │
@@ -358,3 +358,4 @@ NODE_PARALLEL_ENABLED_SSH_REFRESH=false
    多线程会短暂增加 CPU 压力（当前 4 核 37% idle，有充足余量）。
 4. **原有错误语义不变**：每个 callable 的异常被捕获为 Exception 对象返回，
    调用方统一按 `isinstance(result, Exception)` 判错，等价于原串行 try/except。
+

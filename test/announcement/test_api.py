@@ -3,6 +3,7 @@
 import json
 
 from ...constant import AnnouncementStatus, AnnouncementTemplateCategory, PERMISSION
+from ...extensions import session_scope
 from ...models.announcement import Announcement, AnnouncementDraft, AnnouncementTemplate
 from ...repositories import announcement_repo
 from ..assertions import assert_json_error, assert_json_success
@@ -25,32 +26,38 @@ def _make_operator():
 
 
 def _make_announcement(user, **kw):
-    return announcement_repo.create_announcement(
-        title=kw.pop("title", "公告"),
-        content=kw.pop("content", "正文"),
-        created_by=user.id,
-        status=kw.pop("status", AnnouncementStatus.SENT),
-        **kw,
-    )
+    with session_scope() as session:
+        return announcement_repo.create_announcement(
+            title=kw.pop("title", "公告"),
+            content=kw.pop("content", "正文"),
+            created_by=user.id,
+            status=kw.pop("status", AnnouncementStatus.SENT),
+            session=session,
+            **kw,
+        )
 
 
 def _make_draft(user, **kw):
-    return announcement_repo.save_draft(
-        title=kw.pop("title", "草稿"),
-        content=kw.pop("content", "正文"),
-        created_by=user.id,
-        **kw,
-    )
+    with session_scope() as session:
+        return announcement_repo.save_draft(
+            title=kw.pop("title", "草稿"),
+            content=kw.pop("content", "正文"),
+            created_by=user.id,
+            session=session,
+            **kw,
+        )
 
 
 def _make_template(user, name="测试模板", category="custom"):
-    return announcement_repo.create_template(
-        name=name,
-        subject_template="主题{{key}}",
-        body_template="正文{{key}}",
-        created_by=user.id,
-        category=category,
-    )
+    with session_scope() as session:
+        return announcement_repo.create_template(
+            name=name,
+            subject_template="主题{{key}}",
+            body_template="正文{{key}}",
+            created_by=user.id,
+            category=category,
+            session=session,
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -176,7 +183,8 @@ def test_a13_resolve_targets_mixed(client, monkeypatch):
     user = _make_operator()
     machine = create_machine()
     from ...repositories.machine_permission_repo import add_permission
-    add_permission(machine.id, user.id)
+    with session_scope() as session:
+        add_permission(machine.id, user.id, session=session)
 
     resp = client.post(
         "/api/announcements/resolve-targets",
@@ -254,10 +262,10 @@ def test_a19_resend_sent(client, monkeypatch):
     """A-19: SENT 公告重发 → 200。"""
     mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
     user = _make_operator()
-    ann = announcement_repo.create_announcement(
+    ann = _make_announcement(
+        user,
         title="公告",
         content="正文",
-        created_by=user.id,
         status=AnnouncementStatus.SENT,
         targets=json.dumps([{"type": "user", "id": user.id}]),
     )
@@ -269,10 +277,10 @@ def test_a20_resend_sending(client, monkeypatch):
     """A-20: SENDING 公告重发 → 409。"""
     mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
     user = _make_operator()
-    ann = announcement_repo.create_announcement(
+    ann = _make_announcement(
+        user,
         title="公告",
         content="正文",
-        created_by=user.id,
         status=AnnouncementStatus.SENDING,
         targets=json.dumps([{"type": "user", "id": user.id}]),
     )
@@ -304,11 +312,11 @@ def test_a22_convert_to_template(client, monkeypatch):
     """A-22: 转模板 → 200 + template_id，正文直接保存。"""
     mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
     user = _make_operator()
-    ann = announcement_repo.create_announcement(
+    ann = _make_announcement(
+        user,
         title="GPU维护",
         content="您好，GPU-01 将于今晚维护。",
         raw_content="您好，GPU-01 将于今晚维护。",
-        created_by=user.id,
         status=AnnouncementStatus.SENT,
     )
     resp = client.post(f"/api/announcements/{ann.id}/convert-to-template", headers=_operator_headers())

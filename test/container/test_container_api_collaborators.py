@@ -3,8 +3,8 @@ from ...services import container_tasks
 
 
 def _auth(monkeypatch, *, valid=True, user_id=1):
-    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: valid)
-    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token: user_id)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: valid)
+    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token, **kwargs: user_id)
 
 
 def test_add_collaborator_api_container_offline_returns_400(client, monkeypatch):

@@ -1,4 +1,5 @@
 import pytest
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from ...constant import ContainerStatus, MachineStatus, PERMISSION, ROLE
@@ -17,7 +18,8 @@ def test_create_container_success_sends_node_then_creates_db_record_and_root_bin
 ):
     owner = create_user(username="owner_lifecycle")
     machine = create_machine(max_shared_gb=8, max_memory_gb=64)
-    machine_permission_repo.add_permission(machine.id, owner.id)
+    machine_permission_repo.add_permission(machine.id, owner.id, session=db_session)
+    db_session.commit()
     calls = mock_node_send(NODE_SUCCESS_TRUE)
 
     assert container_tasks.Create_container(
@@ -28,7 +30,9 @@ def test_create_container_success_sends_node_then_creates_db_record_and_root_bin
         operator_user_id=owner.id,
     ) is True
 
-    created = Container.query.filter_by(name=container_info.NAME, machine_id=machine.id).first()
+    created = db_session.scalars(
+        select(Container).where(Container.name == container_info.NAME, Container.machine_id == machine.id)
+    ).first()
     assert created is not None
     assert created.container_status == ContainerStatus.CREATING
     bindings = container_tasks.get_container_bindings(created.id)
@@ -121,7 +125,7 @@ def test_create_container_node_failure_does_not_create_local_record(
         container_tasks.Create_container(owner.username, machine.id, container_info)
 
     assert excinfo.value.reason == "docker_init_failed"
-    assert Container.query.filter_by(name=container_info.NAME).first() is None
+    assert db_session.scalars(select(Container).where(Container.name == container_info.NAME)).first() is None
 
 
 def test_create_container_success_after_node_ack(
@@ -136,7 +140,7 @@ def test_create_container_success_after_node_ack(
 
     assert container_tasks.Create_container(owner.username, machine.id, container_info) is True
 
-    assert Container.query.filter_by(name=container_info.NAME).first() is not None
+    assert db_session.scalars(select(Container).where(Container.name == container_info.NAME)).first() is not None
 
 
 @pytest.mark.parametrize("node_response", [NODE_REMOVE_SUCCESS, NODE_REMOVE_NOT_FOUND])
@@ -148,12 +152,14 @@ def test_remove_container_success_deletes_bindings_and_container(
     node_response,
 ):
     root, _machine, container = container_graph
+    container_id = container.id
     mock_node_send(node_response)
 
-    assert container_tasks.remove_container(container.id, operator_user_id=root.id) is True
+    assert container_tasks.remove_container(container_id, operator_user_id=root.id) is True
 
-    assert Container.query.get(container.id) is None
-    assert container_tasks.get_container_bindings(container.id) == []
+    db_session.expire_all()
+    assert db_session.get(Container, container_id) is None
+    assert container_tasks.get_container_bindings(container_id) == []
 
 
 def test_remove_container_node_failed_raises_and_keeps_local_record(
@@ -169,7 +175,7 @@ def test_remove_container_node_failed_raises_and_keeps_local_record(
         container_tasks.remove_container(container.id, operator_user_id=root.id)
 
     assert excinfo.value.reason == "remove_failed"
-    assert Container.query.get(container.id) is not None
+    assert db_session.get(Container, container.id) is not None
 
 
 def test_start_container_success(

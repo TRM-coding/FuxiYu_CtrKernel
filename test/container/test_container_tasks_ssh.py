@@ -93,8 +93,12 @@ def test_get_last_ssh_time_reads_db_record(db_session, container_graph):
     """getter 只查库：读 WSS 推送落库的 ssh 记录。"""
     _root, machine, container = container_graph
     container_ssh_login_repo.upsert_last_ssh_login_time(
-        machine.id, container.id, "2026-06-17T03:40:00"
+        machine.id,
+        container.id,
+        "2026-06-17T03:40:00",
+        session=db_session,
     )
+    db_session.commit()
 
     last_time = container_tasks.get_container_last_ssh_login_time(container.id)
 

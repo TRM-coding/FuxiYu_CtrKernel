@@ -1,7 +1,4 @@
 def _payload(response):
-    """兼容 Flask client（get_json）与 FastAPI TestClient（json）。"""
-    if hasattr(response, "get_json"):
-        return response.get_json()
     return response.json()
 
 

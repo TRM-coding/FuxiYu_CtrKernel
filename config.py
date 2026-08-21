@@ -133,7 +133,7 @@ class AppConfig(SqlConfig, KeyConfig):
 
 def get_config(env: str | None = None):
     """
-    返回用于 Flask app.config.from_object 的配置类。
+    返回应用运行配置类。
     目前仅提供单一配置，如需可根据 env 扩展。
     """
     return AppConfig

@@ -1,9 +1,11 @@
-# extensions.py
 """应用扩展与数据库会话入口。
 
-新范式只保留显式 session：调用方用 session_scope 打开工作单元，并把 session
-传给 repo。repo 不再隐式读取全局 session，避免 Flask app context 式依赖复活。
+数据库访问固定为显式 session 范式：
+API dependency / scheduler / WSS 进入 service/tasks，由 service/tasks 使用
+session_scope 打开工作单元，并把 session 显式传给 repo。repo 只负责
+query/write/flush，不负责 commit/rollback。
 """
+
 from collections.abc import Iterator
 from contextlib import contextmanager
 import os
@@ -32,13 +34,12 @@ Base = declarative_base()
 
 
 class _DbNamespace:
-    """SQLAlchemy 构造命名空间。
+    """SQLAlchemy 声明式模型命名空间。
 
-    临时保留给尚未迁完的 model 使用；它不提供隐式 current_session。
+    这里只提供模型声明所需的类型和元数据操作，不暴露隐式事务入口。
     """
 
     Model = Base
-    session = SessionRegistry
 
     def __getattr__(self, name: str):
         import sqlalchemy as sa
@@ -63,8 +64,9 @@ db = _DbNamespace()
 def configure_database(database_url: str) -> None:
     """配置数据库连接。
 
-    create_app 在读取配置后调用一次；测试覆盖 DATABASE_URL 时也走同一入口。
+    create_app 读取配置后调用；测试覆盖 DATABASE_URL 时也使用同一入口。
     """
+
     global engine
     SessionRegistry.remove()
     engine.dispose()
@@ -74,11 +76,12 @@ def configure_database(database_url: str) -> None:
 
 @contextmanager
 def session_scope(*, commit: bool = True) -> Iterator[Session]:
-    """统一的 repo 写入作用域。
+    """统一的数据库工作单元。
 
-    成功后按需提交，异常时回滚。需要组合事务时，在同一个 scope 内把 session
-    显式传给多个 repo。
+    成功后按需提交，异常时回滚。需要组合事务时，在同一个 scope 内把
+    session 显式传给多个 repo。
     """
+
     managed = SessionLocal()
     try:
         yield managed

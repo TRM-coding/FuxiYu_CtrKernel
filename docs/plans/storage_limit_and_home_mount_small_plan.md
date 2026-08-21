@@ -1,4 +1,4 @@
-# Plan: 容器磁盘用量检测与管控
+﻿# Plan: 容器磁盘用量检测与管控
 
 ## 方针
 
@@ -56,7 +56,7 @@ def get_disk_usage(container_name: str) -> dict
 
 ### 1.2 NodeKernel — 端点
 
-**文件**: `/home/wyw/FuxiYu_NodeKernel/blueprints/__init__.py`
+**文件**: `/home/wyw/FuxiYu_NodeKernel/network/api.py`
 
 ```
 POST /api/check_disk_usage
@@ -233,7 +233,7 @@ detect():
 
 ### 3.2 新增端点
 
-**文件**: `/home/wyw/FuxiYu_NodeKernel/blueprints/__init__.py`
+**文件**: `/home/wyw/FuxiYu_NodeKernel/network/api.py`
 
 ```
 POST /api/pause_container
@@ -279,3 +279,4 @@ POST /api/pause_container
 2. **Phase 2**：新建容器 → 加合作者 → ssh 登录 → `ls -la /home/` 确认符号链接 → 验证宿主机 `.collaborators/` 目录有数据
 3. **Phase 3**：手动 `docker pause` 测试容器 → 验证无法 ssh/操作 → `docker unpause` 恢复 → 模拟写满触发自动 pause
 4. **Phase 4**：前端确认磁盘用量展示正确
+

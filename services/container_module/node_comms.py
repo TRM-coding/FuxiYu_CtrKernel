@@ -12,6 +12,7 @@ import traceback
 
 from ...config import CommsConfig
 from ...constant import ContainerStatus
+from ...extensions import session_scope
 from ...repositories import machine_repo, containers_repo
 from ...repositories.container_ssh_login_repo import upsert_last_ssh_login_time
 from ..machine_tasks import is_machine_in_maintenance, is_machine_online_remote
@@ -134,7 +135,8 @@ def _ensure_machine_online_for_operation(machine_id: int, operation: str = ''):
     这里检查机器在线状态的主要目的是为了在执行诸如创建/删除/修改容器等操作之前，先验证目标机器是否在线，以避免不必要的远程调用和更快地反馈给用户。虽然最终的远程调用也会有类似的检查，但这个预检查可以节省资源并提供更即时的错误响应。
     """
     try:
-        m = machine_repo.get_by_id(machine_id)
+        with session_scope(commit=False) as session:
+            m = machine_repo.get_by_id(machine_id, session=session)
     except Exception:
         m = None
     if not m:
@@ -153,12 +155,9 @@ def _node_probe_container(container, machine_ip: str, _app=None) -> dict | None:
     等同于原 for 循环内 ``get_container_status(machine_ip, container.name)``，
     抽取为独立函数以适配 ``parallel_node_calls``。
 
-    *_app* 可选传入 Flask app 实例，用于线程池内推送 app context。
+    *_app* 保留兼容旧调用签名，不再使用。
     """
     try:
-        if _app is not None:
-            with _app.app_context():
-                return get_container_status(machine_ip, container.name)
         return get_container_status(machine_ip, container.name)
     except Exception:
         return None
@@ -330,35 +329,32 @@ def register_machine(
     limits = _default_resource_limits(hardware)
     machine_type = MachineTypes.GPU if limits["gpu_number"] > 0 else MachineTypes.CPU
     try:
-        machine = machine_repo.create_machine(
-            machinename=machine_name,
-            machine_ip=machine_ip,
-            machine_type=machine_type,
-            machine_description=machine_description or f"enrolled via TOFU register ({machine_ip})",
-            cpu_core_number=limits["cpu_core_number"],
-            gpu_number=limits["gpu_number"],
-            gpu_type=limits["gpu_type"],
-            memory_size=limits["memory_size_gb"],
-            max_shared_gb=2,
-            disk_size=limits["disk_size_gb"],
-            max_cpu_core_number=limits["max_cpu_core_number"],
-            max_gpu_number=limits["max_gpu_number"],
-            max_memory_gb=limits["max_memory_gb"],
-        )
+        with session_scope() as session:
+            machine = machine_repo.create_machine(
+                machinename=machine_name,
+                machine_ip=machine_ip,
+                machine_type=machine_type,
+                machine_description=machine_description or f"enrolled via TOFU register ({machine_ip})",
+                cpu_core_number=limits["cpu_core_number"],
+                gpu_number=limits["gpu_number"],
+                gpu_type=limits["gpu_type"],
+                memory_size=limits["memory_size_gb"],
+                max_shared_gb=2,
+                disk_size=limits["disk_size_gb"],
+                max_cpu_core_number=limits["max_cpu_core_number"],
+                max_gpu_number=limits["max_gpu_number"],
+                max_memory_gb=limits["max_memory_gb"],
+                session=session,
+            )
+            machine_repo.update_machine(
+                machine.id,
+                node_uid=uid,
+                node_cert_fingerprint=fingerprint,
+                cert_pinned_at=datetime.datetime.utcnow(),
+                session=session,
+            )
     except Exception as e:
-        raise NodeServiceError(f"register_machine failed: create machine record: {e}",
-                               reason="create_machine_failed") from e
-
-    # 6. 落库双凭据
-    try:
-        machine_repo.update_machine(
-            machine.id,
-            node_uid=uid,
-            node_cert_fingerprint=fingerprint,
-            cert_pinned_at=datetime.datetime.utcnow(),
-        )
-    except Exception as e:
-        raise NodeServiceError(f"register_machine failed: persist credentials for machine {machine.id}: {e}",
+        raise NodeServiceError(f"register_machine failed: create/persist machine record: {e}",
                                reason="persist_failed") from e
 
     try:
@@ -408,7 +404,8 @@ _NODE_STATUS_TO_CTRL = {
 def _container_by_name(name: str):
     """快照按 name 归位到 DB 容器；未登记（Node 有、Ctrl 无）→ None，由 delete 事件语义处理。"""
     try:
-        return containers_repo.get_by_container_name(name)
+        with session_scope(commit=False) as session:
+            return containers_repo.get_by_container_name(name, session=session)
     except Exception:
         return None
 
@@ -418,27 +415,26 @@ def apply_container_status_snapshot(data: dict) -> dict:
     updated = skipped = 0
     if not isinstance(data, dict):
         return {"updated": updated, "skipped": skipped}
-    for name, entry in data.items():
-        try:
-            ctrl_status = _NODE_STATUS_TO_CTRL.get(str((entry or {}).get("status", "")))
-            if ctrl_status is None:
-                skipped += 1
-                continue
-            container = _container_by_name(name)
-            if container is None:
-                skipped += 1
-                continue
-            containers_repo.update_container(container.id, commit=False,
-                                             container_status=ctrl_status)
-            updated += 1
-        except Exception as e:
-            logger.warning("apply status snapshot failed for %s: %s", name, e)
-            skipped += 1
-    if updated:
-        try:
-            containers_repo.apply_snapshot_updates()
-        except Exception as e:
-            logger.warning("commit status snapshot failed: %s", e)
+    try:
+        with session_scope() as session:
+            for name, entry in data.items():
+                ctrl_status = _NODE_STATUS_TO_CTRL.get(str((entry or {}).get("status", "")))
+                if ctrl_status is None:
+                    skipped += 1
+                    continue
+                container = containers_repo.get_by_container_name(name, session=session)
+                if container is None:
+                    skipped += 1
+                    continue
+                containers_repo.update_container(
+                    container.id,
+                    container_status=ctrl_status,
+                    session=session,
+                )
+                updated += 1
+    except Exception as e:
+        logger.warning("apply status snapshot failed: %s", e)
+        skipped += 1
     return {"updated": updated, "skipped": skipped}
 
 
@@ -447,28 +443,30 @@ def apply_last_ssh_snapshot(data: dict) -> dict:
     updated = skipped = 0
     if not isinstance(data, dict):
         return {"updated": updated, "skipped": skipped}
-    for name, entry in data.items():
-        try:
-            last_time = (entry or {}).get("last_ssh_connect_time")
-            if not last_time:
-                skipped += 1
-                continue
-            container = _container_by_name(name)
-            if container is None:
-                skipped += 1
-                continue
-            parsed = _parse_last_ssh_time(str(last_time))
-            if parsed is not None:
-                last_time = parsed.strftime('%Y-%m-%dT%H:%M:%S')
-            upsert_last_ssh_login_time(
-                machine_id=container.machine_id,
-                container_id=container.id,
-                last_ssh_login_time=last_time,
-            )
-            updated += 1
-        except Exception as e:
-            logger.warning("apply last_ssh snapshot failed for %s: %s", name, e)
-            skipped += 1
+    try:
+        with session_scope() as session:
+            for name, entry in data.items():
+                last_time = (entry or {}).get("last_ssh_connect_time")
+                if not last_time:
+                    skipped += 1
+                    continue
+                container = containers_repo.get_by_container_name(name, session=session)
+                if container is None:
+                    skipped += 1
+                    continue
+                parsed = _parse_last_ssh_time(str(last_time))
+                if parsed is not None:
+                    last_time = parsed.strftime('%Y-%m-%dT%H:%M:%S')
+                upsert_last_ssh_login_time(
+                    machine_id=container.machine_id,
+                    container_id=container.id,
+                    last_ssh_login_time=last_time,
+                    session=session,
+                )
+                updated += 1
+    except Exception as e:
+        logger.warning("apply last_ssh snapshot failed: %s", e)
+        skipped += 1
     return {"updated": updated, "skipped": skipped}
 
 
@@ -478,33 +476,29 @@ def apply_disk_usage_snapshot(data: dict) -> dict:
     if not isinstance(data, dict):
         return {"updated": updated, "skipped": skipped}
     containers = data.get("containers") or {}
-    for name, usage in containers.items():
-        try:
-            if not isinstance(usage, dict):
-                skipped += 1
-                continue
-            container = _container_by_name(name)
-            if container is None:
-                skipped += 1
-                continue
-            containers_repo.update_container(
-                container.id,
-                commit=False,
-                disk_overlay_rw_bytes=usage.get("overlay_rw_bytes"),
-                disk_bind_mount_bytes=usage.get("bind_mount_bytes"),
-                disk_total_bytes=usage.get("total_bytes"),
-                bind_mount_path=usage.get("bind_mount_path"),
-                disk_checked_at=datetime.datetime.utcnow(),
-            )
-            updated += 1
-        except Exception as e:
-            logger.warning("apply disk snapshot failed for %s: %s", name, e)
-            skipped += 1
-    if updated:
-        try:
-            containers_repo.apply_snapshot_updates()
-        except Exception as e:
-            logger.warning("commit disk snapshot failed: %s", e)
+    try:
+        with session_scope() as session:
+            for name, usage in containers.items():
+                if not isinstance(usage, dict):
+                    skipped += 1
+                    continue
+                container = containers_repo.get_by_container_name(name, session=session)
+                if container is None:
+                    skipped += 1
+                    continue
+                containers_repo.update_container(
+                    container.id,
+                    disk_overlay_rw_bytes=usage.get("overlay_rw_bytes"),
+                    disk_bind_mount_bytes=usage.get("bind_mount_bytes"),
+                    disk_total_bytes=usage.get("total_bytes"),
+                    bind_mount_path=usage.get("bind_mount_path"),
+                    disk_checked_at=datetime.datetime.utcnow(),
+                    session=session,
+                )
+                updated += 1
+    except Exception as e:
+        logger.warning("apply disk snapshot failed: %s", e)
+        skipped += 1
     return {"updated": updated, "skipped": skipped}
 
 
@@ -524,7 +518,8 @@ def apply_sys_snapshot(data: dict, machine_id: int | None = None) -> dict:
 
     machine = None
     try:
-        machine = machine_repo.get_by_id(machine_id)
+        with session_scope(commit=False) as session:
+            machine = machine_repo.get_by_id(machine_id, session=session)
     except Exception:
         machine = None
     if machine is None:
@@ -574,7 +569,8 @@ def apply_snapshot_batch(batch: dict) -> dict:
     node_uid = batch.get("node_uid")
     if node_uid:
         try:
-            machine = machine_repo.get_by_uid(node_uid)
+            with session_scope(commit=False) as session:
+                machine = machine_repo.get_by_uid(node_uid, session=session)
             machine_id = machine.id if machine else None
         except Exception:
             machine_id = None
@@ -612,7 +608,8 @@ def probe_machine_connectivity(machine_id: int, attempts: int = CONNECTIVITY_PRO
     - 连续 attempts 次网络不达 → False（判宿主机离线，容器派生 offline 由展示层完成）
     """
     try:
-        machine = machine_repo.get_by_id(machine_id)
+        with session_scope(commit=False) as session:
+            machine = machine_repo.get_by_id(machine_id, session=session)
     except Exception:
         machine = None
     if not machine:
@@ -623,8 +620,13 @@ def probe_machine_connectivity(machine_id: int, attempts: int = CONNECTIVITY_PRO
 
     probe_name = None
     try:
-        probe_containers = containers_repo.list_containers(
-            limit=1, offset=0, machine_id=machine_id)
+        with session_scope(commit=False) as session:
+            probe_containers = containers_repo.list_containers(
+                limit=1,
+                offset=0,
+                machine_id=machine_id,
+                session=session,
+            )
         if probe_containers:
             probe_name = getattr(probe_containers[0], 'name', None)
     except Exception:
@@ -655,7 +657,7 @@ def probe_machine_connectivity(machine_id: int, attempts: int = CONNECTIVITY_PRO
 #      TLS 层校验 Node 必须持有已 pin 的自签证书私钥（传输层凭证，双凭据之一）
 #   2. 注册 @app.websocket("/ws/node") 指向本函数
 #   3. 断线 → 由挂载方调用 probe_machine_connectivity 回退探测（连续两次不达判宿主机离线）
-# 应用层 session：落库需 Flask app context（apply_* 用 db.session），挂载方包一层 ctx。
+# 应用层落库按统一 session_scope 范式处理，不再依赖 app_context。
 
 def _handle_container_deleted(container_name: str) -> None:
     """Node 推 delete 帧：容器在 Node 侧消失 → 抹 Ctrl DB 记录（绑定 + 容器行）。
@@ -665,13 +667,14 @@ def _handle_container_deleted(container_name: str) -> None:
     """
     try:
         from ...repositories.usercontainer_repo import remove_binding
-        container = containers_repo.get_by_container_name(container_name)
-        if container is None:
-            logger.debug("handle_node_ws delete: container %r already gone (skip)", container_name)
-            return
-        container_id, machine_id = container.id, container.machine_id
-        remove_binding(0, container_id, all=True)
-        containers_repo.delete_container(container_id)
+        with session_scope() as session:
+            container = containers_repo.get_by_container_name(container_name, session=session)
+            if container is None:
+                logger.debug("handle_node_ws delete: container %r already gone (skip)", container_name)
+                return
+            container_id, machine_id = container.id, container.machine_id
+            remove_binding(0, container_id, all=True, session=session)
+            containers_repo.delete_container(container_id, session=session)
         logger.warning("handle_node_ws delete: container %r (id=%s) removed from DB (vanished on node)",
                        container_name, container_id)
         # 审计：外部消失是删除的另一条路径（trigger=node_vanished），与 api/cleanup 一致入 op-log
@@ -736,7 +739,8 @@ async def handle_node_ws(websocket) -> None:
         return
 
     try:
-        machine = machine_repo.get_by_uid(uid)
+        with session_scope(commit=False) as session:
+            machine = machine_repo.get_by_uid(uid, session=session)
     except Exception as e:
         logger.warning("handle_node_ws: get_by_uid failed: %s", e)
         machine = None
@@ -762,7 +766,6 @@ async def handle_node_ws(websocket) -> None:
                 logger.warning("handle_node_ws: non-dict frame from %s", uid)
                 continue
             if frame.get("type") == "snapshot_batch":
-                # 落库需 Flask app context——挂载方（ASGI 桥接）负责包 ctx
                 apply_snapshot_batch(frame)
             elif frame.get("type") == "delete":
                 # 容器在 Node 侧消失（外部删除/对账清理）→ 抹 Ctrl DB 记录。

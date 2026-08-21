@@ -24,8 +24,7 @@ from fastapi import FastAPI, WebSocket
 from FuxiYu_CtrKernel import create_app
 from FuxiYu_CtrKernel.config import CommsConfig
 from FuxiYu_CtrKernel.constant import ContainerStatus, MachineTypes
-from FuxiYu_CtrKernel.extensions import db
-from FuxiYu_CtrKernel.models.machine import Machine
+from FuxiYu_CtrKernel.extensions import session_scope
 from FuxiYu_CtrKernel.repositories import machine_repo
 from FuxiYu_CtrKernel.services.container_module import node_comms
 from FuxiYu_CtrKernel.test.factories import create_container, create_machine
@@ -161,15 +160,15 @@ def test_register_machine_builds_record_pin_chain_and_wss_reload_request(app, tm
     ctrl_certs = ensure_ctrl_certificates()
 
     with _node_https_server(tmp_path, port, ctrl_certs.ca_cert):
-        with app.app_context():
-            result = node_comms.register_machine(
-                machine_name="node-it-01",
-                machine_ip="127.0.0.1",
-                machine_description="integration node",
-                timeout=5.0,
-            )
+        result = node_comms.register_machine(
+            machine_name="node-it-01",
+            machine_ip="127.0.0.1",
+            machine_description="integration node",
+            timeout=5.0,
+        )
 
-            machine = Machine.query.get(result["machine_id"])
+        with session_scope(commit=False) as session:
+            machine = machine_repo.get_by_id(result["machine_id"], session=session)
             assert machine is not None
             assert machine.machine_type == MachineTypes.GPU
             assert machine.cpu_core_number == 8
@@ -211,11 +210,13 @@ def _ctrl_wss_server(app, tmp_path: Path, node_cert: Path, port: int, monkeypatc
 
     @wss_app.websocket("/ws/node")
     async def ws_node(websocket: WebSocket):
-        with app.app_context():
-            uid = websocket.query_params.get("uid")
-            if uid and machine_repo.get_by_uid(uid) is None:
+        uid = websocket.query_params.get("uid")
+        if uid:
+            with session_scope(commit=False) as session:
+                machine = machine_repo.get_by_uid(uid, session=session)
+            if machine is None:
                 logging.getLogger(__name__).error("test WSS cannot resolve uid %s", uid)
-            await handle_node_ws(websocket)
+        await handle_node_ws(websocket)
 
     chain = rebuild_pinned_chain()
     config = uvicorn.Config(
@@ -282,8 +283,6 @@ def test_ctrl_wss_accepts_pinned_node_certificate_and_applies_snapshot(app, tmp_
             "SQLALCHEMY_DATABASE_URI": f"sqlite:///{test_db}",
         }
     )
-    flask_app = fastapi_app.state.flask_app
-
     node_cert = tmp_path / "wss-node" / "node_cert.pem"
     node_key = tmp_path / "wss-node" / "node_key.pem"
     monkeypatch.setenv("NODE_TLS_CERT_FILE", str(node_cert))
@@ -292,33 +291,32 @@ def test_ctrl_wss_accepts_pinned_node_certificate_and_applies_snapshot(app, tmp_
 
     port = _free_port()
     uid = "integration-node-uid"
-    with flask_app.app_context():
-        db.create_all()
-        machine = create_machine(
-            machine_name="wss-it-machine",
-            machine_ip="127.0.0.1",
-            machine_type=MachineTypes.GPU,
-            cpu_core_number=8,
-            gpu_number=0,
-            memory_size_gb=32,
-            disk_size_gb=200,
-        )
+    machine = create_machine(
+        machine_name="wss-it-machine",
+        machine_ip="127.0.0.1",
+        machine_type=MachineTypes.GPU,
+        cpu_core_number=8,
+        gpu_number=0,
+        memory_size_gb=32,
+        disk_size_gb=200,
+    )
+    with session_scope() as session:
         machine_repo.update_machine(
             machine.id,
             node_uid=uid,
             node_cert_fingerprint=certificate_sha256_fingerprint(node_files.cert_file),
+            session=session,
         )
-        container = create_container(machine=machine, name="wss_it_c", status=ContainerStatus.ONLINE)
-        machine_id = machine.id
-        container_id = container.id
+    container = create_container(machine=machine, name="wss_it_c", status=ContainerStatus.ONLINE)
+    machine_id = machine.id
+    container_id = container.id
 
-    with _ctrl_wss_server(flask_app, tmp_path, node_files.cert_file, port, monkeypatch) as ctrl_certs:
+    with _ctrl_wss_server(fastapi_app, tmp_path, node_files.cert_file, port, monkeypatch) as ctrl_certs:
         asyncio.run(_send_wss_snapshot(port, uid, node_files.cert_file, node_files.key_file, ctrl_certs.ca_cert))
 
-    with flask_app.app_context():
-        db.session.expire_all()
-        refreshed = machine_repo.get_by_id(machine_id)
-        refreshed_container = db.session.get(type(container), container_id)
+    with session_scope(commit=False) as session:
+        refreshed = machine_repo.get_by_id(machine_id, session=session)
+        refreshed_container = session.get(type(container), container_id)
         assert refreshed is not None
         assert refreshed_container is not None
         assert refreshed_container.container_status == ContainerStatus.OFFLINE

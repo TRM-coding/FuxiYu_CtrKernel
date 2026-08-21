@@ -198,7 +198,8 @@ def Change_password(user: User, old_password: str, new_password: str) -> bool:
 #注销用户
 def Delete_user(user_id: int) -> bool:
     # 先移除用户与所有容器的绑定关系
-    res = usercontainer_repo.remove_user_from_all_containers(user_id)
+    with session_scope(commit=False) as session:
+        res = usercontainer_repo.remove_user_from_all_containers(user_id, session=session)
 
     # 检查返回结果
 
@@ -209,6 +210,25 @@ def Delete_user(user_id: int) -> bool:
             setattr(e, 'wild_containers', wild)
             raise e
         return False
+
+    try:
+        from . import container_tasks
+
+        for item in res.get("transfer_required", []) or []:
+            cid = item.get("container_id")
+            new_root_uid = item.get("new_root_user_id")
+            if not container_tasks.update_role(container_id=cid, user_id=new_root_uid, updated_role=ROLE.ROOT):
+                return False
+            if not container_tasks.update_role(container_id=cid, user_id=user_id, updated_role=ROLE.COLLABORATOR):
+                return False
+            if not container_tasks.remove_collaborator(container_id=cid, user_id=user_id):
+                return False
+
+        for cid in res.get("removable", []) or []:
+            if not container_tasks.remove_collaborator(container_id=cid, user_id=user_id):
+                return False
+    except Exception:
+        raise
 
     # 最终删除用户
     with session_scope() as session:
@@ -241,8 +261,11 @@ def Get_user_detail_information(user_id: int)->user_detail_information:
 
     # get container bindings for this user
     # compute container ids and counts using centralized helper
-    counts = usercontainer_repo.compute_user_container_counts(user.id)
+    with session_scope(commit=False) as session:
+        counts = usercontainer_repo.compute_user_container_counts(user.id, session=session)
     container_ids = counts.get('container_ids', [])
+    with session_scope(commit=False) as session:
+        long_term_count = long_term_container_repo.count_by_user(user.id, session=session)
     return user_detail_information(
         user_id=user.id,
         username=user.username,
@@ -253,7 +276,7 @@ def Get_user_detail_information(user_id: int)->user_detail_information:
         amount_of_container=counts.get('total', 0),
         amount_of_functional_container=counts.get('functional', 0),
         amount_of_managed_container=counts.get('managed', 0),
-        amount_of_long_term_container=long_term_container_repo.count_by_user(user.id),
+        amount_of_long_term_container=long_term_count,
     )
 #####################################
 
@@ -275,13 +298,16 @@ def List_all_user_bref_information(page_number:int, page_size:int)->list[user_br
     result: list[user_bref_information] = []
     for u in users:
         # Use centralized helper to compute container counts for this user
-        counts = usercontainer_repo.compute_user_container_counts(u.id)
+        with session_scope(commit=False) as session:
+            counts = usercontainer_repo.compute_user_container_counts(u.id, session=session)
         container_ids = counts.get('container_ids', [])
         total = counts.get('total', 0)
         functional = counts.get('functional', 0)
         managed = counts.get('managed', 0)
 
         # Optionally use containers_repo to validate container ids or fetch additional info
+        with session_scope(commit=False) as session:
+            long_term_count = long_term_container_repo.count_by_user(u.id, session=session)
         result.append(user_bref_information(
             user_id=u.id,
             username=u.username,
@@ -291,7 +317,7 @@ def List_all_user_bref_information(page_number:int, page_size:int)->list[user_br
             amount_of_container=total,
             amount_of_functional_container=functional,
             amount_of_managed_container=managed,
-            amount_of_long_term_container=long_term_container_repo.count_by_user(u.id),
+            amount_of_long_term_container=long_term_count,
         ))
     return result
 #####################################

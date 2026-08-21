@@ -4,7 +4,7 @@ from itertools import count
 from werkzeug.security import generate_password_hash
 
 from ..constant import ContainerStatus, MachineStatus, MachineTypes, PERMISSION, ROLE
-from ..extensions import db
+from ..extensions import SessionRegistry
 from ..models.authentications import Authentication
 from ..models.containers import Container
 from ..models.machine import Machine
@@ -42,8 +42,8 @@ def create_user(
         graduation_year=str(graduation_year),
         permission=permission,
     )
-    db.session.add(user)
-    db.session.commit()
+    SessionRegistry.add(user)
+    SessionRegistry.commit()
     return user
 
 
@@ -53,8 +53,8 @@ def create_auth(user: User, *, token: str | None = None, expires_at: datetime | 
         user_id=user.id,
         expires_at=expires_at or (datetime.utcnow() + timedelta(hours=1)),
     )
-    db.session.add(auth)
-    db.session.commit()
+    SessionRegistry.add(auth)
+    SessionRegistry.commit()
     return auth
 
 
@@ -94,8 +94,8 @@ def create_machine(
         disk_size_gb=disk_size_gb,
         machine_description=machine_description,
     )
-    db.session.add(machine)
-    db.session.commit()
+    SessionRegistry.add(machine)
+    SessionRegistry.commit()
     return machine
 
 
@@ -124,8 +124,8 @@ def create_container(
         gpu_number=gpu_number,
         cpu_number=cpu_number,
     )
-    db.session.add(container)
-    db.session.commit()
+    SessionRegistry.add(container)
+    SessionRegistry.commit()
     return container
 
 
@@ -141,7 +141,8 @@ def create_container_graph(
     root_user = root_user or create_user()
     machine = machine or create_machine()
     container = container or create_container(machine=machine)
-    machine_permission_repo.add_permission(machine.id, root_user.id)
+    machine_permission_repo.add_permission(machine.id, root_user.id, session=SessionRegistry)
+    SessionRegistry.commit()
     bind_user_container(root_user, container, role=ROLE.ROOT, username=root_username)
     if collaborator_user is not None:
         bind_user_container(
@@ -168,6 +169,6 @@ def bind_user_container(
         username=username or ("root" if role == ROLE.ROOT else user.username),
         public_key=public_key,
     )
-    db.session.add(binding)
-    db.session.commit()
+    SessionRegistry.add(binding)
+    SessionRegistry.commit()
     return binding

@@ -1,7 +1,7 @@
 import pytest
 
 from ...constant import MachineStatus, MachineTypes
-from ...models.machine import Machine
+from ...repositories import machine_repo
 from ...services import machine_tasks
 from ..factories import create_machine
 
@@ -29,7 +29,7 @@ def _machine_kwargs(**overrides):
 def test_add_machine_success_creates_machine(db_session):
     assert machine_tasks.Add_machine(**_machine_kwargs()) is True
 
-    machine = Machine.query.filter_by(machine_name="task_machine").first()
+    machine = machine_repo.get_by_name("task_machine", session=db_session)
     assert machine is not None
     assert machine.machine_ip == "10.0.0.1"
 
@@ -42,7 +42,7 @@ def test_add_machine_with_null_max_shared_creates_machine(db_session):
     """
     assert machine_tasks.Add_machine(**_machine_kwargs(max_shared_gb=None)) is True
 
-    machine = Machine.query.filter_by(machine_name="task_machine").first()
+    machine = machine_repo.get_by_name("task_machine", session=db_session)
     assert machine is not None
     assert machine.machine_ip == "10.0.0.1"
 
@@ -82,11 +82,13 @@ def test_add_machine_rejects_invalid_shared_memory_config(db_session, field, val
 def test_remove_machine_deletes_each_id(db_session):
     m1 = create_machine(machine_name="remove_1")
     m2 = create_machine(machine_name="remove_2")
+    m1_id, m2_id = m1.id, m2.id
 
-    assert machine_tasks.Remove_machine([m1.id, m2.id]) is True
+    assert machine_tasks.Remove_machine([m1_id, m2_id]) is True
 
-    assert Machine.query.get(m1.id) is None
-    assert Machine.query.get(m2.id) is None
+    db_session.expire_all()
+    assert machine_repo.get_by_id(m1_id, session=db_session) is None
+    assert machine_repo.get_by_id(m2_id, session=db_session) is None
 
 
 def test_remove_machine_empty_list_returns_true(db_session):

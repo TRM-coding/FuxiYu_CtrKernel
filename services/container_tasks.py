@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
 from pydantic import BaseModel, Field
 from ..config import AppConfig
+from ..extensions import session_scope
 
 from ..constant import *
 from sqlalchemy.exc import IntegrityError
@@ -41,10 +42,154 @@ from .container_module.pydantic_models import (
 )
 from .container_module.utils import _parse_last_ssh_time, build_cleanup_info
 from ..utils.permissions import _can_access_machine, _is_operator_user
-from ..repositories.long_term_container_repo import get_long_term_container_remaining, _get_long_term_container_limit
+from ..repositories.long_term_container_repo import get_long_term_container_limit
 from ..repositories.containers_repo import _binding_role_value, _root_user_ids_from_bindings
 
 logger = logging.getLogger(__name__)
+
+
+def get_by_id(container_id: int):
+    with session_scope(commit=False) as session:
+        return containers_repo.get_by_id(container_id, session=session)
+
+
+def get_status(container_id: int):
+    with session_scope(commit=False) as session:
+        return containers_repo.get_status(container_id, session=session)
+
+
+def get_id_by_name_machine(container_name: str, machine_id: int) -> int | None:
+    with session_scope(commit=False) as session:
+        return containers_repo.get_id_by_name_machine(
+            container_name=container_name,
+            machine_id=machine_id,
+            session=session,
+        )
+
+
+def get_machine_id_by_container_id(container_id: int) -> int | None:
+    with session_scope(commit=False) as session:
+        return containers_repo.get_machine_id_by_container_id(container_id, session=session)
+
+
+def list_containers(limit: int = 50, offset: int = 0, machine_id: int | None = None, user_id: int | None = None):
+    with session_scope(commit=False) as session:
+        return containers_repo.list_containers(
+            limit=limit,
+            offset=offset,
+            machine_id=machine_id,
+            user_id=user_id,
+            session=session,
+        )
+
+
+def count_containers(machine_id: int | None = None) -> int:
+    with session_scope(commit=False) as session:
+        return containers_repo.count_containers(machine_id=machine_id, session=session)
+
+
+def create_container(*args, **kwargs):
+    with session_scope() as session:
+        return containers_repo.create_container(*args, session=session, **kwargs)
+
+
+def update_container(container_id: int, **fields):
+    fields.pop("commit", None)
+    with session_scope() as session:
+        return containers_repo.update_container(container_id, session=session, **fields)
+
+
+def delete_container(container_id: int) -> bool:
+    with session_scope() as session:
+        return containers_repo.delete_container(container_id, session=session)
+
+
+def validate_create_params(machine_id: int, container: Container_info, public_key: str | None = None) -> None:
+    with session_scope(commit=False) as session:
+        return containers_repo.validate_create_params(
+            machine_id,
+            container,
+            public_key,
+            session=session,
+        )
+
+
+def add_binding(*args, **kwargs):
+    kwargs.pop("commit", None)
+    with session_scope() as session:
+        return usercontainer_repo.add_binding(*args, session=session, **kwargs)
+
+
+def remove_binding(*args, **kwargs):
+    kwargs.pop("commit", None)
+    with session_scope() as session:
+        return usercontainer_repo.remove_binding(*args, session=session, **kwargs)
+
+
+def get_binding(user_id: int, container_id: int):
+    with session_scope(commit=False) as session:
+        return usercontainer_repo.get_binding(user_id, container_id, session=session)
+
+
+def get_user_bindings(user_id: int):
+    with session_scope(commit=False) as session:
+        return usercontainer_repo.get_user_bindings(user_id, session=session)
+
+
+def get_container_bindings(container_id: int):
+    with session_scope(commit=False) as session:
+        return usercontainer_repo.get_container_bindings(container_id, session=session)
+
+
+def update_binding(*args, **kwargs):
+    kwargs.pop("commit", None)
+    with session_scope() as session:
+        return usercontainer_repo.update_binding(*args, session=session, **kwargs)
+
+
+def get_name_by_id(user_id: int) -> str | None:
+    with session_scope(commit=False) as session:
+        return user_repo.get_name_by_id(user_id, session=session)
+
+
+def get_container_root_owner_emails(container_id: int) -> list[str]:
+    with session_scope(commit=False) as session:
+        return containers_repo.get_container_root_owner_emails(container_id, session=session)
+
+
+def _is_long_term_container(container_id: int) -> bool:
+    with session_scope(commit=False) as session:
+        return long_term_container_repo.is_long_term(container_id, session=session)
+
+
+def _count_long_term_by_user(user_id: int) -> int:
+    with session_scope(commit=False) as session:
+        return long_term_container_repo.count_by_user(user_id, session=session)
+
+
+def _get_long_term_container_remaining(user_id: int) -> int:
+    with session_scope(commit=False) as session:
+        return long_term_container_repo.get_long_term_container_remaining(user_id, session=session)
+
+
+def get_machine_ip_by_id(machine_id: int) -> str:
+    with session_scope(commit=False) as session:
+        return machine_repo.get_machine_ip_by_id(machine_id, session=session)
+
+
+def get_the_first_free_port(machine_id: int) -> int:
+    with session_scope(commit=False) as session:
+        return machine_repo.get_the_first_free_port(machine_id, session=session)
+
+
+def get_name_by_id(user_id: int) -> str | None:
+    with session_scope(commit=False) as session:
+        return user_repo.get_name_by_id(user_id, session=session)
+
+
+def get_by_name(username: str):
+    with session_scope(commit=False) as session:
+        return user_repo.get_by_name(username, session=session)
 
 
 def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -> str | None:
@@ -59,7 +204,8 @@ def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -
         return None
 
     try:
-        record = container_ssh_login_repo.get_by_container(container_id)
+        with session_scope(commit=False) as session:
+            record = container_ssh_login_repo.get_by_container(container_id, session=session)
     except Exception:
         logger.error("Error querying ssh login record for id=%s: %s", container_id, traceback.format_exc())
         return None
@@ -87,9 +233,9 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
     ### 参数检查 (delegated to repositories.container_repo helpers) ###
     try:
         logger.debug("DEBUG: validating create params for container %s on machine %s", container.NAME, machine_id)
-        container_repo.validate_create_params(machine_id, container, public_key)
+        validate_create_params(machine_id, container, public_key)
     except IntegrityError:
-        # let DB integrity errors bubble up as-is so callers (blueprints) can handle duplicate entries
+        # let DB integrity errors bubble up as-is so API callers can handle duplicate entries
         raise
     except Exception as e:
         # preserve any repository-provided error_reason if present
@@ -156,11 +302,13 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
                 role=ROLE.ROOT) # 这里在创建时，自动变成 ROOT
 
     # 写入初始 SSH 登录记录，以创建时间作为 last_ssh_login_time，防止无法清退
-    container_ssh_login_repo.upsert_last_ssh_login_time(
-        machine_id=machine_id,
-        container_id=container_id,
-        last_ssh_login_time=datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
-    )
+    with session_scope() as session:
+        container_ssh_login_repo.upsert_last_ssh_login_time(
+            machine_id=machine_id,
+            container_id=container_id,
+            last_ssh_login_time=datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S'),
+            session=session,
+        )
 
     # 状态推进已由 WSS 推送接管（status_cache 转换态 → Ctrl 落库），心跳轮询已退役
     write_op_log(success=True,
@@ -219,7 +367,7 @@ def remove_container(container_id:int, operator_user_id:int|None=None)->bool:
     
     # 记录操作日志（删前写，保留容器名称等信息）
     try:
-        container = containers_repo.get_by_id(container_id)
+        container = get_by_id(container_id)
     except Exception:
         container = None
     write_op_log(success=True,
@@ -272,7 +420,7 @@ def pause_container(container_id: int, operator_user_id: int | None = None, extr
     except Exception:
         return False
 
-    container = containers_repo.get_by_id(container_id)
+    container = get_by_id(container_id)
     if not container:
         return False
 
@@ -314,7 +462,7 @@ def unpause_container(container_id: int, operator_user_id: int | None = None) ->
     except Exception:
         return False
 
-    container = containers_repo.get_by_id(container_id)
+    container = get_by_id(container_id)
     if not container:
         return False
 
@@ -349,10 +497,12 @@ def unpause_container(container_id: int, operator_user_id: int | None = None) ->
         # 磁盘超限冻结宽限期：管理员解冻后给予宽限
         try:
             from ..repositories import container_disk_freeze_state_repo
-            freeze_state = container_disk_freeze_state_repo.get(container_id)
+            with session_scope() as session:
+                freeze_state = container_disk_freeze_state_repo.get(container_id, session=session)
+                if freeze_state is not None:
+                    grace_days = getattr(AppConfig, "CONTAINER_DISK_FREEZE_GRACE_DAYS", 3)
+                    container_disk_freeze_state_repo.set_grace(container_id, grace_days, session=session)
             if freeze_state is not None:
-                grace_days = getattr(AppConfig, "CONTAINER_DISK_FREEZE_GRACE_DAYS", 3)
-                container_disk_freeze_state_repo.set_grace(container_id, grace_days)
                 logger.info(
                     "[disk-check] grace period set for container %s (%s) (%s days, until %s)",
                     container_id, getattr(container, 'name', '?'), grace_days, freeze_state.grace_until,
@@ -376,7 +526,7 @@ def get_container_disk_usage(container_id: int, timeout: float = 20.0) -> dict |
         return None
 
     try:
-        container = containers_repo.get_by_id(container_id)
+        container = get_by_id(container_id)
     except Exception:
         logger.error("Error querying container info for id=%s: %s", container_id, traceback.format_exc())
         return None
@@ -414,7 +564,8 @@ def build_container_restore_snapshot(container_id: int, cleanup_context: dict | 
         }
 
     try:
-        machine = machine_repo.get_by_id(container.machine_id)
+        with session_scope(commit=False) as session:
+            machine = machine_repo.get_by_id(container.machine_id, session=session)
     except Exception:
         machine = None
 
@@ -448,7 +599,7 @@ def build_container_restore_snapshot(container_id: int, cleanup_context: dict | 
         "shared_gb": container.shared_gb,
         "gpu_number": container.gpu_number,
         "cpu_number": container.cpu_number,
-        "is_long_term": long_term_container_repo.is_long_term(container.id),
+        "is_long_term": _is_long_term_container(container.id),
         "accounts": accounts,
         "cleanup_context": cleanup_context or {},
     }
@@ -457,10 +608,10 @@ def build_container_restore_snapshot(container_id: int, cleanup_context: dict | 
 
 def _build_long_term_container_state(container_id: int, bindings: list | None = None) -> dict:
     bindings = bindings if bindings is not None else (get_container_bindings(container_id) or [])
-    is_long_term = long_term_container_repo.is_long_term(container_id)
+    is_long_term = _is_long_term_container(container_id)
     user_ids = _root_user_ids_from_bindings(bindings)
     remaining_by_user = {
-        uid: get_long_term_container_remaining(uid)
+        uid: _get_long_term_container_remaining(uid)
         for uid in user_ids
     }
     blocked_user_ids = [] if is_long_term else [
@@ -492,19 +643,21 @@ def set_long_term_container(container_id: int, is_long_term: bool, operator_user
             reason="container_permission_denied",
         )
 
-    existing = long_term_container_repo.is_long_term(container_id)
+    existing = _is_long_term_container(container_id)
     if is_long_term:
         if not existing:
-            limit = _get_long_term_container_limit()
+            limit = get_long_term_container_limit()
             for uid in root_user_ids:
-                if long_term_container_repo.count_by_user(uid) >= limit:
+                if _count_long_term_by_user(uid) >= limit:
                     raise NodeServiceError(
                         f"User {uid} has reached long-term container limit",
                         reason="long_term_limit_reached",
                     )
-            long_term_container_repo.add(container_id, created_by_user_id=operator_user_id)
+            with session_scope() as session:
+                long_term_container_repo.add(container_id, created_by_user_id=operator_user_id, session=session)
     else:
-        long_term_container_repo.remove(container_id)
+        with session_scope() as session:
+            long_term_container_repo.remove(container_id, session=session)
 
     long_term_state = _build_long_term_container_state(container_id, bindings)
     write_op_log(success=True, operator_user_id=operator_user_id,
@@ -818,7 +971,8 @@ def get_container_detail_information(container_id:int)->container_detail_informa
     freeze_state_val = None
     try:
         from ..repositories import container_disk_freeze_state_repo
-        fs = container_disk_freeze_state_repo.get(container.id)
+        with session_scope(commit=False) as session:
+            fs = container_disk_freeze_state_repo.get(container.id, session=session)
         if fs:
             from datetime import datetime
             days_frozen = (datetime.utcnow() - fs.first_frozen_at).days if fs.first_frozen_at else 0
@@ -864,7 +1018,8 @@ def get_container_detail_information(container_id:int)->container_detail_informa
 def list_all_container_bref_information(machine_id:int, request_user_id:int, page_number:int, page_size:int, user_id:int = None)->dict:
     # 非管理员用户必须先通过机器权限表过滤可见机器
     if not _is_operator_user(request_user_id):
-        allowed = set(machine_permission_repo.list_machine_ids_by_user(user_id))
+        with session_scope(commit=False) as session:
+            allowed = set(machine_permission_repo.list_machine_ids_by_user(user_id, session=session))
         if machine_id is not None:
             if machine_id not in allowed:
                 containers = []
@@ -885,7 +1040,8 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
         long_term_state = _build_long_term_container_state(container.id, bindings)
         # 冻结升级状态
         from ..repositories import container_disk_freeze_state_repo
-        freeze_state = container_disk_freeze_state_repo.get(container.id)
+        with session_scope(commit=False) as session:
+            freeze_state = container_disk_freeze_state_repo.get(container.id, session=session)
         freeze_first_frozen_at = freeze_state.first_frozen_at.isoformat() if (freeze_state and freeze_state.first_frozen_at) else None
         freeze_grace_until = freeze_state.grace_until.isoformat() if (freeze_state and freeze_state.grace_until) else None
         freeze_days_frozen = None
@@ -894,7 +1050,12 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
             from datetime import datetime
             freeze_days_frozen = (datetime.utcnow() - freeze_state.first_frozen_at).days
             freeze_escalation_days = int(getattr(AppConfig, "CONTAINER_DISK_FREEZE_ESCALATION_DAYS", 7) or 7)
-        ssh_record = container_ssh_login_repo.get_by_machine_container(container.machine_id, container.id)
+        with session_scope(commit=False) as session:
+            ssh_record = container_ssh_login_repo.get_by_machine_container(
+                container.machine_id,
+                container.id,
+                session=session,
+            )
         cleanup_days = 7
         cleanup_days = int(getattr(AppConfig, "CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
         cleanup_info = build_cleanup_info(
@@ -950,8 +1111,8 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
 
     result = {"containers": res, "total_page": total_page}
     if user_id is not None:
-        result["long_term_container_remaining"] = get_long_term_container_remaining(user_id)
-        result["long_term_container_limit"] = _get_long_term_container_limit()
+        result["long_term_container_remaining"] = _get_long_term_container_remaining(user_id)
+        result["long_term_container_limit"] = get_long_term_container_limit()
     return result
 
 ####################################################

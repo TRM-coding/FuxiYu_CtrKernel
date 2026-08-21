@@ -6,8 +6,8 @@ from ...api import machine_api, deps
 
 
 def _auth(monkeypatch, *, valid=True, operator=True):
-    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: valid)
-    monkeypatch.setattr(deps.user_repo, "check_permission", lambda token, required_permission: operator)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: valid)
+    monkeypatch.setattr(deps.user_repo, "check_permission", lambda token, required_permission, **kwargs: operator)
 
 
 def test_add_machine_requires_token(client, monkeypatch):
@@ -43,7 +43,7 @@ def test_add_machine_duplicate_entry_returns_409(client, monkeypatch):
     resp = client.post("/api/machines/add_machine", json={"machine_name": "m"} )
 
     assert resp.status_code == 409
-    assert resp.get_json()["error_reason"] == "duplicate_entry"
+    assert resp.json()["error_reason"] == "duplicate_entry"
 
 
 def test_add_machine_validation_error_returns_422(client, monkeypatch):
@@ -166,4 +166,4 @@ def test_get_machine_detail_success(client, monkeypatch):
     resp = client.post("/api/machines/get_detail_information", json={"machine_id": 1} )
 
     assert resp.status_code == 200
-    assert resp.get_json()["machine_name"] == "m"
+    assert resp.json()["machine_name"] == "m"

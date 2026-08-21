@@ -1,4 +1,4 @@
-"""容器系统 API 路由。"""
+﻿"""容器系统 API 路由。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,9 @@ from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
+from ..config import AppConfig
 from ..constant import OperationType, ROLE
+from ..extensions import session_scope
 from ..repositories import containers_repo
 from ..services import container_tasks as container_service
 from ..services.operation_log_tasks import write_operation_log as write_op_log
@@ -117,37 +119,41 @@ def _user_id_or_none(value: Any) -> int | None:
         return None
 
 
-def _refresh_disk_async(app, container_id: int) -> None:
+def _refresh_disk_async(container_id: int) -> None:
     """异步刷新单个容器磁盘用量。"""
 
     try:
-        with app.app_context():
-            du = container_service.get_container_disk_usage(container_id, timeout=20.0)
-            if isinstance(du, dict) and du.get("container"):
-                from ..repositories import container_mount_cleanup_repo, machine_repo, containers_repo as repo
+        du = container_service.get_container_disk_usage(container_id, timeout=20.0)
+        if isinstance(du, dict) and du.get("container"):
+            from ..repositories import machine_repo, containers_repo as repo
 
-                c = repo.get_by_id(container_id)
+            with session_scope(commit=False) as session:
+                c = repo.get_by_id(container_id, session=session)
                 if not c:
                     return
-                cd = du["container"]
-                overlay = int(cd.get("overlay_rw_bytes") or 0)
-                bind = int(cd.get("bind_mount_bytes") or 0)
-                total = int(cd.get("total_bytes") or 0)
-                limit = 0
-                try:
-                    m = machine_repo.get_by_id(c.machine_id)
-                    dg = getattr(m, "disk_size_gb", 0) or 0
-                    limit = int(dg * 1024**3)
-                except Exception:
-                    pass
+                machine_id = c.machine_id
+                container_pk = c.id
+            cd = du["container"]
+            overlay = int(cd.get("overlay_rw_bytes") or 0)
+            bind = int(cd.get("bind_mount_bytes") or 0)
+            total = int(cd.get("total_bytes") or 0)
+            limit = 0
+            try:
+                with session_scope(commit=False) as session:
+                    m = machine_repo.get_by_id(machine_id, session=session)
+                dg = getattr(m, "disk_size_gb", 0) or 0
+                limit = int(dg * 1024**3)
+            except Exception:
+                pass
+            with session_scope() as session:
                 repo.update_container(
-                    c.id,
-                    commit=True,
+                    container_pk,
                     disk_overlay_rw_bytes=overlay,
                     disk_bind_mount_bytes=bind,
                     disk_total_bytes=total,
                     disk_limit_bytes=limit,
                     disk_checked_at=datetime.utcnow(),
+                    session=session,
                 )
     except Exception as e:
         print(f"[ssh-refresh] async disk refresh failed for container {container_id}: {e}")
@@ -200,23 +206,22 @@ def create_container_api(
         return _error(400, f"Invalid container payload: {e}", "invalid_payload")
 
     try:
-        with request.app.state.flask_app.app_context():
-            if not container_service.Create_container(
-                owner_name=owner_name,
-                machine_id=machine_id,
-                container=container_obj,
-                public_key=public_key,
+        if not container_service.Create_container(
+            owner_name=owner_name,
+            machine_id=machine_id,
+            container=container_obj,
+            public_key=public_key,
+            operator_user_id=operator_user_id,
+        ):
+            _log_failure(
+                operation=OperationType.CREATE_CONTAINER,
+                target_type="container",
+                target_id=0,
                 operator_user_id=operator_user_id,
-            ):
-                _log_failure(
-                    operation=OperationType.CREATE_CONTAINER,
-                    target_type="container",
-                    target_id=0,
-                    operator_user_id=operator_user_id,
-                    error_reason="create_failed",
-                    detail={"machine_id": machine_id, "name": name},
-                )
-                return _error(500, "Failed to create container", "create_failed")
+                error_reason="create_failed",
+                detail={"machine_id": machine_id, "name": name},
+            )
+            return _error(500, "Failed to create container", "create_failed")
     except IntegrityError as e:
         detail = str(e.orig) if hasattr(e, "orig") else str(e)
         _log_failure(
@@ -264,40 +269,39 @@ def delete_container_api(
 
     data = _payload_data(payload)
     container_id = int(data.get("container_id", 0) or 0)
-    with request.app.state.flask_app.app_context():
-        try:
-            if not container_service.remove_container(container_id=container_id, operator_user_id=operator_user_id):
-                _log_failure(
-                    operation=OperationType.DELETE_CONTAINER,
-                    target_type="container",
-                    target_id=container_id,
-                    operator_user_id=operator_user_id,
-                    error_reason="delete_failed",
-                    detail={"container_id": container_id},
-                )
-                return _error(500, "Failed to delete container", "delete_failed")
-        except container_service.NodeServiceError as e:
-            reason = getattr(e, "reason", None)
+    try:
+        if not container_service.remove_container(container_id=container_id, operator_user_id=operator_user_id):
             _log_failure(
                 operation=OperationType.DELETE_CONTAINER,
                 target_type="container",
                 target_id=container_id,
                 operator_user_id=operator_user_id,
-                error_reason=reason,
+                error_reason="delete_failed",
                 detail={"container_id": container_id},
             )
-            return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
-        except Exception as e:
-            reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
-            _log_failure(
-                operation=OperationType.DELETE_CONTAINER,
-                target_type="container",
-                target_id=container_id,
-                operator_user_id=operator_user_id,
-                error_reason=reason or "internal_error",
-                detail={"container_id": container_id},
-            )
-            return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
+            return _error(500, "Failed to delete container", "delete_failed")
+    except container_service.NodeServiceError as e:
+        reason = getattr(e, "reason", None)
+        _log_failure(
+            operation=OperationType.DELETE_CONTAINER,
+            target_type="container",
+            target_id=container_id,
+            operator_user_id=operator_user_id,
+            error_reason=reason,
+            detail={"container_id": container_id},
+        )
+        return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
+    except Exception as e:
+        reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
+        _log_failure(
+            operation=OperationType.DELETE_CONTAINER,
+            target_type="container",
+            target_id=container_id,
+            operator_user_id=operator_user_id,
+            error_reason=reason or "internal_error",
+            detail={"container_id": container_id},
+        )
+        return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
     return {"success": 1, "message": "Container deleted successfully"}
 
 
@@ -318,35 +322,34 @@ def set_long_term_container_api(
     if is_long_term is None:
         return _error(400, "is_long_term must be boolean", "invalid_payload")
 
-    with request.app.state.flask_app.app_context():
-        try:
-            result = container_service.set_long_term_container(
-                container_id=container_id,
-                is_long_term=is_long_term,
-                operator_user_id=operator_user_id,
-            )
-        except container_service.NodeServiceError as e:
-            reason = getattr(e, "reason", None)
-            _log_failure(
-                operation=OperationType.SET_LONG_TERM,
-                target_type="container",
-                target_id=container_id,
-                operator_user_id=operator_user_id,
-                error_reason=reason,
-                detail={"container_id": container_id, "is_long_term": is_long_term},
-            )
-            return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
-        except Exception as e:
-            reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
-            _log_failure(
-                operation=OperationType.SET_LONG_TERM,
-                target_type="container",
-                target_id=container_id,
-                operator_user_id=operator_user_id,
-                error_reason=reason or "internal_error",
-                detail={"container_id": container_id, "is_long_term": is_long_term},
-            )
-            return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
+    try:
+        result = container_service.set_long_term_container(
+            container_id=container_id,
+            is_long_term=is_long_term,
+            operator_user_id=operator_user_id,
+        )
+    except container_service.NodeServiceError as e:
+        reason = getattr(e, "reason", None)
+        _log_failure(
+            operation=OperationType.SET_LONG_TERM,
+            target_type="container",
+            target_id=container_id,
+            operator_user_id=operator_user_id,
+            error_reason=reason,
+            detail={"container_id": container_id, "is_long_term": is_long_term},
+        )
+        return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
+    except Exception as e:
+        reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
+        _log_failure(
+            operation=OperationType.SET_LONG_TERM,
+            target_type="container",
+            target_id=container_id,
+            operator_user_id=operator_user_id,
+            error_reason=reason or "internal_error",
+            detail={"container_id": container_id, "is_long_term": is_long_term},
+        )
+        return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
     return {"success": 1, **result}
 
 
@@ -360,40 +363,39 @@ def start_container_api(
 
     data = _payload_data(payload)
     container_id = int(data.get("container_id", 0) or 0)
-    with request.app.state.flask_app.app_context():
-        try:
-            if not container_service.start_container(container_id=container_id, operator_user_id=operator_user_id):
-                _log_failure(
-                    operation=OperationType.START_CONTAINER,
-                    target_type="container",
-                    target_id=container_id,
-                    operator_user_id=operator_user_id,
-                    error_reason="start_failed",
-                    detail={"container_id": container_id},
-                )
-                return _error(500, "Failed to start container", "start_failed")
-        except container_service.NodeServiceError as e:
-            reason = getattr(e, "reason", None)
+    try:
+        if not container_service.start_container(container_id=container_id, operator_user_id=operator_user_id):
             _log_failure(
                 operation=OperationType.START_CONTAINER,
                 target_type="container",
                 target_id=container_id,
                 operator_user_id=operator_user_id,
-                error_reason=reason,
+                error_reason="start_failed",
                 detail={"container_id": container_id},
             )
-            return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
-        except Exception as e:
-            reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
-            _log_failure(
-                operation=OperationType.START_CONTAINER,
-                target_type="container",
-                target_id=container_id,
-                operator_user_id=operator_user_id,
-                error_reason=reason or "internal_error",
-                detail={"container_id": container_id},
-            )
-            return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
+            return _error(500, "Failed to start container", "start_failed")
+    except container_service.NodeServiceError as e:
+        reason = getattr(e, "reason", None)
+        _log_failure(
+            operation=OperationType.START_CONTAINER,
+            target_type="container",
+            target_id=container_id,
+            operator_user_id=operator_user_id,
+            error_reason=reason,
+            detail={"container_id": container_id},
+        )
+        return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
+    except Exception as e:
+        reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
+        _log_failure(
+            operation=OperationType.START_CONTAINER,
+            target_type="container",
+            target_id=container_id,
+            operator_user_id=operator_user_id,
+            error_reason=reason or "internal_error",
+            detail={"container_id": container_id},
+        )
+        return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
     return {"success": 1, "message": "Container start request sent"}
 
 
@@ -407,40 +409,39 @@ def stop_container_api(
 
     data = _payload_data(payload)
     container_id = int(data.get("container_id", 0) or 0)
-    with request.app.state.flask_app.app_context():
-        try:
-            if not container_service.stop_container(container_id=container_id, operator_user_id=operator_user_id):
-                _log_failure(
-                    operation=OperationType.STOP_CONTAINER,
-                    target_type="container",
-                    target_id=container_id,
-                    operator_user_id=operator_user_id,
-                    error_reason="stop_failed",
-                    detail={"container_id": container_id},
-                )
-                return _error(500, "Failed to stop container", "stop_failed")
-        except container_service.NodeServiceError as e:
-            reason = getattr(e, "reason", None)
+    try:
+        if not container_service.stop_container(container_id=container_id, operator_user_id=operator_user_id):
             _log_failure(
                 operation=OperationType.STOP_CONTAINER,
                 target_type="container",
                 target_id=container_id,
                 operator_user_id=operator_user_id,
-                error_reason=reason,
+                error_reason="stop_failed",
                 detail={"container_id": container_id},
             )
-            return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
-        except Exception as e:
-            reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
-            _log_failure(
-                operation=OperationType.STOP_CONTAINER,
-                target_type="container",
-                target_id=container_id,
-                operator_user_id=operator_user_id,
-                error_reason=reason or "internal_error",
-                detail={"container_id": container_id},
-            )
-            return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
+            return _error(500, "Failed to stop container", "stop_failed")
+    except container_service.NodeServiceError as e:
+        reason = getattr(e, "reason", None)
+        _log_failure(
+            operation=OperationType.STOP_CONTAINER,
+            target_type="container",
+            target_id=container_id,
+            operator_user_id=operator_user_id,
+            error_reason=reason,
+            detail={"container_id": container_id},
+        )
+        return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
+    except Exception as e:
+        reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
+        _log_failure(
+            operation=OperationType.STOP_CONTAINER,
+            target_type="container",
+            target_id=container_id,
+            operator_user_id=operator_user_id,
+            error_reason=reason or "internal_error",
+            detail={"container_id": container_id},
+        )
+        return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
     return {"success": 1, "message": "Container stop request sent"}
 
 
@@ -454,40 +455,39 @@ def restart_container_api(
 
     data = _payload_data(payload)
     container_id = int(data.get("container_id", 0) or 0)
-    with request.app.state.flask_app.app_context():
-        try:
-            if not container_service.restart_container(container_id=container_id, operator_user_id=operator_user_id):
-                _log_failure(
-                    operation=OperationType.RESTART_CONTAINER,
-                    target_type="container",
-                    target_id=container_id,
-                    operator_user_id=operator_user_id,
-                    error_reason="restart_failed",
-                    detail={"container_id": container_id},
-                )
-                return _error(500, "Failed to restart container", "restart_failed")
-        except container_service.NodeServiceError as e:
-            reason = getattr(e, "reason", None)
+    try:
+        if not container_service.restart_container(container_id=container_id, operator_user_id=operator_user_id):
             _log_failure(
                 operation=OperationType.RESTART_CONTAINER,
                 target_type="container",
                 target_id=container_id,
                 operator_user_id=operator_user_id,
-                error_reason=reason,
+                error_reason="restart_failed",
                 detail={"container_id": container_id},
             )
-            return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
-        except Exception as e:
-            reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
-            _log_failure(
-                operation=OperationType.RESTART_CONTAINER,
-                target_type="container",
-                target_id=container_id,
-                operator_user_id=operator_user_id,
-                error_reason=reason or "internal_error",
-                detail={"container_id": container_id},
-            )
-            return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
+            return _error(500, "Failed to restart container", "restart_failed")
+    except container_service.NodeServiceError as e:
+        reason = getattr(e, "reason", None)
+        _log_failure(
+            operation=OperationType.RESTART_CONTAINER,
+            target_type="container",
+            target_id=container_id,
+            operator_user_id=operator_user_id,
+            error_reason=reason,
+            detail={"container_id": container_id},
+        )
+        return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
+    except Exception as e:
+        reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
+        _log_failure(
+            operation=OperationType.RESTART_CONTAINER,
+            target_type="container",
+            target_id=container_id,
+            operator_user_id=operator_user_id,
+            error_reason=reason or "internal_error",
+            detail={"container_id": container_id},
+        )
+        return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
     return {"success": 1, "message": "Container restart request sent"}
 
 
@@ -503,22 +503,21 @@ def add_collaborator_api(
     user_id = data.get("user_id", "")
     container_id = int(data.get("container_id", 0) or 0)
     role = data.get("role", "COLLABORATOR")
-    with request.app.state.flask_app.app_context():
-        try:
-            if not container_service.add_collaborator(
-                container_id=container_id,
-                user_id=user_id,
-                role=ROLE(role),
-                operator_user_id=operator_user_id,
-            ):
-                return _error(500, "Failed to add collaborator", "add_collaborator_failed")
-        except container_service.NodeServiceError as e:
-            reason = getattr(e, "reason", None)
-            if reason == "container_offline":
-                return _error(400, str(e), reason)
-            return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
-        except Exception as e:
-            return _error(500, f"Internal error: {e}", "internal_error")
+    try:
+        if not container_service.add_collaborator(
+            container_id=container_id,
+            user_id=user_id,
+            role=ROLE(role),
+            operator_user_id=operator_user_id,
+        ):
+            return _error(500, "Failed to add collaborator", "add_collaborator_failed")
+    except container_service.NodeServiceError as e:
+        reason = getattr(e, "reason", None)
+        if reason == "container_offline":
+            return _error(400, str(e), reason)
+        return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
+    except Exception as e:
+        return _error(500, f"Internal error: {e}", "internal_error")
     return {"success": 1, "message": "Collaborator added successfully"}
 
 
@@ -533,21 +532,20 @@ def remove_collaborator_api(
     data = _payload_data(payload)
     container_id = int(data.get("container_id", 0) or 0)
     user_id = data.get("user_id", "")
-    with request.app.state.flask_app.app_context():
-        try:
-            if not container_service.remove_collaborator(
-                container_id=container_id,
-                user_id=user_id,
-                operator_user_id=operator_user_id,
-            ):
-                return _error(500, "Failed to remove collaborator", "remove_collaborator_failed")
-        except container_service.NodeServiceError as e:
-            reason = getattr(e, "reason", None)
-            if reason == "container_offline":
-                return _error(400, str(e), reason)
-            return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
-        except Exception as e:
-            return _error(500, f"Internal error: {e}", "internal_error")
+    try:
+        if not container_service.remove_collaborator(
+            container_id=container_id,
+            user_id=user_id,
+            operator_user_id=operator_user_id,
+        ):
+            return _error(500, "Failed to remove collaborator", "remove_collaborator_failed")
+    except container_service.NodeServiceError as e:
+        reason = getattr(e, "reason", None)
+        if reason == "container_offline":
+            return _error(400, str(e), reason)
+        return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
+    except Exception as e:
+        return _error(500, f"Internal error: {e}", "internal_error")
     return {"success": 1, "message": "Collaborator removed successfully"}
 
 
@@ -563,22 +561,21 @@ def update_role_api(
     container_id = int(data.get("container_id", 0) or 0)
     user_id = data.get("user_id", "")
     updated_role = data.get("updated_role", "COLLABORATOR")
-    with request.app.state.flask_app.app_context():
-        try:
-            if not container_service.update_role(
-                container_id=container_id,
-                user_id=user_id,
-                updated_role=ROLE(updated_role),
-                operator_user_id=operator_user_id,
-            ):
-                return _error(500, "Failed to update role", "update_role_failed")
-        except container_service.NodeServiceError as e:
-            reason = getattr(e, "reason", None)
-            if reason == "container_offline":
-                return _error(400, str(e), reason)
-            return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
-        except Exception as e:
-            return _error(500, f"Internal error: {e}", "internal_error")
+    try:
+        if not container_service.update_role(
+            container_id=container_id,
+            user_id=user_id,
+            updated_role=ROLE(updated_role),
+            operator_user_id=operator_user_id,
+        ):
+            return _error(500, "Failed to update role", "update_role_failed")
+    except container_service.NodeServiceError as e:
+        reason = getattr(e, "reason", None)
+        if reason == "container_offline":
+            return _error(400, str(e), reason)
+        return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
+    except Exception as e:
+        return _error(500, f"Internal error: {e}", "internal_error")
     return {"success": 1, "message": "Role updated successfully"}
 
 
@@ -592,16 +589,15 @@ def unpause_container_api(
 
     data = _payload_data(payload)
     container_id = int(data.get("container_id", 0) or 0)
-    with request.app.state.flask_app.app_context():
-        try:
-            if container_service.unpause_container(container_id=container_id, operator_user_id=operator_user_id):
-                return {"success": 1, "message": "Container unpaused"}
-            return _error(500, "Failed to unpause container", "unpause_failed")
-        except container_service.NodeServiceError as e:
-            reason = getattr(e, "reason", None)
-            return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
-        except Exception as e:
-            return _error(500, f"Internal error: {e}", "internal_error")
+    try:
+        if container_service.unpause_container(container_id=container_id, operator_user_id=operator_user_id):
+            return {"success": 1, "message": "Container unpaused"}
+        return _error(500, "Failed to unpause container", "unpause_failed")
+    except container_service.NodeServiceError as e:
+        reason = getattr(e, "reason", None)
+        return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
+    except Exception as e:
+        return _error(500, f"Internal error: {e}", "internal_error")
 
 
 @router.post("/get_container_detail_information", response_model=ContainerDetailResponse)
@@ -614,11 +610,10 @@ def get_container_detail_information_api(
 
     data = _payload_data(payload)
     container_id = int(data.get("container_id", 0) or 0)
-    with request.app.state.flask_app.app_context():
-        try:
-            container_info = container_service.get_container_detail_information(container_id=container_id)
-        except ValueError:
-            return _error(404, "Container not found", "container_not_found")
+    try:
+        container_info = container_service.get_container_detail_information(container_id=container_id)
+    except ValueError:
+        return _error(404, "Container not found", "container_not_found")
     return {"success": 1, "container_info": _dump_model(container_info)}
 
 
@@ -638,17 +633,21 @@ def container_status_api(
     machine_id = _machine_id_or_none(machine_id)
     if machine_id is None:
         return {"container_status": None}
-    with request.app.state.flask_app.app_context():
-        try:
-            cid = containers_repo.get_id_by_name_machine(container_name=container_name, machine_id=machine_id)
+    try:
+        with session_scope(commit=False) as session:
+            cid = containers_repo.get_id_by_name_machine(
+                container_name=container_name,
+                machine_id=machine_id,
+                session=session,
+            )
             if not cid:
                 return {"container_status": None}
-            container = containers_repo.get_by_id(cid)
+            container = containers_repo.get_by_id(cid, session=session)
             if not container:
                 return {"container_status": None}
             return {"container_status": container.container_status.value}
-        except Exception as e:
-            return _error(500, str(e), "internal_error")
+    except Exception as e:
+        return _error(500, str(e), "internal_error")
 
 
 @router.post("/refresh_last_ssh_login_time", response_model=RefreshLastSshLoginTimeResponse)
@@ -664,25 +663,25 @@ def refresh_last_ssh_login_time_api(
     if container_id is None:
         return _error(400, "invalid container_id", "invalid_payload")
 
-    with request.app.state.flask_app.app_context():
-        container = containers_repo.get_by_id(container_id)
-        if not container:
-            return _error(404, "Container not found", "container_not_found")
-        try:
-            last_time = container_service.get_container_last_ssh_login_time(container.id)
-            cleanup_days = int(request.app.state.flask_app.config.get("CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
-            cleanup_info = container_service.build_cleanup_info(last_time, cleanup_days)
-            threading.Thread(
-                target=_refresh_disk_async,
-                args=(request.app.state.flask_app, container.id),
-                daemon=True,
-            ).start()
-        except container_service.NodeServiceError as e:
-            reason = getattr(e, "reason", None)
-            return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
-        except Exception as e:
-            reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
-            return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
+    with session_scope(commit=False) as session:
+        container = containers_repo.get_by_id(container_id, session=session)
+    if not container:
+        return _error(404, "Container not found", "container_not_found")
+    try:
+        last_time = container_service.get_container_last_ssh_login_time(container.id)
+        cleanup_days = int(getattr(AppConfig, "CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
+        cleanup_info = container_service.build_cleanup_info(last_time, cleanup_days)
+        threading.Thread(
+            target=_refresh_disk_async,
+            args=(container.id,),
+            daemon=True,
+        ).start()
+    except container_service.NodeServiceError as e:
+        reason = getattr(e, "reason", None)
+        return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
+    except Exception as e:
+        reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
+        return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
 
     return {
         "success": 1,
@@ -710,22 +709,21 @@ def list_all_containers_bref_information_api(
     page_number = int(data.get("page_number", 0) or 0)
     page_size = int(data.get("page_size", 10) or 10)
 
-    with request.app.state.flask_app.app_context():
-        try:
-            result = container_service.list_all_container_bref_information(
-                machine_id=machine_id,
-                request_user_id=request_user_id,
-                page_number=page_number,
-                page_size=page_size,
-                user_id=user_id,
-            )
-            containers_info = result.get("containers", [])
-            total_page = result.get("total_page", 1)
-            long_term_container_remaining = result.get("long_term_container_remaining")
-            long_term_container_limit = result.get("long_term_container_limit")
-        except Exception as e:
-            reason = getattr(e, "reason", None) or getattr(e, "error_reason", None) or "list_failed"
-            return _error(REASON_STATUS_MAP.get(reason, 500), f"Failed to list containers: {e}", reason)
+    try:
+        result = container_service.list_all_container_bref_information(
+            machine_id=machine_id,
+            request_user_id=request_user_id,
+            page_number=page_number,
+            page_size=page_size,
+            user_id=user_id,
+        )
+        containers_info = result.get("containers", [])
+        total_page = result.get("total_page", 1)
+        long_term_container_remaining = result.get("long_term_container_remaining")
+        long_term_container_limit = result.get("long_term_container_limit")
+    except Exception as e:
+        reason = getattr(e, "reason", None) or getattr(e, "error_reason", None) or "list_failed"
+        return _error(REASON_STATUS_MAP.get(reason, 500), f"Failed to list containers: {e}", reason)
 
     out = [_dump_model(c) for c in containers_info]
     payload_out: dict[str, Any] = {"success": 1, "containers_info": out, "total_page": total_page}

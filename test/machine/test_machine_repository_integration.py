@@ -1,6 +1,5 @@
 from ...constant import MachineStatus, MachineTypes
-from ...models.machine import Machine
-from ...repositories import machine_permission_repo
+from ...repositories import machine_permission_repo, machine_repo
 from ...services import machine_tasks
 from ..factories import create_container, create_machine, create_user
 
@@ -27,12 +26,13 @@ def _machine_kwargs(**overrides):
 
 def test_add_and_update_machine_with_real_repository(db_session):
     assert machine_tasks.Add_machine(**_machine_kwargs()) is True
-    machine = Machine.query.filter_by(machine_name="repo_machine").first()
+    machine = machine_repo.get_by_name("repo_machine", session=db_session)
     assert machine is not None
 
     assert machine_tasks.Update_machine(machine.id, machine_name="repo_machine_updated") is True
 
-    assert Machine.query.get(machine.id).machine_name == "repo_machine_updated"
+    db_session.expire_all()
+    assert machine_repo.get_by_id(machine.id, session=db_session).machine_name == "repo_machine_updated"
 
 
 def test_list_machine_bref_updates_status_with_mocked_probe(monkeypatch, db_session):
@@ -45,7 +45,8 @@ def test_list_machine_bref_updates_status_with_mocked_probe(monkeypatch, db_sess
     assert total_pages == 1
     assert machines[0].id == machine.id
     assert machines[0].machine_status == MachineStatus.ONLINE.value
-    assert Machine.query.get(machine.id).machine_status == MachineStatus.ONLINE
+    db_session.expire_all()
+    assert machine_repo.get_by_id(machine.id, session=db_session).machine_status == MachineStatus.ONLINE
 
 
 def test_machine_permission_create_and_list_with_real_repository(db_session):
@@ -54,5 +55,5 @@ def test_machine_permission_create_and_list_with_real_repository(db_session):
 
     assert machine_tasks.Add_machine_permission(machine.id, user.id) is True
 
-    assert machine_permission_repo.list_user_ids_by_machine(machine.id) == [user.id]
+    assert machine_permission_repo.list_user_ids_by_machine(machine.id, session=db_session) == [user.id]
     assert machine_tasks.List_machine_permissions(machine.id) == [user.id]

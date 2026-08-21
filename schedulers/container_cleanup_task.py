@@ -5,9 +5,10 @@ import logging
 from datetime import datetime
 
 from ..config import AppConfig
-from ..models.container_ssh_login import ContainerSSHLogin
 from ..constant import OperationType
+from ..extensions import session_scope
 from ..repositories import long_term_container_repo, container_cleanup_reminder_repo
+from ..repositories import container_ssh_login_repo
 from ..services import container_tasks
 from ..utils.mail import send as send_mail
 
@@ -67,7 +68,8 @@ def _send_cleanup_reminders_if_needed(container_id: int, info: dict, config=AppC
 
     # 清理旧的提醒记录（用户重新 SSH 后 cleanup_at 已变，旧记录无意义）
     if cleanup_at:
-        container_cleanup_reminder_repo.clear_stale(container_id, cleanup_at)
+        with session_scope() as session:
+            container_cleanup_reminder_repo.clear_stale(container_id, cleanup_at, session=session)
 
     # If an earlier scan was missed, send the nearest reminder that is still relevant.
     for hours in [min(eligible_hours)]:
@@ -95,11 +97,27 @@ def _send_cleanup_reminders_if_needed(container_id: int, info: dict, config=AppC
 
         reminder_key = f"{hours}h"
         for email in recipients:
-            if container_cleanup_reminder_repo.was_sent(container_id, reminder_key, cleanup_at, email):
+            with session_scope(commit=False) as session:
+                sent = container_cleanup_reminder_repo.was_sent(
+                    container_id,
+                    reminder_key,
+                    cleanup_at,
+                    email,
+                    session=session,
+                )
+            if sent:
                 continue
             result = send_mail(to=email, subject=subject, content=content)
             if result.get("ok"):
-                if container_cleanup_reminder_repo.mark_sent(container_id, reminder_key, cleanup_at, email):
+                with session_scope() as session:
+                    marked = container_cleanup_reminder_repo.mark_sent(
+                        container_id,
+                        reminder_key,
+                        cleanup_at,
+                        email,
+                        session=session,
+                    )
+                if marked:
                     logger.info("[container-cleanup] reminder sent container_id=%s threshold=%s to=%s", container_id, reminder_key, email)
                     from ..services.operation_log_tasks import write_operation_log as write_op_log
                     write_op_log(success=True,
@@ -127,12 +145,15 @@ def cleanup_expired_containers_once(cleanup_after_days: int) -> None:
         cleanup_after_days = 1
 
 
-    records = ContainerSSHLogin.query.all()
+    with session_scope(commit=False) as session:
+        records = container_ssh_login_repo.list_all(session=session)
     for rec in records:
         try:
             info = container_tasks.build_cleanup_info(rec.last_ssh_login_time, cleanup_after_days)
             cid = int(rec.container_id)
-            if long_term_container_repo.is_long_term(cid):
+            with session_scope(commit=False) as session:
+                is_long_term = long_term_container_repo.is_long_term(cid, session=session)
+            if is_long_term:
                 logger.info("[container-cleanup] container_id=%s is long-term, skipping cleanup", cid)
                 continue
             info_with_record = {

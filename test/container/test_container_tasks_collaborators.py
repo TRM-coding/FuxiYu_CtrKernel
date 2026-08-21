@@ -24,7 +24,7 @@ def test_add_collaborator_success_adds_binding_after_node_success(
         operator_user_id=root.id,
     ) is True
 
-    binding = usercontainer_repo.get_binding(collaborator.id, container.id)
+    binding = usercontainer_repo.get_binding(collaborator.id, container.id, session=db_session)
     assert binding["username"] == collaborator.username
     assert getattr(binding["role"], "value", binding["role"]) == ROLE.COLLABORATOR.value
 
@@ -45,7 +45,7 @@ def test_add_collaborator_rejects_root_role_without_node_call(
         operator_user_id=root.id,
     ) is False
     assert calls == []
-    assert usercontainer_repo.get_binding(collaborator.id, container.id) is None
+    assert usercontainer_repo.get_binding(collaborator.id, container.id, session=db_session) is None
 
 
 def test_add_collaborator_rejects_offline_container(db_session, container_graph):
@@ -96,7 +96,7 @@ def test_remove_collaborator_success_removes_binding_after_node_success(
         operator_user_id=root.id,
     ) is True
 
-    assert usercontainer_repo.get_binding(collaborator.id, container.id) is None
+    assert usercontainer_repo.get_binding(collaborator.id, container.id, session=db_session) is None
 
 
 def test_remove_collaborator_rejects_root_owner(db_session, container_graph, mock_node_send):
@@ -109,7 +109,7 @@ def test_remove_collaborator_rejects_root_owner(db_session, container_graph, moc
         operator_user_id=root.id,
     ) is False
     assert calls == []
-    assert usercontainer_repo.get_binding(root.id, container.id) is not None
+    assert usercontainer_repo.get_binding(root.id, container.id, session=db_session) is not None
 
 
 def test_update_role_success_updates_binding(
@@ -128,7 +128,7 @@ def test_update_role_success_updates_binding(
         operator_user_id=root.id,
     ) is True
 
-    binding = usercontainer_repo.get_binding(collaborator.id, container.id)
+    binding = usercontainer_repo.get_binding(collaborator.id, container.id, session=db_session)
     assert getattr(binding["role"], "value", binding["role"]) == ROLE.ADMIN.value
     assert binding["username"] == collaborator.username
 
@@ -149,6 +149,6 @@ def test_update_role_to_root_sets_container_username_root(
         operator_user_id=root.id,
     ) is True
 
-    binding = usercontainer_repo.get_binding(collaborator.id, container.id)
+    binding = usercontainer_repo.get_binding(collaborator.id, container.id, session=db_session)
     assert getattr(binding["role"], "value", binding["role"]) == ROLE.ROOT.value
     assert binding["username"] == "root"

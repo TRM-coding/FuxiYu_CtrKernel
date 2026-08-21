@@ -18,7 +18,7 @@ def require_current_user(
     """校验登录态并返回 user_id。"""
 
     with session_scope(commit=False) as session:
-        if not authentications_repo.is_token_valid(auth_token):
+        if not authentications_repo.is_token_valid(auth_token, session=session):
             raise HTTPException(
                 status_code=401,
                 detail={"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"},

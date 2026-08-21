@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from .. import create_app
-from ..extensions import db
+from ..extensions import SessionRegistry, db
 
 
 TEST_CONFIG_OVERRIDES = {
@@ -64,19 +64,19 @@ def fastapi_app():
 
 @pytest.fixture(scope="session")
 def app(fastapi_app):
-    """FastAPI runtime（Flask 已清退，测试直接使用 SQLAlchemy session）。"""
+    """FastAPI runtime，测试直接使用 SQLAlchemy session。"""
     _assert_sqlite_database_uri(fastapi_app)
     from .. import models  # noqa: F401
 
     db.create_all()
     yield fastapi_app
-    db.session.remove()
+    SessionRegistry.remove()
     db.drop_all()
 
 
 @pytest.fixture()
 def client(fastapi_app):
-    """FastAPI TestClient（全量迁移后 API 都在 FastAPI 侧）。"""
+    """FastAPI TestClient。"""
     from starlette.testclient import TestClient
 
     return TestClient(fastapi_app)
@@ -86,9 +86,9 @@ def client(fastapi_app):
 def db_session(app):
     _assert_sqlite_database_uri(app)
     try:
-        yield db.session
+        yield SessionRegistry
     finally:
-        db.session.remove()
+        SessionRegistry.remove()
         db.drop_all()
         db.create_all()
 
@@ -143,31 +143,3 @@ def _clear_reachability_cache():
     machine_tasks._reach_cache.clear()
     yield
     machine_tasks._reach_cache.clear()
-@pytest.fixture()
-def client(fastapi_app):
-    """FastAPI TestClient with Flask-test-client compatibility helpers."""
-    from starlette.testclient import TestClient
-
-    class CompatTestClient(TestClient):
-        def post(self, url, *, content_type=None, headers=None, **kwargs):
-            if content_type:
-                headers = dict(headers or {})
-                headers.setdefault("content-type", content_type)
-            return super().post(url, headers=headers, **kwargs)
-
-        def set_cookie(self, name, value):
-            """Flask test client 兼容：写入 cookie jar。"""
-            self.cookies.set(name, value)
-
-        def request(self, method, url, **kwargs):
-            content_type = kwargs.pop("content_type", None)
-            if content_type:
-                headers = dict(kwargs.pop("headers", {}) or {})
-                headers.setdefault("content-type", content_type)
-                kwargs["headers"] = headers
-            response = super().request(method, url, **kwargs)
-            if not hasattr(response, "get_json"):
-                response.get_json = response.json
-            return response
-
-    return CompatTestClient(fastapi_app)

@@ -3,8 +3,8 @@ from ...services import container_tasks
 
 
 def _auth(monkeypatch, *, valid=True, user_id=1):
-    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token: valid)
-    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token: user_id)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: valid)
+    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token, **kwargs: user_id)
 
 
 def test_set_long_term_api_validates_required_fields(client, monkeypatch):
@@ -29,7 +29,7 @@ def test_set_long_term_api_maps_limit_to_409(client, monkeypatch):
     )
 
     assert resp.status_code == 409
-    assert resp.get_json()["error_reason"] == "long_term_limit_reached"
+    assert resp.json()["error_reason"] == "long_term_limit_reached"
 
 
 def test_set_long_term_api_success(client, monkeypatch):
@@ -46,4 +46,4 @@ def test_set_long_term_api_success(client, monkeypatch):
     )
 
     assert resp.status_code == 200
-    assert resp.get_json()["is_long_term"] is True
+    assert resp.json()["is_long_term"] is True

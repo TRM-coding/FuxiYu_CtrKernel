@@ -15,6 +15,7 @@ def test_list_enriches_container_name_and_root_owner(db_session):
     bind_user_container(user, container, role="ROOT")
 
     operation_log_repo.write(
+        session=db_session,
         operator_user_id=user.id,
         operation=OperationType.CREATE_CONTAINER.value,
         target_type="container",
@@ -22,6 +23,7 @@ def test_list_enriches_container_name_and_root_owner(db_session):
         detail={"name": "c1"},
         success=True,
     )
+    db_session.commit()
 
     result = list_operation_logs(page=1, page_size=10)
     log = result["logs"][0]
@@ -32,6 +34,7 @@ def test_list_enriches_container_name_and_root_owner(db_session):
 def test_list_enriches_machine_name(db_session):
     machine = create_machine(machine_name="gpu-01")
     operation_log_repo.write(
+        session=db_session,
         operator_user_id=None,
         operation=OperationType.MACHINE_STATUS_TRANSITION.value,
         target_type="machine",
@@ -39,6 +42,7 @@ def test_list_enriches_machine_name(db_session):
         detail={"before": {"machine_status": "online"}, "after": {"machine_status": "offline"}},
         success=True,
     )
+    db_session.commit()
 
     result = list_operation_logs(page=1, page_size=10)
     log = result["logs"][0]
@@ -49,6 +53,7 @@ def test_list_enriches_machine_name(db_session):
 def test_list_enriches_user_name_and_tolerates_deleted_target(db_session):
     user = create_user(username="bob")
     operation_log_repo.write(
+        session=db_session,
         operator_user_id=user.id,
         operation=OperationType.CHANGE_PASSWORD.value,
         target_type="user",
@@ -58,6 +63,7 @@ def test_list_enriches_user_name_and_tolerates_deleted_target(db_session):
     )
     # 目标已删除：查不到也不报错，target_name 保持 None
     operation_log_repo.write(
+        session=db_session,
         operator_user_id=None,
         operation=OperationType.START_CONTAINER.value,
         target_type="container",
@@ -65,6 +71,7 @@ def test_list_enriches_user_name_and_tolerates_deleted_target(db_session):
         detail={"name": "ghost"},
         success=True,
     )
+    db_session.commit()
 
     result = list_operation_logs(page=1, page_size=10)
     by_target_id = {str(r["target_id"]): r for r in result["logs"]}
@@ -81,6 +88,7 @@ def test_list_window_accepts_local_times_with_offset(db_session):
     machine = create_machine(machine_name="gpu-01")
     container = create_container(machine=machine, name="testingcontainer")
     row = operation_log_repo.write(
+        session=db_session,
         operator_user_id=None,
         operation=OperationType.CREATE_CONTAINER.value,
         target_type="container",
@@ -109,6 +117,7 @@ def test_list_window_accepts_local_times_with_offset(db_session):
 def test_stats_buckets_day_by_offset(db_session):
     """by_day 分桶日随偏移量：北京时间 8/17 00:03 的事件应计入 8/17 的桶（绿墙当天格子）。"""
     row = operation_log_repo.write(
+        session=db_session,
         operator_user_id=None,
         operation=OperationType.START_CONTAINER.value,
         target_type="container",

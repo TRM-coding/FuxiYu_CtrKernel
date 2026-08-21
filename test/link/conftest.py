@@ -1,6 +1,6 @@
 """Ctrl↔Node 链路测试共享基础设施。
 
-- `node_server`：在进程内线程里拉起真实的 Node Flask 应用（FakeDockerClient + stub 服务层），
+- `node_server`：在进程内线程里拉起真实的 Node FastAPI 应用（FakeDockerClient + stub 服务层），
   返回可直连的 base_url。不依赖外部端口与 docker daemon。
 - `node_transport`：链路测试统一走 transport 抽象，WSS 迁移后只换实现。
 

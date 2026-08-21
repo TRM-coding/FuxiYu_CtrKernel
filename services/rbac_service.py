@@ -9,6 +9,7 @@
 """
 import logging
 
+from ..extensions import session_scope
 from ..repositories import auth_repo, machine_permission_repo, usercontainer_repo
 
 logger = logging.getLogger(__name__)
@@ -49,12 +50,13 @@ def _is_legacy_operator(user_id: int) -> bool:
     """过渡兼容：单字段 operator 视为全量权限。"""
     try:
         from ..repositories.user_repo import get_by_id as get_user_by_id
-        u = get_user_by_id(user_id)
-        if u is None:
-            return False
-        perm = getattr(u, "permission", None)
-        val = perm.value if hasattr(perm, "value") else str(perm) if perm is not None else ""
-        return str(val).lower() == "operator"
+        with session_scope(commit=False) as session:
+            u = get_user_by_id(user_id, session=session)
+            if u is None:
+                return False
+            perm = getattr(u, "permission", None)
+            val = perm.value if hasattr(perm, "value") else str(perm) if perm is not None else ""
+            return str(val).lower() == "operator"
     except Exception:
         return False
 
@@ -67,29 +69,28 @@ def seed_rbac_defaults() -> None:
     新 entity/组通过新增常量后再调本函数补录（不覆盖已有行）。
     db 访问收敛在 auth_repo。
     """
-    created_entities = {}
-    for code, name in AUTH_ENTITIES:
-        ent = auth_repo.ensure_entity(code, name)
-        created_entities[code] = ent
+    with session_scope() as session:
+        created_entities = {}
+        for code, name in AUTH_ENTITIES:
+            ent = auth_repo.ensure_entity(code, name, session=session)
+            created_entities[code] = ent
 
-    # operator 组 = 全部 entity（全量组，随 entity 增长自动补）
-    all_codes = {c for c, _ in AUTH_ENTITIES}
-    _GROUP_DEFS["operator"] = ("运维组：全部权限", all_codes)
+        # operator 组 = 全部 entity（全量组，随 entity 增长自动补）
+        all_codes = {c for c, _ in AUTH_ENTITIES}
+        _GROUP_DEFS["operator"] = ("运维组：全部权限", all_codes)
 
-    groups = {}
-    for gname, (desc, codes) in _GROUP_DEFS.items():
-        g = auth_repo.ensure_group(gname, desc)
-        groups[gname] = g
-        for code in codes:
-            auth_repo.ensure_group_entity(g.id, created_entities[code].id)
+        groups = {}
+        for gname, (desc, codes) in _GROUP_DEFS.items():
+            g = auth_repo.ensure_group(gname, desc, session=session)
+            groups[gname] = g
+            for code in codes:
+                auth_repo.ensure_group_entity(g.id, created_entities[code].id, session=session)
 
-    # 存量用户过渡映射：permission=OPERATOR → operator 组；其余 → user 组
-    from ..repositories.user_repo import list_all_users
-    for u in list_all_users():
-        is_op = (getattr(u.permission, "value", None) if hasattr(u.permission, "value") else u.permission) == "operator"
-        auth_repo.ensure_user_group(u.id, groups["operator" if is_op else "user"].id)
-
-    auth_repo.apply_seed_changes()
+        # 存量用户过渡映射：permission=OPERATOR → operator 组；其余 → user 组
+        from ..repositories.user_repo import list_all_users
+        for u in list_all_users(session=session):
+            is_op = (getattr(u.permission, "value", None) if hasattr(u.permission, "value") else u.permission) == "operator"
+            auth_repo.ensure_user_group(u.id, groups["operator" if is_op else "user"].id, session=session)
     logger.info("rbac seed done: %d entities, %d groups", len(created_entities), len(groups))
 
 
@@ -104,16 +105,17 @@ def user_has_entity(user_id: int, entity_code: str) -> bool:
     if _is_legacy_operator(user_id):
         return True
     try:
-        # 1) 显式组
-        if auth_repo.user_has_entity(user_id, entity_code):
-            return True
+        with session_scope(commit=False) as session:
+            # 1) 显式组
+            if auth_repo.user_has_entity(user_id, entity_code, session=session):
+                return True
 
-        # 2) 默认 user 组兜底：无任何组映射的用户
-        if not auth_repo.user_has_any_group(user_id):
-            default = auth_repo.get_group("user")
-            if default is not None:
-                return auth_repo.group_has_entity(default.id, entity_code)
-        return False
+            # 2) 默认 user 组兜底：无任何组映射的用户
+            if not auth_repo.user_has_any_group(user_id, session=session):
+                default = auth_repo.get_group("user", session=session)
+                if default is not None:
+                    return auth_repo.group_has_entity(default.id, entity_code, session=session)
+            return False
     except Exception as e:
         logger.warning("user_has_entity check failed: %s", e)
         return False
@@ -137,12 +139,19 @@ def user_has_resource(user_id: int, resource_type: str, resource_id: int) -> boo
         return True
     try:
         if resource_type == "machine":
-            user_ids = machine_permission_repo.list_user_ids_by_machine(resource_id) or []
+            with session_scope(commit=False) as session:
+                user_ids = machine_permission_repo.list_user_ids_by_machine(resource_id, session=session) or []
             return user_id in user_ids
         if resource_type == "container":
-            return usercontainer_repo.get_binding(user_id=user_id, container_id=resource_id) is not None
+            with session_scope(commit=False) as session:
+                return usercontainer_repo.get_binding(
+                    user_id=user_id,
+                    container_id=resource_id,
+                    session=session,
+                ) is not None
         if resource_type == "image":
-            return auth_repo.user_has_image(user_id, resource_id)
+            with session_scope(commit=False) as session:
+                return auth_repo.user_has_image(user_id, resource_id, session=session)
         logger.warning("user_has_resource: unknown resource_type %r", resource_type)
         return False
     except Exception as e:
