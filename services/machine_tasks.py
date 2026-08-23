@@ -1,5 +1,6 @@
 from ..extensions import session_scope
 
+from .rbac_service import _has_entity_direct, _has_resource_manage_direct
 from ..repositories.machine_repo import *
 from pydantic import BaseModel
 from typing import Optional
@@ -79,15 +80,6 @@ def List_machine_permissions(machine_id: int) -> list[int]:
 
 #######################################
 # 辅助方法
-
-def _is_operator_user(user_id: int) -> bool:
-    try:
-        with session_scope(commit=False) as session:
-            u = user_repo.get_by_id(user_id, session=session)
-        perm = getattr(u, 'permission', None) if u else None
-        return bool(perm and getattr(perm, 'value', str(perm)).lower() == 'operator')
-    except Exception:
-        return False
 
 
 def _machine_status_value(machine) -> str:
@@ -420,8 +412,8 @@ def List_all_machine_bref_information(
                     cast(Machine.id, String).ilike(keyword),
                 )
             )
-
-        if user_id and not _is_operator_user(user_id):
+        # 资源级集合过滤：无通配（bypass_resource / machine:manage）的用户只看有访问权的机器
+        if user_id and not _has_resource_manage_direct(user_id, "machine") and not _has_entity_direct(user_id, "bypass_resource"):
             allowed = set(machine_permission_repo.list_machine_ids_by_user(user_id, session=session))
             stmt = stmt.where(Machine.id.in_(allowed)) if allowed else stmt.where(False)
 

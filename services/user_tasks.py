@@ -149,6 +149,9 @@ def Register(username: str, email: str, password: str, graduation_year):
             write_op_log(success=False, operation=OperationType.REGISTER_USER, target_type="user", target_id=0,
                          detail={"username": username, "email": email}, error_reason=str(e))
             raise
+    # RBAC 建号组绑定：新用户默认 user 组（operator 建号场景由调用方传 permission）
+    from .rbac_service import bind_user_default_group
+    bind_user_default_group(new_user.id)
     write_op_log(success=True, operation=OperationType.REGISTER_USER, target_type="user", target_id=new_user.id,
                  detail={"username": username, "email": email})
     return True, new_user, None
@@ -282,7 +285,7 @@ def Get_user_detail_information(user_id: int)->user_detail_information:
 
 #####################################
 # 分页返回users
-def List_all_user_bref_information(page_number:int, page_size:int, user_search: str | None = None)->list[user_bref_information]:
+def List_all_user_bref_information(page_number:int, page_size:int, user_search: str | None = None, viewer_user_id: int | None = None)->list[user_bref_information]:
     try:
         pn = int(page_number) if page_number and int(page_number) > 0 else 1
     except Exception:
@@ -294,8 +297,17 @@ def List_all_user_bref_information(page_number:int, page_size:int, user_search: 
 
     offset = (pn - 1) * ps
     user_search = (user_search or "").strip() or None
+    # 资源级集合过滤：无通配（bypass_resource / user:manage）的查看者只看自己 + 被授权管理的学生
+    visible_ids = None
+    if viewer_user_id is not None:
+        from .rbac_service import _has_entity_direct, _has_resource_manage_direct
+        if not (_has_entity_direct(viewer_user_id, "bypass_resource") or _has_resource_manage_direct(viewer_user_id, "user")):
+            from ..repositories import user_managed_user_repo
+            with session_scope(commit=False) as session:
+                managed = user_managed_user_repo.list_managed_ids(manager_user_id=viewer_user_id, session=session)
+            visible_ids = {int(viewer_user_id)} | managed
     with session_scope(commit=False) as session:
-        users = list_users(limit=ps, offset=offset, user_search=user_search, session=session)
+        users = list_users(limit=ps, offset=offset, user_search=user_search, visible_ids=visible_ids, session=session)
     result: list[user_bref_information] = []
     for u in users:
         # Use centralized helper to compute container counts for this user

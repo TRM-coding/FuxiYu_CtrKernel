@@ -18,9 +18,8 @@ def mock_auth_token(monkeypatch, module, *, user_id: int = 1, valid: bool = True
 
 def mock_operator_token(monkeypatch, module, *, user_id: int = 1, valid: bool = True, token: str = TEST_OPERATOR_TOKEN):
     headers = mock_auth_token(monkeypatch, module, user_id=user_id, valid=valid, token=token)
-    monkeypatch.setattr(deps.user_repo, "check_permission", lambda provided_token, required_permission, **kwargs: valid)
-    if hasattr(module, "user_repo"):
-        monkeypatch.setattr(module.user_repo, "check_permission", lambda provided_token, required_permission, **kwargs: valid)
+    from ..services import rbac_service
+    monkeypatch.setattr(rbac_service, "_has_entity_direct", lambda uid, entity: valid)
     return headers
 
 

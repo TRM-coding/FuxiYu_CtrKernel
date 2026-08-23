@@ -35,7 +35,8 @@ def test_add_and_update_machine_with_real_repository(db_session):
     assert machine_repo.get_by_id(machine.id, session=db_session).machine_name == "repo_machine_updated"
 
 
-def test_list_machine_bref_updates_status_with_mocked_probe(monkeypatch, db_session):
+def test_list_machine_bref_reads_status_without_probing(monkeypatch, db_session):
+    """列表只读状态机落库状态，不再反向探活驱动（WSS 推送即采集）。"""
     machine = create_machine(machine_status=MachineStatus.OFFLINE)
     create_container(machine=machine)
     monkeypatch.setattr(machine_tasks, "is_machine_online_remote", lambda machine_id, timeout=2.0: True)
@@ -44,9 +45,9 @@ def test_list_machine_bref_updates_status_with_mocked_probe(monkeypatch, db_sess
 
     assert total_pages == 1
     assert machines[0].id == machine.id
-    assert machines[0].machine_status == MachineStatus.ONLINE.value
+    assert machines[0].machine_status == MachineStatus.OFFLINE.value  # 即使探活为 True，列表也不反向改状态
     db_session.expire_all()
-    assert machine_repo.get_by_id(machine.id, session=db_session).machine_status == MachineStatus.ONLINE
+    assert machine_repo.get_by_id(machine.id, session=db_session).machine_status == MachineStatus.OFFLINE
 
 
 def test_machine_permission_create_and_list_with_real_repository(db_session):

@@ -1,8 +1,7 @@
 from fastapi import Cookie, Depends, HTTPException, Request
 
-from ..constant import PERMISSION
 from ..extensions import session_scope
-from ..repositories import authentications_repo, user_repo
+from ..repositories import authentications_repo
 
 
 def auth_token_from_cookie(auth_token: str = Cookie(default="")) -> str:
@@ -29,16 +28,16 @@ def require_current_user(
 def require_operator(
     request: Request,
     user_id: int = Depends(require_current_user),
-    auth_token: str = Depends(auth_token_from_cookie),
 ) -> int:
-    """校验 operator 权限并返回 user_id。"""
+    """校验管理权限（实体通配 bypass_auth_entity）并返回 user_id。"""
 
-    with session_scope(commit=False) as session:
-        if not user_repo.check_permission(auth_token, required_permission=PERMISSION.OPERATOR, session=session):
-            raise HTTPException(
-                status_code=403,
-                detail={"success": 0, "message": "insufficient permissions", "error_reason": "insufficient_permission"},
-            )
+    from ..services.rbac_service import _has_entity_direct
+
+    if not _has_entity_direct(user_id, "bypass_auth_entity"):
+        raise HTTPException(
+            status_code=403,
+            detail={"success": 0, "message": "insufficient permissions", "error_reason": "insufficient_permission"},
+        )
     return user_id
 
 
@@ -62,6 +61,23 @@ def require_permission(entity_code: str):
     return dep
 
 
+
+async def _read_resource_id(request: Request, id_field: str):
+    """从 path / POST body / query 读取资源 id（依赖层与路由参数隔离，只能走 request）。"""
+    rid = request.path_params.get(id_field)
+    if rid is None and request.method in ("POST", "PUT", "PATCH"):
+        try:
+            body = await request.json()
+            rid = body.get(id_field) if isinstance(body, dict) else None
+        except Exception:
+            rid = None
+    if rid is None:
+        rid = request.query_params.get(id_field)
+    if rid == "":
+        return None
+    return rid
+
+
 def require_resource(resource_type: str, id_field: str = "id"):
     """第二层 · 资源级判别：用户对指定资源有访问权。
 
@@ -70,13 +86,7 @@ def require_resource(resource_type: str, id_field: str = "id"):
     用法：Depends(require_resource("container", "container_id"))
     """
     async def dep(request: Request, user_id: int = Depends(require_current_user)) -> int:
-        rid = request.path_params.get(id_field)
-        if rid is None and request.method in ("POST", "PUT", "PATCH"):
-            try:
-                body = await request.json()
-                rid = body.get(id_field) if isinstance(body, dict) else None
-            except Exception:
-                rid = None
+        rid = await _read_resource_id(request, id_field)
         if rid is None:
             raise HTTPException(status_code=400,
                                 detail={"success": 0, "message": f"missing resource id field {id_field!r}",
@@ -87,6 +97,37 @@ def require_resource(resource_type: str, id_field: str = "id"):
                 status_code=403,
                 detail={"success": 0, "message": "resource access denied",
                         "error_reason": "resource_access_denied"},
+            )
+        return user_id
+
+    return dep
+
+
+
+def require_machine_of_container(id_field: str = "container_id"):
+    """容器操作共用层：对容器所在机器有访问权（机器权限语义：可申请/管理该机器）。
+
+    每个容器方法都叠加此层——操作容器 = 在机器上做事，须先确认机器访问权。
+    """
+    async def dep(request: Request, user_id: int = Depends(require_current_user)) -> int:
+        rid = await _read_resource_id(request, id_field)
+        if rid is None:
+            raise HTTPException(status_code=400,
+                                detail={"success": 0, "message": f"missing resource id field {id_field!r}",
+                                        "error_reason": "invalid_resource_id"})
+        from ..repositories.containers_repo import get_machine_id_by_container_id
+        with session_scope(commit=False) as session:
+            machine_id = get_machine_id_by_container_id(int(rid), session=session)
+        if machine_id is None:
+            raise HTTPException(status_code=404,
+                                detail={"success": 0, "message": "container not found",
+                                        "error_reason": "container_not_found"})
+        from ..services.rbac_service import user_has_resource
+        if not user_has_resource(user_id, "machine", machine_id):
+            raise HTTPException(
+                status_code=403,
+                detail={"success": 0, "message": "machine access denied",
+                        "error_reason": "machine_access_denied"},
             )
         return user_id
 

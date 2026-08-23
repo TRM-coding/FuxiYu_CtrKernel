@@ -80,6 +80,7 @@ def list_containers(
     machine_id: int | None = None,
     user_id: int | None = None,
     container_search: str | None = None,
+    visible_container_ids: set[int] | None = None,
     *,
     session: Session,
 ) -> Sequence[Container]:
@@ -99,6 +100,8 @@ def list_containers(
                 Machine.machine_ip.ilike(keyword),
             )
         )
+    if visible_container_ids is not None:
+        stmt = stmt.where(Container.id.in_(visible_container_ids))
     stmt = stmt.order_by(Container.id).offset(offset).limit(limit)
     return list(session.scalars(stmt).all())
 
@@ -107,6 +110,7 @@ def count_containers(
     machine_id: int | None = None,
     user_id: int | None = None,
     container_search: str | None = None,
+    visible_container_ids: set[int] | None = None,
     *,
     session: Session,
 ) -> int:
@@ -126,6 +130,8 @@ def count_containers(
                 Machine.machine_ip.ilike(keyword),
             )
         )
+    if visible_container_ids is not None:
+        stmt = stmt.where(Container.id.in_(visible_container_ids))
     return int(session.scalar(stmt) or 0)
 
 

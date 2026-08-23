@@ -27,7 +27,7 @@ from ..schemas.machine import (
 from ..services import machine_tasks as machine_service
 from ..services.container_module import node_comms
 from ..services.operation_log_tasks import write_operation_log as write_op_log
-from .deps import require_current_user, require_operator
+from .deps import require_current_user, require_operator, require_permission, require_resource
 
 router = APIRouter(prefix="/machines", tags=["machines"])
 
@@ -63,7 +63,7 @@ def _error(status_code: int, message: str, error_reason: str | None = None) -> J
 @router.post("/add_machine", response_model=AddMachineResponse, status_code=201)
 def add_machine_api(
     message: AddMachineRequest,
-    operator_user_id: int = Depends(require_operator),
+    operator_user_id: int = Depends(require_permission("machine:manage")),
 ):
     """人工添加机器；后续主建档入口会收敛到 register_machine。"""
 
@@ -106,7 +106,8 @@ def add_machine_api(
 @router.post("/register_machine", response_model=RegisterMachineWithProfileResponse)
 def register_machine_api(
     message: RegisterMachineByTrustAnchorRequest,
-    operator_user_id: int = Depends(require_operator),
+    _register: int = Depends(require_permission("machine:register")),
+    operator_user_id: int = Depends(require_permission("machine:manage")),
 ):
     """TOFU 建档入口：首连 pin、下发 UID、采集硬件并创建机器记录。"""
 
@@ -157,7 +158,7 @@ def register_machine_api(
 @router.post("/remove_machine", response_model=RemoveMachineResponse)
 def remove_machine_api(
     message: RemoveMachineRequest,
-    operator_user_id: int = Depends(require_operator),
+    operator_user_id: int = Depends(require_permission("machine:manage")),
 ):
     """删除一组机器记录。"""
 
@@ -177,7 +178,7 @@ def remove_machine_api(
 @router.post("/update_machine", response_model=UpdateMachineResponse)
 def update_machine_api(
     message: UpdateMachineRequest,
-    operator_user_id: int = Depends(require_operator),
+    operator_user_id: int = Depends(require_permission("machine:manage")),
 ):
     """更新机器管理字段或资源分配限制。"""
 
@@ -206,7 +207,7 @@ def update_machine_api(
 @router.post("/set_maintenance", response_model=SetMachineMaintenanceResponse)
 def set_machine_maintenance_api(
     message: SetMachineMaintenanceRequest,
-    operator_user_id: int = Depends(require_operator),
+    operator_user_id: int = Depends(require_permission("machine:manage")),
 ):
     """独立切换维护模式；不改写真实在线/离线状态。"""
 
@@ -234,9 +235,10 @@ def set_machine_maintenance_api(
 @router.post("/get_detail_information", response_model=MachineDetailResponse)
 def get_detail_information_api(
     message: MachineIdRequest,
-    _: int = Depends(require_current_user),
+    _: int = Depends(require_permission("machine:view")),
+    __: int = Depends(require_resource("machine", "machine_id")),
 ):
-    """查询机器详情。"""
+    """查询机器详情（view 权限 AND 机器资源访问权）。"""
 
     machine_info = machine_service.Get_detail_information(machine_id=message.machine_id)
     if not machine_info:
@@ -251,7 +253,7 @@ def get_detail_information_api(
 @router.post("/list_all_machine_bref_information", response_model=ListMachineBriefResponse)
 def list_all_machine_bref_information_api(
     message: ListMachineBriefRequest,
-    user_id: int = Depends(require_current_user),
+    user_id: int = Depends(require_permission("machine:view")),
 ):
     """分页查询机器概要。"""
 
@@ -286,7 +288,7 @@ def list_all_machine_bref_information_api(
 @router.post("/add_machine_permission", response_model=AddMachinePermissionResponse)
 def add_machine_permission_api(
     message: AddMachinePermissionRequest,
-    operator_user_id: int = Depends(require_operator),
+    operator_user_id: int = Depends(require_permission("machine:manage")),
 ):
     """给用户添加机器权限。"""
 
@@ -310,9 +312,9 @@ def add_machine_permission_api(
 @router.get("/list_machine_permissions", response_model=ListMachinePermissionsResponse)
 def list_machine_permissions_api(
     machine_id: int = Query(..., ge=1),
-    _: int = Depends(require_current_user),
+    _: int = Depends(require_permission("machine:manage")),
 ):
-    """查询机器授权用户 id 列表。"""
+    """查询机器授权用户 id 列表（管理面信息）。"""
 
     user_ids = machine_service.List_machine_permissions(machine_id)
     return {"success": 1, "machine_id": machine_id, "user_ids": user_ids}

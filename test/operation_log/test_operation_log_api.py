@@ -6,7 +6,8 @@ from ...services import operation_log_tasks
 
 def _auth(monkeypatch, *, valid=True, operator=True):
     monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: valid)
-    monkeypatch.setattr(deps.user_repo, "check_permission", lambda token, required_permission, **kwargs: operator)
+    from ...services import rbac_service
+    monkeypatch.setattr(rbac_service, "_has_entity_direct", lambda uid, entity: operator)
 
 
 def _fake_log_dict():

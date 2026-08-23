@@ -7,6 +7,12 @@ from ..factories import create_container
 def _auth(monkeypatch, *, valid=True, user_id=1):
     monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: valid)
     monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token, **kwargs: user_id)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_resource", lambda uid, rtype, rid: True)
+    monkeypatch.setattr(
+        "FuxiYu_CtrKernel.repositories.containers_repo.get_machine_id_by_container_id",
+        lambda cid, session: 1,
+    )
 
 
 def test_get_container_detail_api_not_found(client, monkeypatch):
@@ -36,16 +42,16 @@ def test_get_container_detail_api_success(client, monkeypatch):
     assert resp.json()["container_info"]["container_name"] == "c"
 
 
-def test_container_status_api_missing_fields_returns_none(client, monkeypatch):
+def test_container_status_api_missing_fields_returns_400(client, monkeypatch):
     _auth(monkeypatch)
 
     resp = client.post("/api/containers/container_status", json={} )
 
-    assert resp.status_code == 200
-    assert resp.json()["container_status"] is None
+    assert resp.status_code == 400
+    assert resp.json()["error_reason"] == "invalid_resource_id"
 
 
-def test_container_status_api_blank_machine_id_returns_none(client, monkeypatch):
+def test_container_status_api_blank_machine_id_returns_400(client, monkeypatch):
     _auth(monkeypatch)
 
     resp = client.post(
@@ -53,8 +59,8 @@ def test_container_status_api_blank_machine_id_returns_none(client, monkeypatch)
         json={"machine_id": "", "container_name": "pending-container"},
     )
 
-    assert resp.status_code == 200
-    assert resp.json()["container_status"] is None
+    assert resp.status_code == 400
+    assert resp.json()["error_reason"] == "invalid_resource_id"
 
 
 def test_container_status_api_success(client, monkeypatch, db_session):
@@ -63,7 +69,7 @@ def test_container_status_api_success(client, monkeypatch, db_session):
 
     resp = client.post(
         "/api/containers/container_status",
-        json={"machine_id": container.machine_id, "container_name": container.name},
+        json={"container_id": container.id, "machine_id": container.machine_id, "container_name": container.name},
     )
 
     assert resp.status_code == 200

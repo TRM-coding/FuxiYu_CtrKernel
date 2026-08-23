@@ -50,29 +50,6 @@ def test_list_container_bref_operator_can_filter_by_user(monkeypatch, db_session
     assert [c.container_id for c in result["containers"]] == [container.id]
 
 
-def test_list_container_bref_non_operator_filters_by_machine_permission(monkeypatch, db_session):
-    user = create_user()
-    allowed_machine = create_machine()
-    blocked_machine = create_machine()
-    machine_permission_repo.add_permission(allowed_machine.id, user.id, session=db_session)
-    allowed_container = create_container(machine=allowed_machine)
-    blocked_container = create_container(machine=blocked_machine)
-    container_tasks.add_binding(user.id, allowed_container.id, role=container_tasks.ROLE.ROOT, username="root")
-    container_tasks.add_binding(user.id, blocked_container.id, role=container_tasks.ROLE.ROOT, username="root")
-
-    db_session.commit()
-
-    result = container_tasks.list_all_container_bref_information(
-        machine_id=None,
-        request_user_id=user.id,
-        page_number=0,
-        page_size=10,
-        user_id=user.id,
-    )
-
-    assert [c.container_id for c in result["containers"]] == [allowed_container.id]
-
-
 def test_list_container_bref_filters_by_container_search_name(monkeypatch, db_session):
     operator = create_user(permission=PERMISSION.OPERATOR)
     machine = create_machine()

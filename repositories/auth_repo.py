@@ -56,6 +56,16 @@ def user_has_any_group(user_id: int, *, session: Session) -> bool:
     return session.scalars(stmt).first() is not None
 
 
+def user_in_group(user_id: int, group_name: str, *, session: Session) -> bool:
+    """用户是否在指定组（按组名）。"""
+    stmt = (
+        select(UserGroup.user_id)
+        .join(AuthGroup, UserGroup.group_id == AuthGroup.id)
+        .where(UserGroup.user_id == user_id, AuthGroup.name == group_name)
+    )
+    return session.scalars(stmt).first() is not None
+
+
 def user_has_image(user_id: int, image_id: int, *, session: Session) -> bool:
     """user-i 资源授权（镜像表落地后启用）。"""
 

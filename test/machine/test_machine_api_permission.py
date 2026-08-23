@@ -3,7 +3,8 @@ from ...api import machine_api, deps
 
 def _auth(monkeypatch, *, valid=True, operator=True):
     monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: valid)
-    monkeypatch.setattr(deps.user_repo, "check_permission", lambda token, required_permission, **kwargs: operator)
+    from ...services import rbac_service
+    monkeypatch.setattr(rbac_service, "_has_entity_direct", lambda uid, entity: operator)
 
 
 def test_add_machine_permission_requires_token(client, monkeypatch):
@@ -69,6 +70,7 @@ def test_list_machine_permissions_requires_token(client, monkeypatch):
 
 
 def test_list_machine_permissions_missing_machine_id(client, monkeypatch):
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
     monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: True)
 
     resp = client.get("/api/machines/list_machine_permissions" )
@@ -77,6 +79,7 @@ def test_list_machine_permissions_missing_machine_id(client, monkeypatch):
 
 
 def test_list_machine_permissions_success(client, monkeypatch):
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
     monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: True)
     monkeypatch.setattr(machine_api.machine_service, "List_machine_permissions", lambda machine_id: [2, 3])
 

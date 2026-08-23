@@ -36,18 +36,19 @@ def get_by_email(email: str, *, session: Session) -> User | None:
 	return session.scalars(stmt).first()
 
 
-def list_users(limit: int = 50, offset: int = 0, user_search: str | None = None, *, session: Session) -> Sequence[User]:
+def list_users(limit: int = 50, offset: int = 0, user_search: str | None = None, visible_ids: set[int] | None = None, *, session: Session) -> Sequence[User]:
 	stmt = select(User).order_by(User.id).offset(offset).limit(limit)
 	if user_search:
-		keyword = f"%{user_search}%"
 		stmt = select(User).where(
 			or_(
-				User.username.ilike(keyword),
+				User.username.ilike(keyword := f"%{user_search}%"),
 				User.email.ilike(keyword),
 				cast(User.id, String).ilike(keyword),
 				cast(User.graduation_year, String).ilike(keyword),
 			)
 		).order_by(User.id).offset(offset).limit(limit)
+	if visible_ids is not None:
+		stmt = stmt.where(User.id.in_(visible_ids))
 	return list(session.scalars(stmt).all())
 
 
@@ -111,31 +112,3 @@ def delete_user(user_id: int, *, session: Session) -> bool:
 	session.flush()
 	return True
 
-def check_permission(
-    token: str,
-    required_permission: PERMISSION,
-    *,
-    session: Session,
-) -> bool:
-    user_id = get_user_id_by_token(token, session=session)
-
-    if not user_id:
-        return False
-    user = get_by_id(user_id, session=session)
-    if not user:
-        return False
-
-    # 这里是迎合数据库返回内容；保证兼容性。
-    # 只是保险起见，一般情况下 permission 应该总是 PERMISSION 枚举类型。
-    def _norm(p):
-        return p.value if hasattr(p, "value") else p
-
-    user_perm = _norm(user.permission)
-    req_perm = _norm(required_permission)
-
-    cast_permission = {
-        "user": 1,
-        "operator": 2,
-    }
-
-    return cast_permission.get(user_perm, 0) >= cast_permission.get(req_perm, 0)

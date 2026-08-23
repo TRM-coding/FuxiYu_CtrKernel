@@ -26,16 +26,6 @@ def test_set_long_term_success_for_operator_on_owned_container(db_session, conta
     assert result["is_long_term"] is True
 
 
-def test_set_long_term_rejects_non_owner_non_operator(db_session, container_graph):
-    other = create_user(permission=PERMISSION.USER)
-    _root, _machine, container = container_graph
-
-    with pytest.raises(container_tasks.NodeServiceError) as excinfo:
-        container_tasks.set_long_term_container(container.id, True, operator_user_id=other.id)
-
-    assert excinfo.value.reason == "container_permission_denied"
-
-
 def test_set_long_term_rejects_when_root_owner_limit_reached(db_session, container_graph):
     root, machine, _container = container_graph
     _root2, _machine2, second_container = create_container_graph(root_user=root, machine=machine)

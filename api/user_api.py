@@ -23,7 +23,7 @@ from ..schemas.user import (
     UserIdRequest,
 )
 from ..services import user_tasks
-from .deps import require_current_user
+from .deps import require_current_user, require_permission, require_resource
 
 router = APIRouter(tags=["users"])
 
@@ -157,7 +157,7 @@ def login(message: LoginRequest, response: Response, request: Request):
 def get_user_detail_information_api(
     request: Request,
     user_id: int = Query(..., ge=1),
-    _: int = Depends(require_current_user),
+    _: int = Depends(require_resource("user", "user_id")),
 ):
     """查询用户详情。"""
 
@@ -167,21 +167,33 @@ def get_user_detail_information_api(
     return {"success": 1, "user_info": _model_data(info)}
 
 
+@router.get("/users/me/permissions")
+def my_permissions_api(
+    request: Request,
+    user_id: int = Depends(require_current_user),
+):
+    """当前用户持有的全部权限点（前端导航/按钮按 manage 过滤）。"""
+
+    from ..services.rbac_service import list_user_entities
+    return {"success": 1, "entities": list_user_entities(user_id)}
+
+
 @router.get("/users/list_all_user_bref_information", response_model=ListUserBriefResponse)
 def list_all_user_bref_information_api(
     request: Request,
     page_number: int = Query(default=1, ge=1),
     page_size: int = Query(default=10, ge=1),
     user_search: str | None = Query(default=None),
-    _: int = Depends(require_current_user),
+    viewer_user_id: int = Depends(require_current_user),
 ):
-    """分页查询用户概要。"""
+    """分页查询用户概要（内部按查看者资源级过滤）。"""
 
     try:
         users = user_tasks.List_all_user_bref_information(
             page_number=int(page_number),
             page_size=int(page_size),
             user_search=(user_search or "").strip() or None,
+            viewer_user_id=viewer_user_id,
         )
     except Exception:
         return _error(500, "failed to list users", "list_failed")
@@ -225,7 +237,7 @@ def change_password_user(
 def delete_user_api(
     message: UserIdRequest,
     request: Request,
-    _: int = Depends(require_current_user),
+    _: int = Depends(require_permission("user:manage")),
 ):
     """删除用户。"""
 
@@ -255,9 +267,9 @@ def delete_user_api(
 def update_user_api(
     message: UpdateUserRequest,
     request: Request,
-    _: int = Depends(require_current_user),
+    _: int = Depends(require_resource("user", "user_id")),
 ):
-    """更新用户基础字段。"""
+    """更新用户基础字段（user 资源判定 或 operator，deps 并集门禁）。"""
 
     fields = _model_data(message.fields, exclude_none=True)
     if not fields:
@@ -285,9 +297,9 @@ def update_user_api(
 def reset_password_api(
     message: UserIdRequest,
     request: Request,
-    _: int = Depends(require_current_user),
+    _: int = Depends(require_permission("user:manage")),
 ):
-    """重置用户密码。"""
+    """重置用户密码（管理操作；本人改密走 change_password）。"""
 
     new_password = user_tasks.Reset_password(message.user_id)
     if new_password:

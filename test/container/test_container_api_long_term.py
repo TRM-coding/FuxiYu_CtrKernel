@@ -5,6 +5,12 @@ from ...services import container_tasks
 def _auth(monkeypatch, *, valid=True, user_id=1):
     monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: valid)
     monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token, **kwargs: user_id)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_resource", lambda uid, rtype, rid: True)
+    monkeypatch.setattr(
+        "FuxiYu_CtrKernel.repositories.containers_repo.get_machine_id_by_container_id",
+        lambda cid, session: 1,
+    )
 
 
 def test_set_long_term_api_validates_required_fields(client, monkeypatch):

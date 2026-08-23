@@ -61,7 +61,9 @@ def test_ctrl_e2e_user_login_machine_permission_container_create_and_list(
 
 
 def test_ctrl_e2e_set_long_term_then_list_reflects_long_term_state(client, db_session, monkeypatch):
-    root, _machine, container = create_container_graph()
+    root, machine, container = create_container_graph()
+    machine_permission_repo.add_permission(machine.id, root.id, session=db_session)
+    db_session.commit()
     token = "e2e-long-term-token"
     create_auth(root, token=token)
 
@@ -89,6 +91,14 @@ def test_ctrl_e2e_operator_can_set_long_term_but_limit_still_applies(client, db_
     root, machine, container = create_container_graph()
     _root2, _machine2, second = create_container_graph(root_user=root, machine=machine)
     operator = create_user(permission=PERMISSION.OPERATOR)
+    # 模拟建号流程组绑定:operator 加入含 bypass 的组
+    from ...repositories import auth_repo
+    from ...extensions import session_scope as _ss
+    with _ss() as session:
+        ent = auth_repo.ensure_entity("bypass_resource", "t", session=session)
+        group = auth_repo.ensure_group("operator", "t", session=session)
+        auth_repo.ensure_group_entity(group.id, ent.id, session=session)
+        auth_repo.ensure_user_group(operator.id, group.id, session=session)
     token = "e2e-operator-token"
     create_auth(operator, token=token)
 

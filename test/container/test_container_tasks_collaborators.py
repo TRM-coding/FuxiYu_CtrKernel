@@ -65,22 +65,6 @@ def test_add_collaborator_rejects_offline_container(db_session, container_graph)
     assert excinfo.value.reason == "container_offline"
 
 
-def test_add_collaborator_denies_inaccessible_machine(db_session, container_graph):
-    _root, _machine, container = container_graph
-    other = create_user(permission=PERMISSION.USER)
-    collaborator = create_user()
-
-    with pytest.raises(container_tasks.NodeServiceError) as excinfo:
-        container_tasks.add_collaborator(
-            container_id=container.id,
-            user_id=collaborator.id,
-            role=ROLE.COLLABORATOR,
-            operator_user_id=other.id,
-        )
-
-    assert excinfo.value.reason == "machine_permission_denied"
-
-
 def test_remove_collaborator_success_removes_binding_after_node_success(
     db_session,
     container_graph_with_collaborator,

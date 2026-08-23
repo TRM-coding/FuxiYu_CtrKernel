@@ -37,7 +37,7 @@ from ..schemas.container import (
     SetLongTermContainerResponse,
     UpdateRoleRequest,
 )
-from .deps import require_current_user
+from .deps import require_current_user, require_permission, require_resource, require_machine_of_container
 
 router = APIRouter(prefix="/containers", tags=["containers"])
 
@@ -163,7 +163,8 @@ def _refresh_disk_async(container_id: int) -> None:
 def create_container_api(
     request: Request,
     payload: CreateContainerRequest = Body(default_factory=CreateContainerRequest),
-    operator_user_id: int = Depends(require_current_user),
+    operator_user_id: int = Depends(require_permission("container:create")),
+    _res: int = Depends(require_resource("machine", "machine_id")),
 ):
     """创建容器。"""
 
@@ -263,7 +264,9 @@ def create_container_api(
 def delete_container_api(
     request: Request,
     payload: DeleteContainerRequest = Body(default_factory=DeleteContainerRequest),
-    operator_user_id: int = Depends(require_current_user),
+    operator_user_id: int = Depends(require_permission("container:operation")),
+    _res: int = Depends(require_resource("container:admin", "container_id")),
+    _machine: int = Depends(require_machine_of_container("container_id")),
 ):
     """删除容器。"""
 
@@ -309,7 +312,9 @@ def delete_container_api(
 def set_long_term_container_api(
     request: Request,
     payload: SetLongTermContainerRequest = Body(default_factory=SetLongTermContainerRequest),
-    operator_user_id: int = Depends(require_current_user),
+    operator_user_id: int = Depends(require_permission("container:operation")),
+    _res: int = Depends(require_resource("container:root", "container_id")),
+    _machine: int = Depends(require_machine_of_container("container_id")),
 ):
     """设置长驻容器。"""
 
@@ -357,7 +362,9 @@ def set_long_term_container_api(
 def start_container_api(
     request: Request,
     payload: ContainerIdRequest = Body(default_factory=ContainerIdRequest),
-    operator_user_id: int = Depends(require_current_user),
+    operator_user_id: int = Depends(require_permission("container:operation")),
+    _res: int = Depends(require_resource("container:admin", "container_id")),
+    _machine: int = Depends(require_machine_of_container("container_id")),
 ):
     """启动容器。"""
 
@@ -403,7 +410,9 @@ def start_container_api(
 def stop_container_api(
     request: Request,
     payload: ContainerIdRequest = Body(default_factory=ContainerIdRequest),
-    operator_user_id: int = Depends(require_current_user),
+    operator_user_id: int = Depends(require_permission("container:operation")),
+    _res: int = Depends(require_resource("container:admin", "container_id")),
+    _machine: int = Depends(require_machine_of_container("container_id")),
 ):
     """停止容器。"""
 
@@ -449,7 +458,9 @@ def stop_container_api(
 def restart_container_api(
     request: Request,
     payload: ContainerIdRequest = Body(default_factory=ContainerIdRequest),
-    operator_user_id: int = Depends(require_current_user),
+    operator_user_id: int = Depends(require_permission("container:operation")),
+    _res: int = Depends(require_resource("container:admin", "container_id")),
+    _machine: int = Depends(require_machine_of_container("container_id")),
 ):
     """重启容器。"""
 
@@ -495,7 +506,9 @@ def restart_container_api(
 def add_collaborator_api(
     request: Request,
     payload: CollaboratorRequest = Body(default_factory=CollaboratorRequest),
-    operator_user_id: int = Depends(require_current_user),
+    operator_user_id: int = Depends(require_permission("container:operation")),
+    _res: int = Depends(require_resource("container:root", "container_id")),
+    _machine: int = Depends(require_machine_of_container("container_id")),
 ):
     """添加协作者。"""
 
@@ -525,7 +538,9 @@ def add_collaborator_api(
 def remove_collaborator_api(
     request: Request,
     payload: CollaboratorRequest = Body(default_factory=CollaboratorRequest),
-    operator_user_id: int = Depends(require_current_user),
+    operator_user_id: int = Depends(require_permission("container:operation")),
+    _res: int = Depends(require_resource("container:root", "container_id")),
+    _machine: int = Depends(require_machine_of_container("container_id")),
 ):
     """移除协作者。"""
 
@@ -553,7 +568,9 @@ def remove_collaborator_api(
 def update_role_api(
     request: Request,
     payload: UpdateRoleRequest = Body(default_factory=UpdateRoleRequest),
-    operator_user_id: int = Depends(require_current_user),
+    operator_user_id: int = Depends(require_permission("container:operation")),
+    _res: int = Depends(require_resource("container:root", "container_id")),
+    _machine: int = Depends(require_machine_of_container("container_id")),
 ):
     """更新协作者角色。"""
 
@@ -583,9 +600,10 @@ def update_role_api(
 def unpause_container_api(
     request: Request,
     payload: ContainerIdRequest = Body(default_factory=ContainerIdRequest),
-    operator_user_id: int = Depends(require_current_user),
+    operator_user_id: int = Depends(require_permission("container:manage")),
+    _machine: int = Depends(require_machine_of_container("container_id")),
 ):
-    """恢复暂停容器。"""
+    """恢复暂停容器（manage）。"""
 
     data = _payload_data(payload)
     container_id = int(data.get("container_id", 0) or 0)
@@ -604,7 +622,9 @@ def unpause_container_api(
 def get_container_detail_information_api(
     request: Request,
     payload: ContainerIdRequest = Body(default_factory=ContainerIdRequest),
-    _: int = Depends(require_current_user),
+    operator_user_id: int = Depends(require_permission("container:view")),
+    _res: int = Depends(require_resource("container:collaborator", "container_id")),
+    _machine: int = Depends(require_machine_of_container("container_id")),
 ):
     """查询容器详情。"""
 
@@ -621,9 +641,11 @@ def get_container_detail_information_api(
 def container_status_api(
     request: Request,
     payload: ContainerStatusRequest = Body(default_factory=ContainerStatusRequest),
-    _: int = Depends(require_current_user),
+    operator_user_id: int = Depends(require_permission("container:view")),
+    _res: int = Depends(require_resource("container:collaborator", "container_id")),
+    _machine: int = Depends(require_machine_of_container("container_id")),
 ):
-    """查询容器状态。"""
+    """查询容器状态（与其他 getter 同构：view + 容器角色 + 机器）。"""
 
     data = _payload_data(payload)
     container_name = data.get("container_name", "")
@@ -654,7 +676,9 @@ def container_status_api(
 def refresh_last_ssh_login_time_api(
     request: Request,
     payload: RefreshLastSshLoginTimeRequest = Body(default_factory=RefreshLastSshLoginTimeRequest),
-    _: int = Depends(require_current_user),
+    operator_user_id: int = Depends(require_permission("container:view")),
+    _res: int = Depends(require_resource("container:collaborator", "container_id")),
+    _machine: int = Depends(require_machine_of_container("container_id")),
 ):
     """刷新容器最近 SSH 登录时间。"""
 
@@ -699,7 +723,7 @@ def refresh_last_ssh_login_time_api(
 def list_all_containers_bref_information_api(
     request: Request,
     payload: ListAllContainerBrefInformationRequest = Body(default_factory=ListAllContainerBrefInformationRequest),
-    request_user_id: int = Depends(require_current_user),
+    request_user_id: int = Depends(require_permission("container:view")),
 ):
     """分页查询容器摘要。"""
 
@@ -718,6 +742,7 @@ def list_all_containers_bref_information_api(
             page_size=page_size,
             user_id=user_id,
             container_search=container_search,
+            viewer_user_id=request_user_id,
         )
         containers_info = result.get("containers", [])
         total_page = result.get("total_page", 1)

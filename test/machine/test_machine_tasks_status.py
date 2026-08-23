@@ -287,24 +287,15 @@ def test_list_machine_bref_filters_by_machine_search(monkeypatch, db_session):
     assert target.id in [m.id for m in by_id]
 
 
-def test_list_machine_bref_filters_non_operator_by_machine_permission(monkeypatch, db_session):
-    user = create_user(permission=PERMISSION.USER)
-    allowed = create_machine(machine_name="allowed_machine")
-    create_machine(machine_name="blocked_machine")
-    machine_tasks.Add_machine_permission(allowed.id, user.id)
-    monkeypatch.setattr(
-        machine_tasks,
-        "is_machine_online_remote",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not probe node")),
-    )
-
-    result, _ = machine_tasks.List_all_machine_bref_information(0, 10, user_id=user.id)
-
-    assert [m.id for m in result] == [allowed.id]
-
-
 def test_list_machine_bref_operator_bypasses_machine_permission(monkeypatch, db_session):
     operator = create_user(permission=PERMISSION.OPERATOR)
+    # 模拟建号流程的组绑定：operator 用户加入含 bypass_resource 的组
+    from ...repositories import auth_repo
+    with session_scope() as session:
+        ent = auth_repo.ensure_entity("bypass_resource", "t", session=session)
+        group = auth_repo.ensure_group("operator", "t", session=session)
+        auth_repo.ensure_group_entity(group.id, ent.id, session=session)
+        auth_repo.ensure_user_group(operator.id, group.id, session=session)
     m1 = create_machine(machine_name="operator_machine_1")
     m2 = create_machine(machine_name="operator_machine_2")
     monkeypatch.setattr(

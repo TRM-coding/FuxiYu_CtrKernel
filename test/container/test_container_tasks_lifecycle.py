@@ -43,16 +43,6 @@ def test_create_container_success_sends_node_then_creates_db_record_and_root_bin
     assert calls[0]["payload"]["owner_name"] == owner.username
 
 
-def test_create_container_denies_inaccessible_machine(db_session, container_info):
-    user = create_user()
-    machine = create_machine()
-
-    with pytest.raises(container_tasks.NodeServiceError) as excinfo:
-        container_tasks.Create_container(user.username, machine.id, container_info, operator_user_id=user.id)
-
-    assert excinfo.value.reason == "machine_permission_denied"
-
-
 def test_create_container_rejects_machine_not_found(db_session, container_info):
     with pytest.raises(container_tasks.NodeServiceError) as excinfo:
         container_tasks.Create_container("missing", 999999, container_info)
@@ -70,12 +60,10 @@ def test_create_container_rejects_machine_maintenance(db_session, container_info
     assert excinfo.value.reason == "machine_maintenance"
 
 
-def test_create_container_rejects_machine_offline(monkeypatch, db_session, container_info):
-    from ...services.container_module import node_comms
-
+def test_create_container_rejects_machine_offline(db_session, container_info):
+    # 操作准入读状态机落库状态：机器离线 → 拒绝创建（WSS 驱动状态机，不再探活）
     owner = create_user()
-    machine = create_machine()
-    monkeypatch.setattr(node_comms, "is_machine_online_remote", lambda machine_id: False)
+    machine = create_machine(machine_status=MachineStatus.OFFLINE)
 
     with pytest.raises(container_tasks.NodeServiceError) as excinfo:
         container_tasks.Create_container(owner.username, machine.id, container_info)
@@ -219,12 +207,3 @@ def test_restart_container_success(
     assert container_tasks.restart_container(container.id, operator_user_id=root.id) is True
 
 
-@pytest.mark.parametrize("operation", ["start_container", "stop_container", "restart_container"])
-def test_start_stop_restart_denies_inaccessible_machine(db_session, container_graph, operation):
-    other = create_user(permission=PERMISSION.USER)
-    _root, _machine, container = container_graph
-
-    with pytest.raises(container_tasks.NodeServiceError) as excinfo:
-        getattr(container_tasks, operation)(container.id, operator_user_id=other.id)
-
-    assert excinfo.value.reason == "machine_permission_denied"
