@@ -73,6 +73,26 @@ def test_list_container_bref_non_operator_filters_by_machine_permission(monkeypa
     assert [c.container_id for c in result["containers"]] == [allowed_container.id]
 
 
+def test_list_container_bref_filters_by_container_name(monkeypatch, db_session):
+    operator = create_user(permission=PERMISSION.OPERATOR)
+    machine = create_machine()
+    target = create_container(machine=machine, name="alpha_target")
+    create_container(machine=machine, name="beta_other")
+
+    db_session.commit()
+
+    result = container_tasks.list_all_container_bref_information(
+        machine_id=machine.id,
+        request_user_id=operator.id,
+        page_number=0,
+        page_size=10,
+        container_name="target",
+    )
+
+    assert [c.container_id for c in result["containers"]] == [target.id]
+    assert result["total_number"] == 1
+
+
 def test_list_container_bref_includes_cleanup_info_from_ssh_record(monkeypatch, db_session, container_graph):
     from ...services.container_module import node_comms
 

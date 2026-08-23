@@ -1,14 +1,9 @@
-from ..config import AppConfig
 from ..extensions import session_scope
-
-import threading
-import time
 
 from ..repositories.machine_repo import *
 from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy import func, select
-from ..utils.parallel import parallel_node_calls
 from ..repositories import machine_permission_repo, user_repo
 from .operation_log_tasks import write_operation_log as write_op_log
 from ..constant import MachineStatus, OperationType
@@ -147,37 +142,18 @@ def is_machine_online_remote(machine_id: int, timeout: float = 2.0) -> bool:
     return False
 
 
-# ── 机器可达性统一入口（TTL 缓存） ──────────────────────────
-# 所有需要"机器现在通不通"的地方都走这里（容器展示态派生、操作前置检查等）。
-# 唯一做 HTTP 探测的地方；WSS 落地后此入口改读连接状态，调用方无感。
-_reach_cache: dict[int, tuple[float, bool]] = {}
-_reach_cache_lock = threading.Lock()
-REACH_CACHE_TTL_SEC = 20.0
-
-
-def _peek_machine_reachable(machine_id: int) -> bool | None:
-    """缓存未过期返回结果，否则 None。"""
-    now = time.time()
-    with _reach_cache_lock:
-        hit = _reach_cache.get(machine_id)
-    if hit and (now - hit[0]) < REACH_CACHE_TTL_SEC:
-        return hit[1]
-    return None
-
-
-def _set_machine_reachable(machine_id: int, ok: bool) -> None:
-    with _reach_cache_lock:
-        _reach_cache[machine_id] = (time.time(), bool(ok))
-
-
 def get_machine_reachable(machine_id: int, timeout: float = 2.0) -> bool:
-    """机器可达性统一入口：命中 TTL 缓存零 HTTP，未命中探测一次并写缓存。"""
-    cached = _peek_machine_reachable(machine_id)
-    if cached is not None:
-        return cached
-    ok = is_machine_online_remote(machine_id, timeout=timeout)
-    _set_machine_reachable(machine_id, ok)
-    return ok
+    """读取机器连接状态。
+
+    参数 timeout 保留兼容旧调用；本函数不再发起 HTTP 探活，避免列表/展示查询
+    反向驱动 machine_status。
+    """
+    try:
+        with session_scope(commit=False) as session:
+            machine = get_by_id(machine_id, session=session)
+    except Exception:
+        machine = None
+    return _machine_status_value(machine) == MachineStatus.ONLINE.value if machine else False
 
 #######################################
 #######################################
@@ -421,21 +397,6 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
         )
 #######################################
 
-#######################################
-def _node_probe_machine(machine_id: int, _app=None) -> bool:
-    """封装单次 NodeKernel /machine_status 可达性检查。
-
-    等同于原 for 循环内的 ``is_machine_online_remote(machine_id, timeout=2.0)``，
-    抽取为独立函数以适配 ``parallel_node_calls``。
-
-    *_app* 参数保留兼容旧调用，不再使用。
-    """
-    try:
-        return is_machine_online_remote(machine_id, timeout=2.0)
-    except Exception:
-        return False
-
-
 # 获取一批机器的概要信息
 def List_all_machine_bref_information(
     page_number: int, 
@@ -481,64 +442,16 @@ def List_all_machine_bref_information(
             ).all()
         )
     
-    # 4. 并发可达性检查（Phase A），然后逐条同步状态（Phase B）
     res = []
-
-    # --- Phase A: 并发探活 ---
-    use_parallel = getattr(AppConfig, "NODE_PARALLEL_ENABLED_MACHINES", True)
-    _app = None
-    _probe_results: dict[int, bool] = {}
-    if machines:
-        if use_parallel:
-            # 缓存新鲜则零探测，否则并发探活
-            _callables = [
-                lambda mid=m.id, a=_app: (
-                    _peek_machine_reachable(mid)
-                    if _peek_machine_reachable(mid) is not None
-                    else _node_probe_machine(mid)
-                )
-                for m in machines
-            ]
-            _raw = parallel_node_calls(_callables, timeout_per_call=3.0)
-            for m, r in zip(machines, _raw):
-                _probe_results[m.id] = r if isinstance(r, bool) else False
-        else:
-            for m in machines:
-                cached = _peek_machine_reachable(m.id)
-                _probe_results[m.id] = cached if cached is not None else _node_probe_machine(m.id)
-    # 写透可达性缓存：容器 getter 的派生展示态读它
-    for m in machines:
-        _set_machine_reachable(m.id, bool(_probe_results.get(m.id, False)))
-
-    # --- Phase B: 逐条同步（串行，避免 DB session 竞争） ---
     for machine in machines:
-        online = _probe_results.get(machine.id, False)
-
-        try:
-            if online:
-                try:
-                    with session_scope() as session:
-                        update_machine(machine.id, machine_status=MachineStatus.ONLINE, session=session)
-                except Exception:
-                    pass
-            else:
-                try:
-                    with session_scope() as session:
-                        update_machine(machine.id, machine_status=MachineStatus.OFFLINE, session=session)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        with session_scope(commit=False) as session:
-            latest = get_by_id(machine.id, session=session) or machine
         info = machine_bref_information(
-            id=latest.id,
-            machine_name=latest.machine_name,
-            machine_ip=latest.machine_ip,
-            machine_type=latest.machine_type.value,
-            machine_status=_machine_status_value(latest),
-            is_maintenance=bool(getattr(latest, "is_maintenance", False)),
-            display_status=_display_machine_status(latest),
+            id=machine.id,
+            machine_name=machine.machine_name,
+            machine_ip=machine.machine_ip,
+            machine_type=machine.machine_type.value,
+            machine_status=_machine_status_value(machine),
+            is_maintenance=bool(getattr(machine, "is_maintenance", False)),
+            display_status=_display_machine_status(machine),
         )
         res.append(info)
     

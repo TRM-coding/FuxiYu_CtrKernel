@@ -5,10 +5,36 @@ import os
 import ssl
 import threading
 import time
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket
 
+_DOTENV_PATH = Path(__file__).resolve().parent / ".env"
+load_dotenv(_DOTENV_PATH, override=True)
+
 WSS_PORT = int(os.getenv("CTRL_WSS_PORT", "5001"))
+
+
+def _configure_runtime() -> None:
+    """配置 WSS 子进程运行上下文。
+
+    WSS 是独立进程，必须显式加载同一套 DB 与日志配置，避免和 API 主进程
+    读到不同的相对路径数据库，也避免 WSS 错误只落在终端。
+    """
+
+    from FuxiYu_CtrKernel.config import AppConfig
+    from FuxiYu_CtrKernel.extensions import configure_database
+    from FuxiYu_CtrKernel.utils.logging_config import configure_daily_logging
+
+    configure_database(AppConfig.SQLALCHEMY_DATABASE_URI)
+    configure_daily_logging(AppConfig)
+    logging.getLogger(__name__).info(
+        "Ctrl WSS runtime configured: cwd=%s database=%s port=%s",
+        os.getcwd(),
+        AppConfig.SQLALCHEMY_DATABASE_URI,
+        WSS_PORT,
+    )
 
 
 def _build_ssl_context():
@@ -60,6 +86,7 @@ def create_wss_app(overrides: dict | None = None) -> FastAPI:
 if __name__ == "__main__":
     import uvicorn
 
+    _configure_runtime()
     logger = logging.getLogger(__name__)
 
     while True:

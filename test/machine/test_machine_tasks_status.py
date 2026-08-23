@@ -164,48 +164,107 @@ def test_handle_node_ws_keeps_machine_online_when_disconnect_probe_succeeds(monk
     assert db_session.get(Machine, machine.id).machine_status == MachineStatus.ONLINE
 
 
-def test_list_machine_bref_marks_online_machine_online(monkeypatch, db_session):
+def test_apply_container_status_snapshot_removes_db_container_missing_on_node(db_session):
+    machine = create_machine()
+    container = create_container(machine=machine, name="missing_on_node", status=ContainerStatus.CREATING)
+    container_id = container.id
+
+    result = node_comms.apply_container_status_snapshot({}, machine.id)
+
+    db_session.expire_all()
+    assert result["vanished"] == 1
+    assert db_session.get(Container, container_id) is None
+
+
+def test_apply_container_status_snapshot_ignores_unknown_node_container(db_session):
+    machine = create_machine()
+
+    result = node_comms.apply_container_status_snapshot(
+        {"unknown_on_ctrl": {"status": "online"}},
+        machine.id,
+    )
+
+    assert result["updated"] == 0
+    assert result["skipped"] == 1
+    assert result["vanished"] == 0
+
+
+def test_apply_container_status_snapshot_accepts_restarting(db_session):
+    machine = create_machine()
+    container = create_container(machine=machine, name="restarting_on_node", status=ContainerStatus.ONLINE)
+
+    result = node_comms.apply_container_status_snapshot(
+        {"restarting_on_node": {"status": ContainerStatus.RESTARTING.value}},
+        machine.id,
+    )
+
+    db_session.expire_all()
+    assert result["updated"] == 1
+    assert result["skipped"] == 0
+    assert result["vanished"] == 0
+    assert db_session.get(Container, container.id).container_status == ContainerStatus.RESTARTING
+
+
+def test_list_machine_bref_does_not_probe_or_mutate_offline_machine(monkeypatch, db_session):
     machine = create_machine(machine_status=MachineStatus.OFFLINE)
-    monkeypatch.setattr(machine_tasks, "is_machine_online_remote", lambda machine_id, timeout=2.0: True)
+    monkeypatch.setattr(
+        machine_tasks,
+        "is_machine_online_remote",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not probe node")),
+    )
 
     result, total_pages = machine_tasks.List_all_machine_bref_information(0, 10)
 
     assert total_pages == 1
     assert result[0].id == machine.id
-    db_session.expire_all()
-    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.ONLINE
-
-
-def test_list_machine_bref_marks_machine_offline_without_mutating_containers(monkeypatch, db_session):
-    machine = create_machine(machine_status=MachineStatus.ONLINE)
-    container = create_container(machine=machine, status=ContainerStatus.ONLINE)
-    monkeypatch.setattr(machine_tasks, "is_machine_online_remote", lambda machine_id, timeout=2.0: False)
-
-    result, _ = machine_tasks.List_all_machine_bref_information(0, 10)
-
     assert result[0].machine_status == MachineStatus.OFFLINE.value
     db_session.expire_all()
-    assert db_session.get(Container, container.id).container_status == ContainerStatus.ONLINE
+    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.OFFLINE
 
 
-def test_list_machine_bref_keeps_maintenance_display_when_remote_online(monkeypatch, db_session):
-    machine = create_machine(machine_status=MachineStatus.OFFLINE, is_maintenance=True)
-    monkeypatch.setattr(machine_tasks, "is_machine_online_remote", lambda machine_id, timeout=2.0: True)
+def test_list_machine_bref_keeps_online_machine_and_containers_without_probe(monkeypatch, db_session):
+    machine = create_machine(machine_status=MachineStatus.ONLINE)
+    container = create_container(machine=machine, status=ContainerStatus.ONLINE)
+    monkeypatch.setattr(
+        machine_tasks,
+        "is_machine_online_remote",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not probe node")),
+    )
 
     result, _ = machine_tasks.List_all_machine_bref_information(0, 10)
 
     assert result[0].machine_status == MachineStatus.ONLINE.value
-    assert result[0].is_maintenance is True
-    assert result[0].display_status == "maintenance"
+    db_session.expire_all()
+    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.ONLINE
+    assert db_session.get(Container, container.id).container_status == ContainerStatus.ONLINE
 
 
-def test_list_machine_bref_marks_connection_offline_but_keeps_maintenance_display(monkeypatch, db_session):
-    machine = create_machine(machine_status=MachineStatus.ONLINE, is_maintenance=True)
-    monkeypatch.setattr(machine_tasks, "is_machine_online_remote", lambda machine_id, timeout=2.0: False)
+def test_list_machine_bref_keeps_maintenance_display_without_probe(monkeypatch, db_session):
+    machine = create_machine(machine_status=MachineStatus.OFFLINE, is_maintenance=True)
+    monkeypatch.setattr(
+        machine_tasks,
+        "is_machine_online_remote",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not probe node")),
+    )
 
     result, _ = machine_tasks.List_all_machine_bref_information(0, 10)
 
     assert result[0].machine_status == MachineStatus.OFFLINE.value
+    assert result[0].is_maintenance is True
+    assert result[0].display_status == "maintenance"
+
+
+def test_list_machine_bref_online_maintenance_display_without_probe(monkeypatch, db_session):
+    machine = create_machine(machine_status=MachineStatus.ONLINE, is_maintenance=True)
+    monkeypatch.setattr(
+        machine_tasks,
+        "is_machine_online_remote",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not probe node")),
+    )
+
+    result, _ = machine_tasks.List_all_machine_bref_information(0, 10)
+
+    assert result[0].machine_status == MachineStatus.ONLINE.value
     assert result[0].is_maintenance is True
     assert result[0].display_status == "maintenance"
 
@@ -215,7 +274,11 @@ def test_list_machine_bref_filters_non_operator_by_machine_permission(monkeypatc
     allowed = create_machine(machine_name="allowed_machine")
     create_machine(machine_name="blocked_machine")
     machine_tasks.Add_machine_permission(allowed.id, user.id)
-    monkeypatch.setattr(machine_tasks, "is_machine_online_remote", lambda machine_id, timeout=2.0: True)
+    monkeypatch.setattr(
+        machine_tasks,
+        "is_machine_online_remote",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not probe node")),
+    )
 
     result, _ = machine_tasks.List_all_machine_bref_information(0, 10, user_id=user.id)
 
@@ -226,7 +289,11 @@ def test_list_machine_bref_operator_bypasses_machine_permission(monkeypatch, db_
     operator = create_user(permission=PERMISSION.OPERATOR)
     m1 = create_machine(machine_name="operator_machine_1")
     m2 = create_machine(machine_name="operator_machine_2")
-    monkeypatch.setattr(machine_tasks, "is_machine_online_remote", lambda machine_id, timeout=2.0: True)
+    monkeypatch.setattr(
+        machine_tasks,
+        "is_machine_online_remote",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not probe node")),
+    )
 
     result, _ = machine_tasks.List_all_machine_bref_information(0, 10, user_id=operator.id)
 

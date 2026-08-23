@@ -79,6 +79,7 @@ def list_containers(
     offset: int = 0,
     machine_id: int | None = None,
     user_id: int | None = None,
+    container_name: str | None = None,
     *,
     session: Session,
 ) -> Sequence[Container]:
@@ -87,14 +88,26 @@ def list_containers(
         stmt = stmt.where(Container.machine_id == int(machine_id))
     if user_id is not None:
         stmt = stmt.join(Container.users).where(User.id == int(user_id))
+    if container_name:
+        stmt = stmt.where(Container.name.ilike(f"%{container_name}%"))
     stmt = stmt.order_by(Container.id).offset(offset).limit(limit)
     return list(session.scalars(stmt).all())
 
 
-def count_containers(machine_id: int | None = None, *, session: Session) -> int:
+def count_containers(
+    machine_id: int | None = None,
+    user_id: int | None = None,
+    container_name: str | None = None,
+    *,
+    session: Session,
+) -> int:
     stmt = select(func.count()).select_from(Container)
     if machine_id is not None:
         stmt = stmt.where(Container.machine_id == int(machine_id))
+    if user_id is not None:
+        stmt = stmt.join(Container.users).where(User.id == int(user_id))
+    if container_name:
+        stmt = stmt.where(Container.name.ilike(f"%{container_name}%"))
     return int(session.scalar(stmt) or 0)
 
 

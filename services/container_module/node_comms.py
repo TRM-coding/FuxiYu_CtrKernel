@@ -134,9 +134,7 @@ def send(url: str, payload: dict, timeout: float = 5.0, *, cert=None, verify=Non
 
 
 def _ensure_machine_online_for_operation(machine_id: int, operation: str = ''):
-    """
-    这里检查机器在线状态的主要目的是为了在执行诸如创建/删除/修改容器等操作之前，先验证目标机器是否在线，以避免不必要的远程调用和更快地反馈给用户。虽然最终的远程调用也会有类似的检查，但这个预检查可以节省资源并提供更即时的错误响应。
-    """
+    """操作准入只读 Ctrl 侧状态机，不在普通操作前额外探活。"""
     try:
         with session_scope(commit=False) as session:
             m = machine_repo.get_by_id(machine_id, session=session)
@@ -146,8 +144,9 @@ def _ensure_machine_online_for_operation(machine_id: int, operation: str = ''):
         raise NodeServiceError(f"MACHINE {operation} failed: machine {machine_id} not found", reason="machine_not_found")
     if bool(getattr(m, "is_maintenance", False)) or is_machine_in_maintenance(machine_id):
         raise NodeServiceError(f"MACHINE {operation} aborted: machine is maintenance", reason="machine_maintenance")
-    ok = is_machine_online_remote(machine_id)
-    if not ok:
+    status = getattr(m, "machine_status", None)
+    status_value = status.value if hasattr(status, "value") else str(status or "")
+    if status_value != MachineStatus.ONLINE.value:
         raise NodeServiceError(f"MACHINE {operation} aborted: remote node not reachable or not online", reason="machine_offline")
 
 
@@ -402,6 +401,7 @@ _NODE_STATUS_TO_CTRL = {
     "offline": ContainerStatus.OFFLINE,
     "creating": ContainerStatus.CREATING,
     "starting": ContainerStatus.STARTING,
+    "restarting": ContainerStatus.RESTARTING,
     "stopping": ContainerStatus.STOPPING,
     "paused": ContainerStatus.PAUSED,
     "failed": ContainerStatus.FAILED,
@@ -417,19 +417,40 @@ def _container_by_name(name: str):
         return None
 
 
-def apply_container_status_snapshot(data: dict) -> dict:
-    """解析 container_status 快照 → 落库容器状态。返回 {"updated", "skipped"}。"""
-    updated = skipped = 0
+def apply_container_status_snapshot(data: dict, machine_id: int | None = None) -> dict:
+    """解析 container_status 快照 → 落库容器状态/清理消失容器。
+
+    Ctrl DB 是容器事实清单；Node 快照只用于更新已登记容器。Node 未上报但
+    Ctrl DB 里属于该 machine 的容器，视为 Node 侧已消失，复用删除清理流程。
+    """
+    updated = skipped = vanished = 0
     if not isinstance(data, dict):
-        return {"updated": updated, "skipped": skipped}
+        return {"updated": updated, "skipped": skipped, "vanished": vanished}
+
+    missing_names: list[str] = []
     try:
         with session_scope() as session:
+            containers_by_name = {}
+            if machine_id is not None:
+                containers = containers_repo.list_containers(
+                    limit=1000000,
+                    offset=0,
+                    machine_id=machine_id,
+                    session=session,
+                )
+                containers_by_name = {container.name: container for container in containers}
+
+                snapshot_names = set(data.keys())
+                missing_names = sorted(set(containers_by_name) - snapshot_names)
             for name, entry in data.items():
                 ctrl_status = _NODE_STATUS_TO_CTRL.get(str((entry or {}).get("status", "")))
                 if ctrl_status is None:
                     skipped += 1
                     continue
-                container = containers_repo.get_by_container_name(name, session=session)
+                if machine_id is not None:
+                    container = containers_by_name.get(name)
+                else:
+                    container = containers_repo.get_by_container_name(name, session=session)
                 if container is None:
                     skipped += 1
                     continue
@@ -442,7 +463,20 @@ def apply_container_status_snapshot(data: dict) -> dict:
     except Exception as e:
         logger.warning("apply status snapshot failed: %s", e)
         skipped += 1
-    return {"updated": updated, "skipped": skipped}
+
+    for name in missing_names:
+        _handle_container_deleted(name)
+        vanished += 1
+
+    logger.info(
+        "apply_container_status_snapshot: machine=%s updated=%s skipped=%s vanished=%s snapshot=%s",
+        machine_id,
+        updated,
+        skipped,
+        vanished,
+        len(data),
+    )
+    return {"updated": updated, "skipped": skipped, "vanished": vanished}
 
 
 def apply_last_ssh_snapshot(data: dict) -> dict:
@@ -589,7 +623,7 @@ def apply_snapshot_batch(batch: dict) -> dict:
         topic = frame.get("topic")
         data = frame.get("payload")
         if topic == "container_status":
-            result[topic] = apply_container_status_snapshot(data)
+            result[topic] = apply_container_status_snapshot(data, machine_id)
         elif topic == "last_ssh":
             result[topic] = apply_last_ssh_snapshot(data)
         elif topic == "disk_usage":
@@ -764,6 +798,7 @@ async def handle_node_ws(websocket) -> None:
     try:
         await websocket.accept()
     except Exception as e:
+        Update_machine(machine_id, machine_status=MachineStatus.OFFLINE)
         logger.warning("handle_node_ws: accept failed for uid=%s: %s", uid, e)
         return
 

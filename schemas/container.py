@@ -169,6 +169,7 @@ class RefreshLastSshLoginTimeResponse(_CompatBaseModel):
 class ListAllContainerBrefInformationRequest(_CompatBaseModel):
     machine_id: int | None = Field(default=None, ge=0)
     user_id: int | None = Field(default=None, ge=0)
+    container_name: str | None = None
     page_number: int = Field(default=0, ge=0)
     page_size: int = Field(default=10, ge=1)
 
@@ -243,6 +244,7 @@ class ListAllContainerBrefInformationResponse(_CompatBaseModel):
     success: int | bool = 1
     containers_info: list[ContainerBriefInformation | dict[str, Any]] = Field(default_factory=list)
     total_page: int = 0
+    total_number: int = 0
     long_term_container_remaining: int | None = None
     long_term_container_limit: int | None = None
 

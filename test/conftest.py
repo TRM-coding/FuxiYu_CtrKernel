@@ -136,10 +136,3 @@ def mock_external_services(monkeypatch, request):
     yield
 
 
-@pytest.fixture(autouse=True)
-def _clear_reachability_cache():
-    """机器可达性 TTL 缓存是模块级全局：每个测试前后清空，防止跨测试污染。"""
-    from FuxiYu_CtrKernel.services import machine_tasks
-    machine_tasks._reach_cache.clear()
-    yield
-    machine_tasks._reach_cache.clear()

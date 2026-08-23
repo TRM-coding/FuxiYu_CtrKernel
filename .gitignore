@@ -1,20 +1,23 @@
 **/.pytest_cache/
 **/__pycache__/
+*/.pytest_cache/
+*/__pycache__/
 
 venv/
-
-# ignore locally-generated TLS certs (mkcert)
-certs/*.pem
-certs/*-key.pem
-certs/*.key
-*.log
 .env
 .mysql-fix-*.sql
 
 /logs/*
 !/logs/.gitkeep
 
+/certs/*
+!/certs/.gitkeep
+
+/pinned_certs/
+
 docs/audit/*
 
-*.db# TOFU 信任锚：register_machine 落盘的 Node pin 证书（公有材料，但按机器动态生成）
-/pinned_certs/
+*.db
+*.sqlite
+*.sqlite3
+*.log

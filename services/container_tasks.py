@@ -72,20 +72,36 @@ def get_machine_id_by_container_id(container_id: int) -> int | None:
         return containers_repo.get_machine_id_by_container_id(container_id, session=session)
 
 
-def list_containers(limit: int = 50, offset: int = 0, machine_id: int | None = None, user_id: int | None = None):
+def list_containers(
+    limit: int = 50,
+    offset: int = 0,
+    machine_id: int | None = None,
+    user_id: int | None = None,
+    container_name: str | None = None,
+):
     with session_scope(commit=False) as session:
         return containers_repo.list_containers(
             limit=limit,
             offset=offset,
             machine_id=machine_id,
             user_id=user_id,
+            container_name=container_name,
             session=session,
         )
 
 
-def count_containers(machine_id: int | None = None) -> int:
+def count_containers(
+    machine_id: int | None = None,
+    user_id: int | None = None,
+    container_name: str | None = None,
+) -> int:
     with session_scope(commit=False) as session:
-        return containers_repo.count_containers(machine_id=machine_id, session=session)
+        return containers_repo.count_containers(
+            machine_id=machine_id,
+            user_id=user_id,
+            container_name=container_name,
+            session=session,
+        )
 
 
 def create_container(*args, **kwargs):
@@ -1015,23 +1031,77 @@ def get_container_detail_information(container_id:int)->container_detail_informa
     }
     return res
 
-def list_all_container_bref_information(machine_id:int, request_user_id:int, page_number:int, page_size:int, user_id:int = None)->dict:
+def list_all_container_bref_information(
+    machine_id: int | None,
+    request_user_id: int,
+    page_number: int,
+    page_size: int,
+    user_id: int | None = None,
+    container_name: str | None = None,
+) -> dict:
+    container_name = (container_name or "").strip() or None
+    offset = page_number * page_size
+    total_count = 0
     # 非管理员用户必须先通过机器权限表过滤可见机器
     if not _is_operator_user(request_user_id):
         with session_scope(commit=False) as session:
-            allowed = set(machine_permission_repo.list_machine_ids_by_user(user_id, session=session))
+            allowed = set(machine_permission_repo.list_machine_ids_by_user(request_user_id, session=session))
         if machine_id is not None:
             if machine_id not in allowed:
                 containers = []
+                total_count = 0
             else:
-                containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=request_user_id)
+                containers = list_containers(
+                    limit=page_size,
+                    offset=offset,
+                    machine_id=machine_id,
+                    user_id=request_user_id,
+                    container_name=container_name,
+                )
+                total_count = count_containers(
+                    machine_id=machine_id,
+                    user_id=request_user_id,
+                    container_name=container_name,
+                )
         else:
-            containers = [c for c in list_containers(limit=99999, offset=0, machine_id=None, user_id=request_user_id) if c.machine_id in allowed]
-            containers = containers[page_number*page_size:page_number*page_size+page_size]
+            all_visible = [
+                c for c in list_containers(
+                    limit=99999,
+                    offset=0,
+                    machine_id=None,
+                    user_id=request_user_id,
+                    container_name=container_name,
+                )
+                if c.machine_id in allowed
+            ]
+            total_count = len(all_visible)
+            containers = all_visible[offset:offset + page_size]
     elif user_id is not None:
-        containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=user_id)
+        containers = list_containers(
+            limit=page_size,
+            offset=offset,
+            machine_id=machine_id,
+            user_id=user_id,
+            container_name=container_name,
+        )
+        total_count = count_containers(
+            machine_id=machine_id,
+            user_id=user_id,
+            container_name=container_name,
+        )
     else:
-        containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=None)
+        containers = list_containers(
+            limit=page_size,
+            offset=offset,
+            machine_id=machine_id,
+            user_id=None,
+            container_name=container_name,
+        )
+        total_count = count_containers(
+            machine_id=machine_id,
+            user_id=None,
+            container_name=container_name,
+        )
     # WSS 推送已接管状态采集（apply_container_status_snapshot 落库 container_status）；
     # getter 只查库组装，不再实时打 Node。「容器在 Node 侧消失」由 WSS delete 帧处理。
     res = []
@@ -1104,12 +1174,11 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
 
     # 这里计算总页数
     try: # 理论不会报错 但是被建议保留
-        total_count = count_containers(machine_id=machine_id)
         total_page = max(1, math.ceil(total_count / page_size))
     except Exception:
         total_page = 1
 
-    result = {"containers": res, "total_page": total_page}
+    result = {"containers": res, "total_page": total_page, "total_number": total_count}
     if user_id is not None:
         result["long_term_container_remaining"] = _get_long_term_container_remaining(user_id)
         result["long_term_container_limit"] = get_long_term_container_limit()
