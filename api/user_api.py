@@ -172,6 +172,7 @@ def list_all_user_bref_information_api(
     request: Request,
     page_number: int = Query(default=1, ge=1),
     page_size: int = Query(default=10, ge=1),
+    user_search: str | None = Query(default=None),
     _: int = Depends(require_current_user),
 ):
     """分页查询用户概要。"""
@@ -180,6 +181,7 @@ def list_all_user_bref_information_api(
         users = user_tasks.List_all_user_bref_information(
             page_number=int(page_number),
             page_size=int(page_size),
+            user_search=(user_search or "").strip() or None,
         )
     except Exception:
         return _error(500, "failed to list users", "list_failed")

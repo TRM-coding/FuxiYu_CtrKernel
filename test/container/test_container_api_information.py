@@ -137,10 +137,10 @@ def test_list_container_bref_api_treats_blank_user_id_as_no_filter(client, monke
 
     resp = client.post(
         "/api/containers/list_all_container_bref_information",
-        json={"machine_id": "", "user_id": "", "container_name": "alpha", "page_number": 0, "page_size": 10},
+        json={"machine_id": "", "user_id": "", "container_search": "alpha", "page_number": 0, "page_size": 10},
     )
 
     assert resp.status_code == 200
     assert captured["machine_id"] is None
     assert captured["user_id"] is None
-    assert captured["container_name"] == "alpha"
+    assert captured["container_search"] == "alpha"

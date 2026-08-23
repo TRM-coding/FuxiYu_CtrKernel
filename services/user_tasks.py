@@ -282,7 +282,7 @@ def Get_user_detail_information(user_id: int)->user_detail_information:
 
 #####################################
 # 分页返回users
-def List_all_user_bref_information(page_number:int, page_size:int)->list[user_bref_information]:
+def List_all_user_bref_information(page_number:int, page_size:int, user_search: str | None = None)->list[user_bref_information]:
     try:
         pn = int(page_number) if page_number and int(page_number) > 0 else 1
     except Exception:
@@ -293,8 +293,9 @@ def List_all_user_bref_information(page_number:int, page_size:int)->list[user_br
         ps = 10
 
     offset = (pn - 1) * ps
+    user_search = (user_search or "").strip() or None
     with session_scope(commit=False) as session:
-        users = list_users(limit=ps, offset=offset, session=session)
+        users = list_users(limit=ps, offset=offset, user_search=user_search, session=session)
     result: list[user_bref_information] = []
     for u in users:
         # Use centralized helper to compute container counts for this user

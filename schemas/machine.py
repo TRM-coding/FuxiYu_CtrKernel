@@ -175,7 +175,10 @@ class MachineDetailResponse(NodeHardwareProfile, MachineAllocationLimit):
 
 
 class ListMachineBriefRequest(PageRequest):
-    pass
+    machine_search: str | None = Field(
+        default=None,
+        description="机器搜索关键词；匹配 machine_id、machine_name、machine_ip。",
+    )
 
 
 class MachineBriefItem(BaseModel):

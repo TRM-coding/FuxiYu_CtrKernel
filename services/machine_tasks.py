@@ -3,7 +3,7 @@ from ..extensions import session_scope
 from ..repositories.machine_repo import *
 from pydantic import BaseModel
 from typing import Optional
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, or_, select
 from ..repositories import machine_permission_repo, user_repo
 from .operation_log_tasks import write_operation_log as write_op_log
 from ..constant import MachineStatus, OperationType
@@ -12,7 +12,7 @@ MACHINE_DISPLAY_MAINTENANCE = "maintenance"
 #######################################
 #API Definition
 class machine_bref_information(BaseModel):
-    id: int  #没想到更好的解决办法。主要作为各种操作的映射。
+    id: int
     machine_name:str
     machine_ip:str
     machine_type:str
@@ -29,7 +29,7 @@ class machine_detail_information(BaseModel):
     display_status: str | None = None
     cpu_core_number:int
     gpu_number:int
-    gpu_type: Optional[str] # 部分sql数据会出现此字段是NULL的情况，因此暂时用这个方法解决
+    gpu_type: Optional[str]
     memory_size_gb:int
     max_shared_gb:int
     max_cpu_core_number:int
@@ -37,7 +37,7 @@ class machine_detail_information(BaseModel):
     max_memory_gb:int
     disk_size_gb:int
     machine_description:str
-    containers:list[int] #容器id
+    containers:list[int] # 容器 id
 #######################################
 
 #######################################
@@ -91,20 +91,20 @@ def _is_operator_user(user_id: int) -> bool:
 
 
 def _machine_status_value(machine) -> str:
-    """返回机器真实连接状态轴：online/offline。"""
+    """返回机器真实连接状态：online/offline。"""
     status = getattr(machine, "machine_status", None)
     return status.value if hasattr(status, "value") else str(status)
 
 
 def _display_machine_status(machine) -> str:
-    """返回对外展示状态：维护开关优先，真实连接状态仍保留在 DB。"""
+    """返回对外展示状态；维护开关优先，真实连接状态仍保留在 DB。"""
     if bool(getattr(machine, "is_maintenance", False)):
         return MACHINE_DISPLAY_MAINTENANCE
     return _machine_status_value(machine)
 
 
 def is_machine_in_maintenance(machine_id: int) -> bool:
-    """供操作准入和容器派生展示态复用的维护开关判断。"""
+    """判断机器是否处于维护模式。"""
     try:
         with session_scope(commit=False) as session:
             machine = get_by_id(machine_id, session=session)
@@ -130,10 +130,13 @@ def is_machine_online_remote(machine_id: int, timeout: float = 2.0) -> bool:
     if not machine_ip:
         return False
 
-    # 延迟 import：node_comms 顶层依赖本模块（is_machine_online_remote），顶层互引会循环
-    from ..services.container_module.node_comms import get_full_url, send
     try:
-        j = send(get_full_url(machine_ip, "/machine_status"), {"config": {}}, timeout=timeout)
+        from ..services.container_module import node_comms
+        j = node_comms.send(
+            node_comms.get_full_url(machine_ip, "/machine_status"),
+            {"config": {}},
+            timeout=timeout,
+        )
     except Exception:
         return False
     if isinstance(j, dict) and j.get('success') in (1, True):
@@ -259,7 +262,7 @@ def Remove_machine(machine_id:list[int], operator_user_id: int | None = None)->b
 
 
 #######################################
-# 更新机器的信息
+# 更新机器信息
 def Update_machine(machine_id: int, operator_user_id: int | None = None, **fields) -> bool:
     with session_scope(commit=False) as session:
         machine = get_by_id(machine_id, session=session)
@@ -302,10 +305,8 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
                 setattr(e, 'error_reason', 'update_failed')
                 raise e
 
-    # 维护态为纯开关（维护不触发停容器，状态机落地后由 set_maintenance 承载）；
-    # machine_status 变更直接更新，不再启动过渡心跳。
-
-    # 字段名翻译: 前端 disk_size → 模型 disk_size_gb
+    # 维护态为纯开关；machine_status 直接表达真实连接状态。
+    # 字段名翻译：前端 disk_size -> 模型 disk_size_gb。
     if 'disk_size' in fields:
         fields['disk_size_gb'] = fields.pop('disk_size')
     if str(fields.get('machine_status', '')).lower() == MACHINE_DISPLAY_MAINTENANCE:
@@ -313,7 +314,6 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
     if 'is_maintenance' in fields:
         fields['is_maintenance'] = bool(fields['is_maintenance'])
 
-    # 记录前值：repo 已原子化，update 前从 machine 对象取旧值即可
     before = {k: str(getattr(machine, k, None)) for k in fields.keys()}
     try:
         with session_scope() as session:
@@ -329,7 +329,7 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
 
 
 def Set_maintenance(machine_id: int, is_maintenance: bool, operator_user_id: int | None = None) -> bool:
-    """设置机器维护开关；真实在线/离线状态仍由连接状态机维护。"""
+    """设置机器维护开关；真实在线/离线状态仍由连接状态维护。"""
 
     with session_scope(commit=False) as session:
         machine = get_by_id(machine_id, session=session)
@@ -369,7 +369,7 @@ def Set_maintenance(machine_id: int, is_maintenance: bool, operator_user_id: int
 
 
 #######################################
-# 根据机器ID获取机器的详细信息
+# 根据机器 ID 获取机器详情
 def Get_detail_information(machine_id:int)->machine_detail_information|None:
     with session_scope(commit=False) as session:
         machine = get_by_id(machine_id, session=session)
@@ -399,30 +399,27 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
 
 # 获取一批机器的概要信息
 def List_all_machine_bref_information(
-    page_number: int, 
+    page_number: int,
     page_size: int,
-    machine_name_prefix: str = None,  # 新增：按机器名称前缀过滤
-    sort_by: str = "id",              # 新增：排序字段
-    sort_order: str = "asc",          # 新增：排序方向（asc/desc）
-    user_id: int | None = None
+    machine_name_prefix: str = None,
+    sort_by: str = "id",
+    sort_order: str = "asc",
+    user_id: int | None = None,
+    machine_search: str | None = None,
 ) -> tuple[list[machine_bref_information], int]:
-    """
-    获取机器概要信息列表，支持分页、过滤和排序
-    
-    Args:
-        page_number: 页码（从0开始）
-        page_size: 每页条数
-        machine_name_prefix: 机器名称前缀（用于过滤，如 "test_machine_"）
-        sort_by: 排序字段（默认 "id"，支持 "machine_name"、"machine_ip" 等）
-        sort_order: 排序方向（"asc" 升序，"desc" 降序）
-    
-    Returns:
-        tuple: (机器概要信息列表, 总页数)
-    """
     with session_scope(commit=False) as session:
         stmt = select(Machine)
         if machine_name_prefix:
             stmt = stmt.where(Machine.machine_name.like(f"{machine_name_prefix}%"))
+        if machine_search:
+            keyword = f"%{machine_search.strip()}%"
+            stmt = stmt.where(
+                or_(
+                    Machine.machine_name.ilike(keyword),
+                    Machine.machine_ip.ilike(keyword),
+                    cast(Machine.id, String).ilike(keyword),
+                )
+            )
 
         if user_id and not _is_operator_user(user_id):
             allowed = set(machine_permission_repo.list_machine_ids_by_user(user_id, session=session))
@@ -455,7 +452,6 @@ def List_all_machine_bref_information(
         )
         res.append(info)
     
-    # 计算总页数（基于过滤后的数量）
     total_pages = (total_count + page_size - 1) // page_size if page_size > 0 else 0
     
     return res, total_pages

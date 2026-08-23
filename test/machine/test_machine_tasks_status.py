@@ -269,6 +269,24 @@ def test_list_machine_bref_online_maintenance_display_without_probe(monkeypatch,
     assert result[0].display_status == "maintenance"
 
 
+def test_list_machine_bref_filters_by_machine_search(monkeypatch, db_session):
+    target = create_machine(machine_name="search_target", machine_ip="10.20.30.40")
+    create_machine(machine_name="other_machine", machine_ip="10.20.30.41")
+    monkeypatch.setattr(
+        machine_tasks,
+        "is_machine_online_remote",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not probe node")),
+    )
+
+    by_name, _ = machine_tasks.List_all_machine_bref_information(0, 10, machine_search="target")
+    by_ip, _ = machine_tasks.List_all_machine_bref_information(0, 10, machine_search="10.20.30.40")
+    by_id, _ = machine_tasks.List_all_machine_bref_information(0, 10, machine_search=str(target.id))
+
+    assert [m.id for m in by_name] == [target.id]
+    assert [m.id for m in by_ip] == [target.id]
+    assert target.id in [m.id for m in by_id]
+
+
 def test_list_machine_bref_filters_non_operator_by_machine_permission(monkeypatch, db_session):
     user = create_user(permission=PERMISSION.USER)
     allowed = create_machine(machine_name="allowed_machine")

@@ -77,7 +77,7 @@ def list_containers(
     offset: int = 0,
     machine_id: int | None = None,
     user_id: int | None = None,
-    container_name: str | None = None,
+    container_search: str | None = None,
 ):
     with session_scope(commit=False) as session:
         return containers_repo.list_containers(
@@ -85,7 +85,7 @@ def list_containers(
             offset=offset,
             machine_id=machine_id,
             user_id=user_id,
-            container_name=container_name,
+            container_search=container_search,
             session=session,
         )
 
@@ -93,13 +93,13 @@ def list_containers(
 def count_containers(
     machine_id: int | None = None,
     user_id: int | None = None,
-    container_name: str | None = None,
+    container_search: str | None = None,
 ) -> int:
     with session_scope(commit=False) as session:
         return containers_repo.count_containers(
             machine_id=machine_id,
             user_id=user_id,
-            container_name=container_name,
+            container_search=container_search,
             session=session,
         )
 
@@ -1037,9 +1037,9 @@ def list_all_container_bref_information(
     page_number: int,
     page_size: int,
     user_id: int | None = None,
-    container_name: str | None = None,
+    container_search: str | None = None,
 ) -> dict:
-    container_name = (container_name or "").strip() or None
+    container_search = (container_search or "").strip() or None
     offset = page_number * page_size
     total_count = 0
     # 非管理员用户必须先通过机器权限表过滤可见机器
@@ -1056,12 +1056,12 @@ def list_all_container_bref_information(
                     offset=offset,
                     machine_id=machine_id,
                     user_id=request_user_id,
-                    container_name=container_name,
+                    container_search=container_search,
                 )
                 total_count = count_containers(
                     machine_id=machine_id,
                     user_id=request_user_id,
-                    container_name=container_name,
+                    container_search=container_search,
                 )
         else:
             all_visible = [
@@ -1070,7 +1070,7 @@ def list_all_container_bref_information(
                     offset=0,
                     machine_id=None,
                     user_id=request_user_id,
-                    container_name=container_name,
+                    container_search=container_search,
                 )
                 if c.machine_id in allowed
             ]
@@ -1082,12 +1082,12 @@ def list_all_container_bref_information(
             offset=offset,
             machine_id=machine_id,
             user_id=user_id,
-            container_name=container_name,
+            container_search=container_search,
         )
         total_count = count_containers(
             machine_id=machine_id,
             user_id=user_id,
-            container_name=container_name,
+            container_search=container_search,
         )
     else:
         containers = list_containers(
@@ -1095,12 +1095,12 @@ def list_all_container_bref_information(
             offset=offset,
             machine_id=machine_id,
             user_id=None,
-            container_name=container_name,
+            container_search=container_search,
         )
         total_count = count_containers(
             machine_id=machine_id,
             user_id=None,
-            container_name=container_name,
+            container_search=container_search,
         )
     # WSS 推送已接管状态采集（apply_container_status_snapshot 落库 container_status）；
     # getter 只查库组装，不再实时打 Node。「容器在 Node 侧消失」由 WSS delete 帧处理。

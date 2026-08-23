@@ -57,17 +57,24 @@ def test_list_users_requires_token(client, monkeypatch):
 def test_list_users_success(client, monkeypatch):
     _valid_token(monkeypatch)
     user = SimpleNamespace(dict=lambda: {"user_id": 1, "username": "u"})
-    monkeypatch.setattr(user_api.user_tasks, "List_all_user_bref_information", lambda page_number, page_size: [user])
+    captured = {}
 
-    resp = client.get("/api/users/list_all_user_bref_information" )
+    def _list(page_number, page_size, user_search=None):
+        captured.update(page_number=page_number, page_size=page_size, user_search=user_search)
+        return [user]
+
+    monkeypatch.setattr(user_api.user_tasks, "List_all_user_bref_information", _list)
+
+    resp = client.get("/api/users/list_all_user_bref_information?user_search=alice" )
 
     assert resp.status_code == 200
+    assert captured["user_search"] == "alice"
     assert resp.json()["users"] == [{"user_id": 1, "username": "u"}]
 
 
 def test_list_users_task_failure(client, monkeypatch):
     _valid_token(monkeypatch)
-    monkeypatch.setattr(user_api.user_tasks, "List_all_user_bref_information", lambda page_number, page_size: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(user_api.user_tasks, "List_all_user_bref_information", lambda page_number, page_size, user_search=None: (_ for _ in ()).throw(RuntimeError("boom")))
 
     resp = client.get("/api/users/list_all_user_bref_information" )
 

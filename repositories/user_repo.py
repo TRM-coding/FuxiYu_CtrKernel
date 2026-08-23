@@ -4,7 +4,7 @@
 
 from typing import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, or_, select
 from sqlalchemy.orm import Session
 
 from ..models.user import User
@@ -36,8 +36,18 @@ def get_by_email(email: str, *, session: Session) -> User | None:
 	return session.scalars(stmt).first()
 
 
-def list_users(limit: int = 50, offset: int = 0, *, session: Session) -> Sequence[User]:
+def list_users(limit: int = 50, offset: int = 0, user_search: str | None = None, *, session: Session) -> Sequence[User]:
 	stmt = select(User).order_by(User.id).offset(offset).limit(limit)
+	if user_search:
+		keyword = f"%{user_search}%"
+		stmt = select(User).where(
+			or_(
+				User.username.ilike(keyword),
+				User.email.ilike(keyword),
+				cast(User.id, String).ilike(keyword),
+				cast(User.graduation_year, String).ilike(keyword),
+			)
+		).order_by(User.id).offset(offset).limit(limit)
 	return list(session.scalars(stmt).all())
 
 

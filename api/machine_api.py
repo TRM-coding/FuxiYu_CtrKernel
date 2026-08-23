@@ -259,6 +259,7 @@ def list_all_machine_bref_information_api(
         page_number=message.page_number,
         page_size=message.page_size,
         user_id=user_id,
+        machine_search=(message.machine_search or "").strip() or None,
     )
     machines = []
     for machine in machines_info:

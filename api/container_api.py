@@ -706,7 +706,7 @@ def list_all_containers_bref_information_api(
     data = _payload_data(payload)
     machine_id = _machine_id_or_none(data.get("machine_id", ""))
     user_id = _user_id_or_none(data.get("user_id", ""))
-    container_name = str(data.get("container_name") or "").strip() or None
+    container_search = str(data.get("container_search") or "").strip() or None
     page_number = int(data.get("page_number", 0) or 0)
     page_size = int(data.get("page_size", 10) or 10)
 
@@ -717,7 +717,7 @@ def list_all_containers_bref_information_api(
             page_number=page_number,
             page_size=page_size,
             user_id=user_id,
-            container_name=container_name,
+            container_search=container_search,
         )
         containers_info = result.get("containers", [])
         total_page = result.get("total_page", 1)

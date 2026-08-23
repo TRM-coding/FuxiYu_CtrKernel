@@ -82,6 +82,10 @@ class UserDetailResponse(BaseModel):
 
 class ListUserBriefRequest(PageRequest):
     page_number: int = Field(default=1, ge=1)
+    user_search: str | None = Field(
+        default=None,
+        description="用户搜索关键词；匹配 user_id、username、email、graduation_year。",
+    )
 
 
 class ListUserBriefResponse(BaseModel):

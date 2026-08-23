@@ -73,7 +73,7 @@ def test_list_container_bref_non_operator_filters_by_machine_permission(monkeypa
     assert [c.container_id for c in result["containers"]] == [allowed_container.id]
 
 
-def test_list_container_bref_filters_by_container_name(monkeypatch, db_session):
+def test_list_container_bref_filters_by_container_search_name(monkeypatch, db_session):
     operator = create_user(permission=PERMISSION.OPERATOR)
     machine = create_machine()
     target = create_container(machine=machine, name="alpha_target")
@@ -86,11 +86,39 @@ def test_list_container_bref_filters_by_container_name(monkeypatch, db_session):
         request_user_id=operator.id,
         page_number=0,
         page_size=10,
-        container_name="target",
+        container_search="target",
     )
 
     assert [c.container_id for c in result["containers"]] == [target.id]
     assert result["total_number"] == 1
+
+
+def test_list_container_bref_container_search_matches_port_and_machine_ip(monkeypatch, db_session):
+    operator = create_user(permission=PERMISSION.OPERATOR)
+    target_machine = create_machine(machine_ip="10.10.10.8")
+    other_machine = create_machine(machine_ip="10.10.10.9")
+    target = create_container(machine=target_machine, name="alpha", port=2208)
+    create_container(machine=other_machine, name="beta", port=2209)
+
+    db_session.commit()
+
+    by_port = container_tasks.list_all_container_bref_information(
+        machine_id=None,
+        request_user_id=operator.id,
+        page_number=0,
+        page_size=10,
+        container_search="2208",
+    )
+    by_ip = container_tasks.list_all_container_bref_information(
+        machine_id=None,
+        request_user_id=operator.id,
+        page_number=0,
+        page_size=10,
+        container_search="10.10.10.8",
+    )
+
+    assert [c.container_id for c in by_port["containers"]] == [target.id]
+    assert [c.container_id for c in by_ip["containers"]] == [target.id]
 
 
 def test_list_container_bref_includes_cleanup_info_from_ssh_record(monkeypatch, db_session, container_graph):

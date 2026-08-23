@@ -134,6 +134,21 @@ def test_list_all_user_bref_information_normalizes_pagination_and_returns_counts
     assert match.amount_of_managed_container == 1
 
 
+def test_list_all_user_bref_information_filters_by_user_search(db_session):
+    target = create_user(username="search_user", email="search_user@bjtu.edu.cn", graduation_year="2031")
+    create_user(username="other_user", email="other_user@bjtu.edu.cn", graduation_year="2032")
+
+    by_name = user_tasks.List_all_user_bref_information(page_number=1, page_size=10, user_search="search_user")
+    by_email = user_tasks.List_all_user_bref_information(page_number=1, page_size=10, user_search="search_user@bjtu")
+    by_year = user_tasks.List_all_user_bref_information(page_number=1, page_size=10, user_search="2031")
+    by_id = user_tasks.List_all_user_bref_information(page_number=1, page_size=10, user_search=str(target.id))
+
+    assert [u.user_id for u in by_name] == [target.id]
+    assert [u.user_id for u in by_email] == [target.id]
+    assert [u.user_id for u in by_year] == [target.id]
+    assert target.id in [u.user_id for u in by_id]
+
+
 def test_update_user_filters_forbidden_fields(db_session):
     user = create_user(username="update_user", email="update@bjtu.edu.cn", password="old")
     original_hash = user.password_hash

@@ -169,7 +169,10 @@ class RefreshLastSshLoginTimeResponse(_CompatBaseModel):
 class ListAllContainerBrefInformationRequest(_CompatBaseModel):
     machine_id: int | None = Field(default=None, ge=0)
     user_id: int | None = Field(default=None, ge=0)
-    container_name: str | None = None
+    container_search: str | None = Field(
+        default=None,
+        description="容器搜索关键词；匹配 container_id、container_name、port、machine_ip。",
+    )
     page_number: int = Field(default=0, ge=0)
     page_size: int = Field(default=10, ge=1)
 

@@ -6,7 +6,7 @@ repo 只接收显式 session，负责查询、写入和 flush；事务边界由 
 
 from typing import Any, Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -79,7 +79,7 @@ def list_containers(
     offset: int = 0,
     machine_id: int | None = None,
     user_id: int | None = None,
-    container_name: str | None = None,
+    container_search: str | None = None,
     *,
     session: Session,
 ) -> Sequence[Container]:
@@ -88,8 +88,17 @@ def list_containers(
         stmt = stmt.where(Container.machine_id == int(machine_id))
     if user_id is not None:
         stmt = stmt.join(Container.users).where(User.id == int(user_id))
-    if container_name:
-        stmt = stmt.where(Container.name.ilike(f"%{container_name}%"))
+    if container_search:
+        keyword = f"%{container_search}%"
+        stmt = stmt.join(Machine, Machine.id == Container.machine_id)
+        stmt = stmt.where(
+            or_(
+                Container.name.ilike(keyword),
+                cast(Container.id, String).ilike(keyword),
+                cast(Container.port, String).ilike(keyword),
+                Machine.machine_ip.ilike(keyword),
+            )
+        )
     stmt = stmt.order_by(Container.id).offset(offset).limit(limit)
     return list(session.scalars(stmt).all())
 
@@ -97,7 +106,7 @@ def list_containers(
 def count_containers(
     machine_id: int | None = None,
     user_id: int | None = None,
-    container_name: str | None = None,
+    container_search: str | None = None,
     *,
     session: Session,
 ) -> int:
@@ -106,8 +115,17 @@ def count_containers(
         stmt = stmt.where(Container.machine_id == int(machine_id))
     if user_id is not None:
         stmt = stmt.join(Container.users).where(User.id == int(user_id))
-    if container_name:
-        stmt = stmt.where(Container.name.ilike(f"%{container_name}%"))
+    if container_search:
+        keyword = f"%{container_search}%"
+        stmt = stmt.join(Machine, Machine.id == Container.machine_id)
+        stmt = stmt.where(
+            or_(
+                Container.name.ilike(keyword),
+                cast(Container.id, String).ilike(keyword),
+                cast(Container.port, String).ilike(keyword),
+                Machine.machine_ip.ilike(keyword),
+            )
+        )
     return int(session.scalar(stmt) or 0)
 
 
