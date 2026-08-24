@@ -207,3 +207,20 @@ def test_restart_container_success(
     assert container_tasks.restart_container(container.id, operator_user_id=root.id) is True
 
 
+def test_unpause_container_does_not_directly_write_online(
+    db_session,
+    container_graph,
+    mock_node_send,
+):
+    # 数据通路对账契约 C6：unpause 成功后不直写 ONLINE——状态推进由 WSS 快照接管
+    # （Node 侧 finish_action 已即时更新缓存，下一个快照 ≤5s 覆盖）
+    root, _machine, container = container_graph
+    container_tasks.update_container(container.id, container_status=ContainerStatus.PAUSED)
+    mock_node_send(NODE_SUCCESS_TRUE)
+
+    assert container_tasks.unpause_container(container.id, operator_user_id=root.id) is True
+
+    db_session.expire_all()
+    assert db_session.get(Container, container.id).container_status == ContainerStatus.PAUSED
+
+

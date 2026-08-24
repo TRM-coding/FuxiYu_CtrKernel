@@ -89,6 +89,15 @@ if __name__ == "__main__":
     _configure_runtime()
     logger = logging.getLogger(__name__)
 
+    # 启动探活（数据通路对账契约 C3）：后台线程对 ONLINE 机器探活一次，剔除幽灵 ONLINE。
+    # 同步 HTTP 探活放线程，不阻塞 WSS 服务启动；重连是 Node 的事。
+    try:
+        from FuxiYu_CtrKernel.services.container_module.node_comms import probe_machines_online_once
+
+        threading.Thread(target=probe_machines_online_once, daemon=True, name="machine-status-startup-probe").start()
+    except Exception as e:
+        logger.warning("startup probe failed to start: %s", e)
+
     while True:
         from FuxiYu_CtrKernel.services.container_module.node_comms import wss_reload_marker
 

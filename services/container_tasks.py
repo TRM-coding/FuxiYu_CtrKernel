@@ -496,11 +496,9 @@ def unpause_container(container_id: int, operator_user_id: int | None = None) ->
 
     _raise_on_node_error(res, 'unpause')
     if res.get('success') == 1:
-        # 更新本地状态为 online
-        try:
-            update_container(container.id, container_status=ContainerStatus.ONLINE)
-        except Exception as e:
-            logger.warning("unpause: failed to update container %s status to ONLINE: %s", container.id, e)
+        # 状态推进由 WSS 快照接管（数据通路对账契约 C6）：不直写 ONLINE——
+        # Node 侧 finish_action 已即时更新缓存，下一个快照（≤5s）自然推进；
+        # 快照是 container_status 权威源，操作路径直写仅作即时回执（pause 保留）。
         write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.UNPAUSE_CONTAINER,
                      target_type="container", target_id=container.id,
                      detail={"name": container.name, "machine_id": machine_id})

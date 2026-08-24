@@ -169,11 +169,112 @@ def test_apply_container_status_snapshot_removes_db_container_missing_on_node(db
     container = create_container(machine=machine, name="missing_on_node", status=ContainerStatus.CREATING)
     container_id = container.id
 
-    result = node_comms.apply_container_status_snapshot({}, machine.id)
+    # 非空快照中缺该容器 → 视为 Node 侧消失，复用删除清理
+    result = node_comms.apply_container_status_snapshot({"other_container": {"status": "online"}}, machine.id)
 
     db_session.expire_all()
     assert result["vanished"] == 1
     assert db_session.get(Container, container_id) is None
+
+
+def test_apply_container_status_snapshot_ignores_empty_snapshot(db_session):
+    # 数据通路对账契约 C1：空 dict 不触发 vanished（Node 契约不发出空 dict；防御性跳过）
+    machine = create_machine()
+    container = create_container(machine=machine, name="keep_on_empty", status=ContainerStatus.ONLINE)
+    container_id = container.id
+
+    result = node_comms.apply_container_status_snapshot({}, machine.id)
+
+    db_session.expire_all()
+    assert result["vanished"] == 0
+    assert result["failed"] == 0
+    assert db_session.get(Container, container_id) is not None
+
+
+def test_apply_container_status_snapshot_collect_error_marks_all_failed(db_session):
+    # 数据通路对账契约 C1：collect_error 形状 → 该机器全部容器 FAILED（非删除）
+    machine = create_machine()
+    c1 = create_container(machine=machine, name="err_c1", status=ContainerStatus.ONLINE)
+    c2 = create_container(machine=machine, name="err_c2", status=ContainerStatus.CREATING)
+
+    result = node_comms.apply_container_status_snapshot({"collect_error": "collect_failed"}, machine.id)
+
+    db_session.expire_all()
+    assert result["failed"] == 2
+    assert db_session.get(Container, c1.id).container_status == ContainerStatus.FAILED
+    assert db_session.get(Container, c2.id).container_status == ContainerStatus.FAILED
+
+
+def test_apply_container_status_snapshot_collect_error_without_machine_id_skipped(db_session):
+    machine = create_machine()
+    container = create_container(machine=machine, name="err_no_mid", status=ContainerStatus.ONLINE)
+
+    result = node_comms.apply_container_status_snapshot({"collect_error": "collect_failed"}, None)
+
+    db_session.expire_all()
+    assert result["failed"] == 0
+    assert db_session.get(Container, container.id).container_status == ContainerStatus.ONLINE
+
+
+def test_apply_snapshot_batch_drops_frame_on_unresolved_uid(db_session):
+    # 数据通路对账契约 C5：node_uid 归位失败 → 整帧丢弃（不降级 name 查找）
+    machine = create_machine()
+    container = create_container(machine=machine, name="no_uid_c", status=ContainerStatus.ONLINE)
+    container_id = container.id
+
+    result = node_comms.apply_snapshot_batch({
+        "type": "snapshot_batch",
+        "node_uid": "does-not-exist",
+        "payload": [{"type": "snapshot", "topic": "container_status",
+                     "payload": {"no_uid_c": {"status": "offline"}}}],
+    })
+
+    db_session.expire_all()
+    assert result == {}
+    assert db_session.get(Container, container_id).container_status == ContainerStatus.ONLINE
+
+
+def test_apply_snapshot_batch_dispatches_with_resolved_uid(db_session):
+    machine = create_machine()
+    with session_scope() as session:
+        machine_repo.update_machine(machine.id, node_uid="uid-ok", session=session)
+    container = create_container(machine=machine, name="uid_ok_c", status=ContainerStatus.ONLINE)
+
+    result = node_comms.apply_snapshot_batch({
+        "type": "snapshot_batch",
+        "node_uid": "uid-ok",
+        "payload": [{"type": "snapshot", "topic": "container_status",
+                     "payload": {"uid_ok_c": {"status": "offline"}}}],
+    })
+
+    db_session.expire_all()
+    assert result["container_status"]["updated"] == 1
+    assert db_session.get(Container, container.id).container_status == ContainerStatus.OFFLINE
+
+
+def test_probe_machines_online_once_marks_unreachable_offline(monkeypatch, db_session):
+    # 数据通路对账契约 C3：Ctrl 启动探活，不达的 ONLINE 机器置 OFFLINE
+    machine = create_machine(machine_status=MachineStatus.ONLINE)
+    monkeypatch.setattr(node_comms, "probe_machine_connectivity", lambda machine_id: False)
+
+    result = node_comms.probe_machines_online_once()
+
+    db_session.expire_all()
+    assert result["probed"] == 1
+    assert result["turned_offline"] == [machine.id]
+    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.OFFLINE
+
+
+def test_probe_machines_online_once_keeps_reachable_online(monkeypatch, db_session):
+    machine = create_machine(machine_status=MachineStatus.ONLINE)
+    monkeypatch.setattr(node_comms, "probe_machine_connectivity", lambda machine_id: True)
+
+    result = node_comms.probe_machines_online_once()
+
+    db_session.expire_all()
+    assert result["probed"] == 1
+    assert result["turned_offline"] == []
+    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.ONLINE
 
 
 def test_apply_container_status_snapshot_ignores_unknown_node_container(db_session):

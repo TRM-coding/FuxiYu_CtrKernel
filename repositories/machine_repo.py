@@ -57,6 +57,12 @@ def list_machines(limit: int = 50, offset: int = 0, *, session: Session) -> Sequ
     return list(session.scalars(stmt).all())
 
 
+def list_machines_by_status(status: MachineStatus, *, session: Session) -> Sequence[Machine]:
+    """按真实连接状态列出机器（Ctrl 启动探活用；数据通路对账契约 C3）。"""
+    stmt = select(Machine).where(Machine.machine_status == status).order_by(Machine.id)
+    return list(session.scalars(stmt).all())
+
+
 def count_machines(*, session: Session) -> int:
     return int(session.scalar(select(func.count()).select_from(Machine)) or 0)
 

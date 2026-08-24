@@ -408,24 +408,51 @@ _NODE_STATUS_TO_CTRL = {
 }
 
 
-def _container_by_name(name: str):
-    """快照按 name 归位到 DB 容器；未登记（Node 有、Ctrl 无）→ None，由 delete 事件语义处理。"""
-    try:
-        with session_scope(commit=False) as session:
-            return containers_repo.get_by_container_name(name, session=session)
-    except Exception:
-        return None
-
-
 def apply_container_status_snapshot(data: dict, machine_id: int | None = None) -> dict:
     """解析 container_status 快照 → 落库容器状态/清理消失容器。
 
-    Ctrl DB 是容器事实清单；Node 快照只用于更新已登记容器。Node 未上报但
-    Ctrl DB 里属于该 machine 的容器，视为 Node 侧已消失，复用删除清理流程。
+    - collect_error 形状（Node 采集异常，数据通路对账契约 C1）→ 该机器全部容器置 FAILED
+      （非删除；恢复靠下一帧正常快照覆盖）
+    - 空 dict → 防御性跳过（Node 契约不发出空 dict；不做 vanished）
+    - 正常快照：更新已登记容器；机器内未上报的容器视为 Node 侧已消失，复用删除清理
     """
-    updated = skipped = vanished = 0
+    updated = skipped = vanished = failed = 0
     if not isinstance(data, dict):
-        return {"updated": updated, "skipped": skipped, "vanished": vanished}
+        return {"updated": updated, "skipped": skipped, "vanished": vanished, "failed": failed}
+
+    # collect_error 形状：机器级采集失败 → 全部容器 FAILED（契约 C1）
+    if "collect_error" in data:
+        if machine_id is None:
+            logger.warning("apply status snapshot: collect_error without machine_id; skipped")
+            return {"updated": 0, "skipped": 0, "vanished": 0, "failed": 0}
+        try:
+            with session_scope() as session:
+                containers = containers_repo.list_containers(
+                    limit=1000000,
+                    offset=0,
+                    machine_id=machine_id,
+                    session=session,
+                )
+                for container in containers:
+                    containers_repo.update_container(
+                        container.id,
+                        container_status=ContainerStatus.FAILED,
+                        session=session,
+                    )
+                    failed += 1
+        except Exception as e:
+            logger.warning("apply collect_error snapshot failed: machine=%s err=%s", machine_id, e)
+        logger.info(
+            "apply_container_status_snapshot: collect_error machine=%s failed=%s",
+            machine_id,
+            failed,
+        )
+        return {"updated": 0, "skipped": 0, "vanished": 0, "failed": failed}
+
+    # 空快照防御（契约 C1）：Node 不发出空 dict；真到这里不处置，绝不做 vanished
+    if not data:
+        logger.warning("apply_container_status_snapshot: empty snapshot (machine=%s) ignored", machine_id)
+        return {"updated": updated, "skipped": skipped, "vanished": vanished, "failed": failed}
 
     missing_names: list[str] = []
     try:
@@ -450,7 +477,8 @@ def apply_container_status_snapshot(data: dict, machine_id: int | None = None) -
                 if machine_id is not None:
                     container = containers_by_name.get(name)
                 else:
-                    container = containers_repo.get_by_container_name(name, session=session)
+                    # machine_id 缺失（不应发生，契约 C5 已砍降级路径）→ 防御性跳过
+                    container = None
                 if container is None:
                     skipped += 1
                     continue
@@ -476,22 +504,39 @@ def apply_container_status_snapshot(data: dict, machine_id: int | None = None) -
         vanished,
         len(data),
     )
-    return {"updated": updated, "skipped": skipped, "vanished": vanished}
+    return {"updated": updated, "skipped": skipped, "vanished": vanished, "failed": failed}
 
 
-def apply_last_ssh_snapshot(data: dict) -> dict:
-    """解析 last_ssh 快照 → 落库。空值不覆写（保护初始创建时间，与现 getter 语义一致）。"""
+def _machine_containers_by_name(machine_id: int, session) -> dict | None:
+    """机器作用域容器名映射（数据通路对账契约 C5：快照落库按机器内查找，避免跨机器重名误写）。
+
+    机器归位缺失（不降级全局 name 查找）→ 返回 None，调用方跳过该帧。
+    """
+    if machine_id is None:
+        return None
+    containers = containers_repo.list_containers(
+        limit=1000000,
+        offset=0,
+        machine_id=machine_id,
+        session=session,
+    )
+    return {container.name: container for container in containers}
+
+
+def apply_last_ssh_snapshot(data: dict, machine_id: int | None = None) -> dict:
+    """解析 last_ssh 快照 → 落库（machine_id 作用域，缺失即跳过，契约 C5）。空值不覆写。"""
     updated = skipped = 0
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or machine_id is None:
         return {"updated": updated, "skipped": skipped}
     try:
         with session_scope() as session:
+            containers_by_name = _machine_containers_by_name(machine_id, session)
             for name, entry in data.items():
                 last_time = (entry or {}).get("last_ssh_connect_time")
                 if not last_time:
                     skipped += 1
                     continue
-                container = containers_repo.get_by_container_name(name, session=session)
+                container = containers_by_name.get(name)
                 if container is None:
                     skipped += 1
                     continue
@@ -511,19 +556,20 @@ def apply_last_ssh_snapshot(data: dict) -> dict:
     return {"updated": updated, "skipped": skipped}
 
 
-def apply_disk_usage_snapshot(data: dict) -> dict:
-    """解析 disk_usage 快照 → 落库 disk_* 字段（阈值评估/告警归 disk_check 调度，本层只存值）。"""
+def apply_disk_usage_snapshot(data: dict, machine_id: int | None = None) -> dict:
+    """解析 disk_usage 快照 → 落库 disk_* 字段（machine_id 作用域，缺失即跳过，契约 C5）。"""
     updated = skipped = 0
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or machine_id is None:
         return {"updated": updated, "skipped": skipped}
     containers = data.get("containers") or {}
     try:
         with session_scope() as session:
+            containers_by_name = _machine_containers_by_name(machine_id, session)
             for name, usage in containers.items():
                 if not isinstance(usage, dict):
                     skipped += 1
                     continue
-                container = containers_repo.get_by_container_name(name, session=session)
+                container = containers_by_name.get(name)
                 if container is None:
                     skipped += 1
                     continue
@@ -599,15 +645,16 @@ def apply_sys_snapshot(data: dict, machine_id: int | None = None) -> dict:
 def apply_snapshot_batch(batch: dict) -> dict:
     """解析 snapshot_batch 帧 → 按 topic 分发到各 apply_*。返回按 topic 的统计。
 
-    HTTP 回退轮询与 WSS 推送共用本函数（传输无关）。
+    node_uid 归位失败（uid 不在 machine 表 / DB 瞬时异常）→ 协议违规，整帧丢弃
+    （数据通路对账契约 C5）：不做 name 降级查找，避免跨机器重名误写。
     """
     result = {}
     if not isinstance(batch, dict):
         return result
 
-    # sys_snapshot 归位上下文：帧带 node_uid（WSS 协议）；未归位（uid 不在 machine 表）→ None
-    machine_id = None
+    # node_uid 归位：WSS 协议身份绑定；未归位 → 丢弃整批（不降级）
     node_uid = batch.get("node_uid")
+    machine_id = None
     if node_uid:
         try:
             with session_scope(commit=False) as session:
@@ -615,6 +662,9 @@ def apply_snapshot_batch(batch: dict) -> dict:
             machine_id = machine.id if machine else None
         except Exception:
             machine_id = None
+    if machine_id is None:
+        logger.warning("apply_snapshot_batch: node_uid %r unresolved or missing; dropping batch", node_uid)
+        return result
 
     frames = batch.get("payload") or []
     for frame in frames:
@@ -625,9 +675,9 @@ def apply_snapshot_batch(batch: dict) -> dict:
         if topic == "container_status":
             result[topic] = apply_container_status_snapshot(data, machine_id)
         elif topic == "last_ssh":
-            result[topic] = apply_last_ssh_snapshot(data)
+            result[topic] = apply_last_ssh_snapshot(data, machine_id)
         elif topic == "disk_usage":
-            result[topic] = apply_disk_usage_snapshot(data)
+            result[topic] = apply_disk_usage_snapshot(data, machine_id)
         elif topic == "sys_snapshot":
             result[topic] = apply_sys_snapshot(data, machine_id)
         else:
@@ -689,6 +739,38 @@ def probe_machine_connectivity(machine_id: int, attempts: int = CONNECTIVITY_PRO
             fails += 1
     logger.warning("probe_machine_connectivity: machine %s unreachable after %s attempts", machine_id, attempts)
     return False
+
+
+def probe_machines_online_once() -> dict:
+    """Ctrl 启动探活（数据通路对账契约 C3）：对 machine_status=ONLINE 的机器各探活一次，
+    不达 → 置 OFFLINE。只做一次（后台线程调用，不阻塞进程启动）；重连是 Node 的事
+    （Node 5s 重连循环，连接建立后自然置 ONLINE，幂等）。
+
+    返回 {"probed": N, "turned_offline": [machine_id, ...]}。
+    """
+    probed = 0
+    turned_offline: list[int] = []
+    try:
+        with session_scope(commit=False) as session:
+            machines = machine_repo.list_machines_by_status(MachineStatus.ONLINE, session=session)
+    except Exception as e:
+        logger.warning("probe_machines_online_once: list online machines failed: %s", e)
+        return {"probed": 0, "turned_offline": turned_offline}
+
+    for machine in machines:
+        probed += 1
+        if probe_machine_connectivity(machine.id):
+            continue
+        try:
+            Update_machine(machine.id, machine_status=MachineStatus.OFFLINE)
+            turned_offline.append(machine.id)
+            logger.warning("probe_machines_online_once: machine %s (%s) offline (ghost online cleared)",
+                           machine.id, machine.machine_ip)
+        except Exception as e:
+            logger.warning("probe_machines_online_once: failed to set OFFLINE for machine %s: %s",
+                           machine.id, e)
+    logger.info("probe_machines_online_once: probed=%s turned_offline=%s", probed, turned_offline)
+    return {"probed": probed, "turned_offline": turned_offline}
 
 
 # ══════════════ WSS 接收层（FastAPI 形态） ═══════════════════
@@ -808,7 +890,13 @@ async def handle_node_ws(websocket) -> None:
 
     try:
         while True:
-            frame = json.loads(await websocket.receive_text())
+            # 半开连接防护（数据通路对账契约 C4）：read 超时（默认 30s）→
+            # TimeoutError 走下方异常路径 → 探活判离线。健康态 Node 每 5s 一帧。
+            raw = await asyncio.wait_for(
+                websocket.receive_text(),
+                timeout=CommsConfig.WSS_READ_TIMEOUT,
+            )
+            frame = json.loads(raw)
             if not isinstance(frame, dict):
                 logger.warning("handle_node_ws: non-dict frame from %s", uid)
                 continue

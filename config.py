@@ -35,6 +35,9 @@ class CommsConfig:
     # Node 端口（统一键名 NODE_PORT）；Ctrl 组装各宿主机 URL 时拼接
     NODE_PORT = _env_int("NODE_PORT", 5789)
     NODE_URL_MIDDLE = f":{NODE_PORT}/api"
+    # WSS 接收 read 超时（半开连接防护；数据通路对账契约 C4）。健康态 Node 每 5s 一帧，
+    # 30s 超时只打半开连接（Node 断电无 FIN/RST），超时走探活判离线。
+    WSS_READ_TIMEOUT = _env_int("CTRL_WSS_READ_TIMEOUT", 30)
 
 
 class NetConfig:
