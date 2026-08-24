@@ -32,6 +32,10 @@ class Machine(db.Model):
     node_uid: str | None = db.Column(db.String(128), unique=True, nullable=True, index=True)
     node_cert_fingerprint: str | None = db.Column(db.String(128), unique=True, nullable=True, index=True)
     cert_pinned_at: datetime | None = db.Column(db.DateTime, nullable=True)
+    # ── 采集异常轴（数据通路对账契约 C1，2026-08） ──
+    # Node 采集异常（docker 卡死）时由 collect_error 帧置位、正常快照清除。
+    # 机器轴条件：DB 容器状态保持最后已知值，展示派生 status_unknown——不写容器诊断。
+    collect_error_at: datetime | None = db.Column(db.DateTime, nullable=True)
     # 与 Container 的一对多关系（containers 表里有 machine_id 外键）
     containers = db.relationship(
         "Container", back_populates="machine", cascade="all, delete-orphan"

@@ -1,4 +1,7 @@
 import asyncio
+import sys
+from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +13,11 @@ from ...extensions import session_scope
 from ...services import machine_tasks
 from ...services.container_module import node_comms
 from ..factories import bind_user_container, create_container, create_machine, create_user
+
+# 枚举对齐测试（契约 C8）需要跨仓库导入 NodeKernel（同 test_machine_enrollment_wss 模式）
+NODE_ROOT = Path(__file__).resolve().parents[3] / "FuxiYu_NodeKernel"
+if str(NODE_ROOT.parent) not in sys.path:
+    sys.path.insert(0, str(NODE_ROOT.parent))
 
 
 class _ClosingWebSocket:
@@ -26,6 +34,19 @@ class _ClosingWebSocket:
 
     async def close(self, code=None):
         self.close_calls.append(code)
+
+
+class _FramesThenRaiseWebSocket(_ClosingWebSocket):
+    """先吐帧（可能坏帧），耗尽后抛异常断开。"""
+
+    def __init__(self, uid: str, frames: list[str]):
+        super().__init__(uid)
+        self.frames = list(frames)
+
+    async def receive_text(self):
+        if self.frames:
+            return self.frames.pop(0)
+        raise RuntimeError("wss closed")
 
 
 def test_update_machine_missing_machine_returns_false(db_session):
@@ -191,8 +212,9 @@ def test_apply_container_status_snapshot_ignores_empty_snapshot(db_session):
     assert db_session.get(Container, container_id) is not None
 
 
-def test_apply_container_status_snapshot_collect_error_marks_all_failed(db_session):
-    # 数据通路对账契约 C1：collect_error 形状 → 该机器全部容器 FAILED（非删除）
+def test_apply_container_status_snapshot_collect_error_sets_machine_flag_not_container_status(db_session):
+    # 数据通路对账契约 C1（机器轴）：collect_error 形状 → 置位机器 collect_error_at，
+    # 不动容器 DB 状态（保持最后已知值，非容器诊断）
     machine = create_machine()
     c1 = create_container(machine=machine, name="err_c1", status=ContainerStatus.ONLINE)
     c2 = create_container(machine=machine, name="err_c2", status=ContainerStatus.CREATING)
@@ -200,9 +222,26 @@ def test_apply_container_status_snapshot_collect_error_marks_all_failed(db_sessi
     result = node_comms.apply_container_status_snapshot({"collect_error": "collect_failed"}, machine.id)
 
     db_session.expire_all()
-    assert result["failed"] == 2
-    assert db_session.get(Container, c1.id).container_status == ContainerStatus.FAILED
-    assert db_session.get(Container, c2.id).container_status == ContainerStatus.FAILED
+    assert result["failed"] == 0
+    assert db_session.get(Machine, machine.id).collect_error_at is not None
+    assert db_session.get(Container, c1.id).container_status == ContainerStatus.ONLINE
+    assert db_session.get(Container, c2.id).container_status == ContainerStatus.CREATING
+
+
+def test_apply_container_status_snapshot_normal_snapshot_clears_collect_error(db_session):
+    # 数据通路对账契约 C1（恢复）：正常快照清除机器 collect_error_at，状态照常覆盖
+    machine = create_machine()
+    container = create_container(machine=machine, name="recover_c", status=ContainerStatus.ONLINE)
+    with session_scope() as session:
+        machine_repo.update_machine(machine.id, collect_error_at=datetime(2026, 8, 24), session=session)
+
+    result = node_comms.apply_container_status_snapshot({"recover_c": {"status": "offline"}}, machine.id)
+
+    db_session.expire_all()
+    assert result["updated"] == 1
+    machine_row = db_session.get(Machine, machine.id)
+    assert machine_row.collect_error_at is None
+    assert db_session.get(Container, container.id).container_status == ContainerStatus.OFFLINE
 
 
 def test_apply_container_status_snapshot_collect_error_without_machine_id_skipped(db_session):
@@ -213,6 +252,7 @@ def test_apply_container_status_snapshot_collect_error_without_machine_id_skippe
 
     db_session.expire_all()
     assert result["failed"] == 0
+    assert db_session.get(Machine, machine.id).collect_error_at is None
     assert db_session.get(Container, container.id).container_status == ContainerStatus.ONLINE
 
 
@@ -275,6 +315,124 @@ def test_probe_machines_online_once_keeps_reachable_online(monkeypatch, db_sessi
     assert result["probed"] == 1
     assert result["turned_offline"] == []
     assert db_session.get(Machine, machine.id).machine_status == MachineStatus.ONLINE
+
+
+def test_handle_node_ws_malformed_frame_does_not_kill_connection(monkeypatch, db_session):
+    # 契约 C7：坏帧（非 JSON/非 dict/数组）→ 帧级容错 continue，不杀连接；
+    # 连接只由最后一次 receive 的断开异常正常收尾
+    uid = "wss-badframe-uid"
+    machine = create_machine(machine_status=MachineStatus.ONLINE)
+    with session_scope() as session:
+        machine_repo.update_machine(machine.id, node_uid=uid, session=session)
+    probe_calls = []
+    monkeypatch.setattr(node_comms, "probe_machine_connectivity",
+                        lambda machine_id: probe_calls.append(machine_id) or False)
+
+    ws = _FramesThenRaiseWebSocket(uid, ["{not json", '"hello"', "[]"])
+    asyncio.run(node_comms.handle_node_ws(ws))
+
+    db_session.expire_all()
+    assert probe_calls == [machine.id]  # 只断一次（收尾路径），坏帧不触发
+    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.OFFLINE
+
+
+def test_handle_node_ws_read_timeout_triggers_probe_and_offline(monkeypatch, db_session):
+    # 契约 C4：半开连接（receive 挂起）→ wait_for 超时 → 探活 → 不达置 OFFLINE
+    uid = "wss-timeout-uid"
+    machine = create_machine(machine_status=MachineStatus.ONLINE)
+    with session_scope() as session:
+        machine_repo.update_machine(machine.id, node_uid=uid, session=session)
+    probe_calls = []
+    monkeypatch.setattr(node_comms, "probe_machine_connectivity",
+                        lambda machine_id: probe_calls.append(machine_id) or False)
+    monkeypatch.setattr(node_comms.CommsConfig, "WSS_READ_TIMEOUT", 0.01)
+
+    class _HangingWebSocket(_ClosingWebSocket):
+        async def receive_text(self):
+            await asyncio.sleep(3600)
+
+    ws = _HangingWebSocket(uid)
+    asyncio.run(node_comms.handle_node_ws(ws))
+
+    db_session.expire_all()
+    assert probe_calls == [machine.id]
+    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.OFFLINE
+
+
+def test_enqueue_frame_drops_oldest_when_full():
+    # 契约 C7：队列满时丢最旧（快照幂等覆盖，丢旧不丢新），receive 永不阻塞
+    q = asyncio.Queue(maxsize=2)
+    node_comms._enqueue_frame(q, {"seq": 1})
+    node_comms._enqueue_frame(q, {"seq": 2})
+    node_comms._enqueue_frame(q, {"seq": 3})
+
+    assert q.qsize() == 2
+    assert q.get_nowait() == {"seq": 2}
+    assert q.get_nowait() == {"seq": 3}
+
+
+def test_consume_frames_applies_snapshot_and_delete(monkeypatch):
+    # 契约 C7：单消费者串行处理（快照落库线程化，事件循环只 receive）
+    applied = []
+    monkeypatch.setattr(node_comms, "apply_snapshot_batch", lambda batch: applied.append(batch))
+    monkeypatch.setattr(node_comms, "_handle_container_deleted", lambda name: applied.append(("del", name)))
+    q = asyncio.Queue()
+    q.put_nowait({"type": "snapshot_batch", "payload": [1]})
+    q.put_nowait({"type": "delete", "container_name": "ghost_c"})
+
+    async def _run():
+        task = asyncio.create_task(node_comms._consume_frames(q, "uid"))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_run())
+    assert applied == [{"type": "snapshot_batch", "payload": [1]}, ("del", "ghost_c")]
+
+
+def test_apply_container_status_snapshot_transition_states_kept_last_known(db_session):
+    # 契约 C8：pausing/unpausing 显式跳过，DB 保持最后已知值（终态由下一帧收敛）
+    machine = create_machine()
+    c1 = create_container(machine=machine, name="pausing_c", status=ContainerStatus.ONLINE)
+    c2 = create_container(machine=machine, name="unpausing_c", status=ContainerStatus.PAUSED)
+
+    result = node_comms.apply_container_status_snapshot(
+        {"pausing_c": {"status": "pausing"}, "unpausing_c": {"status": "unpausing"}},
+        machine.id,
+    )
+
+    db_session.expire_all()
+    assert result["skipped"] == 2
+    assert db_session.get(Container, c1.id).container_status == ContainerStatus.ONLINE
+    assert db_session.get(Container, c2.id).container_status == ContainerStatus.PAUSED
+
+
+def test_node_emittable_statuses_covered_by_ctrl_mapping():
+    """契约 C8：Node 可发状态枚举 ⊆ Ctrl 映射表 ∪ 显式跳过集（防静默漏配）。
+
+    Node 侧全集 = docker 终态映射值 ∪ 事件映射值 ∪ begin_action 转换态 ∪ failed/unknown。
+    任一新增状态未覆盖 → 测试失败，迫使 Ctrl 侧显式处置。
+    """
+    pytest.importorskip("FuxiYu_NodeKernel", reason="NodeKernel 仓库不在本机")
+    from FuxiYu_NodeKernel.constant import ContainerStatus as NodeContainerStatus
+    from FuxiYu_NodeKernel.docker_operates import status_cache as node_status_cache
+
+    emittable = set(node_status_cache._DOCKER_STATUS_TO_APP.values())
+    emittable |= set(node_status_cache._EVENT_STATUS_MAP.values())
+    emittable |= {
+        NodeContainerStatus.CREATING.value,   # begin_action create（api.py）
+        NodeContainerStatus.STOPPING.value,   # begin_action stop
+        "pausing",                            # begin_action pause（api.py 字面量）
+        "unpausing",                          # begin_action unpause（api.py 字面量）
+        NodeContainerStatus.FAILED.value,     # finish_action failed / pending TTL 超时
+        NodeContainerStatus.UNKNOWN.value,    # c.status 兜底（契约 C2 后理论不可达）
+    }
+    covered = set(node_comms._NODE_STATUS_TO_CTRL) | set(node_comms._NODE_STATUS_SKIP)
+    uncovered = emittable - covered
+    assert not uncovered, f"Node 可发状态未覆盖: {uncovered}"
 
 
 def test_apply_container_status_snapshot_ignores_unknown_node_container(db_session):
@@ -368,6 +526,31 @@ def test_list_machine_bref_online_maintenance_display_without_probe(monkeypatch,
     assert result[0].machine_status == MachineStatus.ONLINE.value
     assert result[0].is_maintenance is True
     assert result[0].display_status == "maintenance"
+
+
+def test_list_machine_bref_collect_error_display_only_when_online(db_session):
+    # 数据通路对账契约 C1（机器轴）：在线 + 采集异常 → display collect_error；
+    # 离线 + 残留标志 → 显示真实连接状态 offline
+    online = create_machine(machine_name="ce_online", machine_status=MachineStatus.ONLINE)
+    offline = create_machine(machine_name="ce_offline", machine_status=MachineStatus.OFFLINE)
+    with session_scope() as session:
+        machine_repo.update_machine(online.id, collect_error_at=datetime(2026, 8, 24), session=session)
+        machine_repo.update_machine(offline.id, collect_error_at=datetime(2026, 8, 24), session=session)
+
+    result, _ = machine_tasks.List_all_machine_bref_information(0, 10)
+
+    by_name = {m.machine_name: m for m in result}
+    assert by_name["ce_online"].display_status == "collect_error"
+    assert by_name["ce_offline"].display_status == MachineStatus.OFFLINE.value
+
+
+def test_is_machine_collect_error_reads_machine_flag(db_session):
+    machine = create_machine()
+    assert machine_tasks.is_machine_collect_error(machine.id) is False
+    with session_scope() as session:
+        machine_repo.update_machine(machine.id, collect_error_at=datetime(2026, 8, 24), session=session)
+    db_session.expire_all()
+    assert machine_tasks.is_machine_collect_error(machine.id) is True
 
 
 def test_list_machine_bref_filters_by_machine_search(monkeypatch, db_session):

@@ -39,6 +39,7 @@ from .container_module.pydantic_models import (
     _derive_display_status,
     DISPLAY_STATUS_HOST_OFFLINE,
     DISPLAY_STATUS_HOST_MAINTENANCE,
+    DISPLAY_STATUS_UNKNOWN,
 )
 from .container_module.utils import _parse_last_ssh_time, build_cleanup_info
 from ..repositories.long_term_container_repo import get_long_term_container_limit

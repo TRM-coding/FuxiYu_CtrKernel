@@ -124,6 +124,7 @@ def update_machine(machine_id: int, *, session: Session, **fields) -> bool:
         "machine_type",
         "machine_status",
         "is_maintenance",
+        "collect_error_at",
         "cpu_core_number",
         "memory_size_gb",
         "gpu_number",

@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel, Field
 from ...constant import ROLE, ContainerStatus
-from ..machine_tasks import get_machine_reachable, is_machine_in_maintenance
+from ..machine_tasks import get_machine_reachable, is_machine_in_maintenance, is_machine_collect_error
 
 #API Definition
 ####################################################
@@ -57,12 +57,15 @@ class container_detail_information(BaseModel):
 
 DISPLAY_STATUS_HOST_OFFLINE = "host_offline"
 DISPLAY_STATUS_HOST_MAINTENANCE = "host_maintenance"
+DISPLAY_STATUS_UNKNOWN = "status_unknown"
 
 # 派生状态辅助函数
 def _derive_display_status(container_status, machine_id: int | None) -> str:
-    """由"容器 DB 状态 + 机器可达性"派生展示态。
+    """由"容器 DB 状态 + 机器轴条件"派生展示态。
 
-    规则：failed 是终态诊断不覆盖；机器不可达则一律 host_offline。
+    规则（优先级降序）：failed 是终态诊断不覆盖；宿主机不可达 → host_offline；
+    维护 → host_maintenance；采集异常（collect_error_at，契约 C1）→ status_unknown
+    （Node 无法采集容器状态，DB 保持最后已知值，不写容器诊断）；否则原状态。
     """
     status_str = container_status.value if hasattr(container_status, 'value') else str(container_status)
     if str(status_str).lower() == ContainerStatus.FAILED.value:
@@ -73,4 +76,6 @@ def _derive_display_status(container_status, machine_id: int | None) -> str:
         return DISPLAY_STATUS_HOST_MAINTENANCE
     if not get_machine_reachable(machine_id):
         return DISPLAY_STATUS_HOST_OFFLINE
+    if is_machine_collect_error(machine_id):
+        return DISPLAY_STATUS_UNKNOWN
     return status_str

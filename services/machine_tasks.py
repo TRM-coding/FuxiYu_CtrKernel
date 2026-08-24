@@ -10,6 +10,7 @@ from .operation_log_tasks import write_operation_log as write_op_log
 from ..constant import MachineStatus, OperationType
 from ..models.machine import Machine
 MACHINE_DISPLAY_MAINTENANCE = "maintenance"
+MACHINE_DISPLAY_COLLECT_ERROR = "collect_error"
 #######################################
 #API Definition
 class machine_bref_information(BaseModel):
@@ -89,10 +90,13 @@ def _machine_status_value(machine) -> str:
 
 
 def _display_machine_status(machine) -> str:
-    """返回对外展示状态；维护开关优先，真实连接状态仍保留在 DB。"""
+    """返回对外展示状态；维护开关优先，采集异常次之（仅在线时），真实连接状态保留在 DB。"""
     if bool(getattr(machine, "is_maintenance", False)):
         return MACHINE_DISPLAY_MAINTENANCE
-    return _machine_status_value(machine)
+    status = _machine_status_value(machine)
+    if status == MachineStatus.ONLINE.value and getattr(machine, "collect_error_at", None):
+        return MACHINE_DISPLAY_COLLECT_ERROR
+    return status
 
 
 def is_machine_in_maintenance(machine_id: int) -> bool:
@@ -103,6 +107,19 @@ def is_machine_in_maintenance(machine_id: int) -> bool:
     except Exception:
         machine = None
     return bool(machine and getattr(machine, "is_maintenance", False))
+
+
+def is_machine_collect_error(machine_id: int) -> bool:
+    """判断机器是否处于采集异常（Node 无法采集容器状态，docker 卡死）——机器轴条件（契约 C1）。
+
+    标志由 collect_error 帧置位、正常快照清除；容器 DB 状态保持最后已知值，展示派生 status_unknown。
+    """
+    try:
+        with session_scope(commit=False) as session:
+            machine = get_by_id(machine_id, session=session)
+    except Exception:
+        machine = None
+    return bool(machine and getattr(machine, "collect_error_at", None))
 
 def is_machine_online_remote(machine_id: int, timeout: float = 2.0) -> bool:
     """

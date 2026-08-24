@@ -2,6 +2,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from importlib import import_module
 
 import uvicorn
@@ -71,7 +72,19 @@ if __name__ == "__main__":
         certs = ensure_ctrl_certificates()
         ssl_kwargs = {"ssl_certfile": str(certs.cert_file), "ssl_keyfile": str(certs.key_file)}
 
-    wss_process = _start_wss_receiver()
+    # WSS 接收子进程 + 看护（数据通路对账契约 C9）：主进程对 WSS 存活负责，
+    # 意外退出即重启；主进程退出时停掉子进程。
+    from FuxiYu_CtrKernel.schedulers.wss_supervisor import watch_wss_process
+
+    wss_process_ref = [None]
+    wss_stop_event = threading.Event()
+    if _truthy_env("CTRL_WSS_ENABLED", "1"):
+        wss_process_ref[0] = _start_wss_receiver()
+        threading.Thread(
+            target=watch_wss_process,
+            args=(wss_process_ref, wss_stop_event, _start_wss_receiver),
+            daemon=True,
+        ).start()
     try:
         uvicorn.run(
             app,
@@ -81,4 +94,5 @@ if __name__ == "__main__":
             **ssl_kwargs,
         )
     finally:
-        _stop_process(wss_process)
+        wss_stop_event.set()
+        _stop_process(wss_process_ref[0])

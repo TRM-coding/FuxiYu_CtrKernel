@@ -395,7 +395,8 @@ def register_machine(
 #   last_ssh:         {name: {"last_ssh_connect_time", "updated_at"}}
 #   disk_usage:       {"machine_disk": {...}, "containers": {name: {"overlay_rw_bytes", "bind_mount_bytes", "bind_mount_path", "total_bytes"}}}
 
-# Node 应用状态字符串 → Ctrl ContainerStatus 枚举；unknown/不可映射 → 跳过（保持 DB 旧值）
+# Node 应用状态字符串 → Ctrl ContainerStatus 枚举（契约 C8：Node 可发状态全集 =
+# 映射表 ∪ 显式跳过集，防静默漏配）
 _NODE_STATUS_TO_CTRL = {
     "online": ContainerStatus.ONLINE,
     "offline": ContainerStatus.OFFLINE,
@@ -407,12 +408,18 @@ _NODE_STATUS_TO_CTRL = {
     "failed": ContainerStatus.FAILED,
 }
 
+# 显式跳过集：动作转换态（pausing/unpausing——终态由下一帧收敛，DB 保持最后已知值，
+# 与 C6 单写入者一致）与 unknown（契约 C2 后理论不可达的兜底）。跳过时 debug 级日志，
+# 不属于静默漏配；不在本集的未映射状态 → warning（契约 C8 枚举对齐测试兜底）。
+_NODE_STATUS_SKIP = {"pausing", "unpausing", "unknown"}
+
 
 def apply_container_status_snapshot(data: dict, machine_id: int | None = None) -> dict:
     """解析 container_status 快照 → 落库容器状态/清理消失容器。
 
-    - collect_error 形状（Node 采集异常，数据通路对账契约 C1）→ 该机器全部容器置 FAILED
-      （非删除；恢复靠下一帧正常快照覆盖）
+    - collect_error 形状（Node 采集异常，数据通路对账契约 C1）→ 机器轴处置：
+      置位机器 collect_error_at，容器 DB 状态保持最后已知值，展示派生 status_unknown
+      （恢复靠下一帧正常快照清除标志 + 覆盖状态）
     - 空 dict → 防御性跳过（Node 契约不发出空 dict；不做 vanished）
     - 正常快照：更新已登记容器；机器内未上报的容器视为 Node 侧已消失，复用删除清理
     """
@@ -420,34 +427,26 @@ def apply_container_status_snapshot(data: dict, machine_id: int | None = None) -
     if not isinstance(data, dict):
         return {"updated": updated, "skipped": skipped, "vanished": vanished, "failed": failed}
 
-    # collect_error 形状：机器级采集失败 → 全部容器 FAILED（契约 C1）
+    # collect_error 形状：机器轴条件（契约 C1）——置位机器 collect_error_at，
+    # 不动容器 DB 状态（保持最后已知值，非容器诊断）；展示派生 status_unknown。
+    # 恢复由正常快照清除标志 + 覆盖状态完成。
     if "collect_error" in data:
         if machine_id is None:
             logger.warning("apply status snapshot: collect_error without machine_id; skipped")
             return {"updated": 0, "skipped": 0, "vanished": 0, "failed": 0}
         try:
             with session_scope() as session:
-                containers = containers_repo.list_containers(
-                    limit=1000000,
-                    offset=0,
-                    machine_id=machine_id,
-                    session=session,
-                )
-                for container in containers:
-                    containers_repo.update_container(
-                        container.id,
-                        container_status=ContainerStatus.FAILED,
+                machine = machine_repo.get_by_id(machine_id, session=session)
+                if machine is not None and machine.collect_error_at is None:
+                    machine_repo.update_machine(
+                        machine_id,
+                        collect_error_at=datetime.datetime.utcnow(),
                         session=session,
                     )
-                    failed += 1
         except Exception as e:
             logger.warning("apply collect_error snapshot failed: machine=%s err=%s", machine_id, e)
-        logger.info(
-            "apply_container_status_snapshot: collect_error machine=%s failed=%s",
-            machine_id,
-            failed,
-        )
-        return {"updated": 0, "skipped": 0, "vanished": 0, "failed": failed}
+        logger.info("apply_container_status_snapshot: collect_error machine=%s", machine_id)
+        return {"updated": 0, "skipped": 0, "vanished": 0, "failed": 0}
 
     # 空快照防御（契约 C1）：Node 不发出空 dict；真到这里不处置，绝不做 vanished
     if not data:
@@ -470,8 +469,22 @@ def apply_container_status_snapshot(data: dict, machine_id: int | None = None) -
                 snapshot_names = set(data.keys())
                 missing_names = sorted(set(containers_by_name) - snapshot_names)
             for name, entry in data.items():
-                ctrl_status = _NODE_STATUS_TO_CTRL.get(str((entry or {}).get("status", "")))
+                raw_status = str((entry or {}).get("status", ""))
+                ctrl_status = _NODE_STATUS_TO_CTRL.get(raw_status)
                 if ctrl_status is None:
+                    if raw_status in _NODE_STATUS_SKIP:
+                        # 动作转换态/unknown：显式跳过，DB 保持最后已知值（契约 C8）
+                        logger.debug(
+                            "apply status snapshot: transition state %r skipped (name=%s)",
+                            raw_status,
+                            name,
+                        )
+                    else:
+                        logger.warning(
+                            "apply status snapshot: unmapped status %r skipped (name=%s)",
+                            raw_status,
+                            name,
+                        )
                     skipped += 1
                     continue
                 if machine_id is not None:
@@ -488,6 +501,13 @@ def apply_container_status_snapshot(data: dict, machine_id: int | None = None) -
                     session=session,
                 )
                 updated += 1
+            # 正常快照 → 清除机器采集异常标志（契约 C1 恢复；标志已清时不动，避免无谓写）。
+            # 直接属性赋值：update_machine 的 None 保护（value is None → 跳过）不适用于清除语义。
+            if machine_id is not None:
+                machine = machine_repo.get_by_id(machine_id, session=session)
+                if machine is not None and machine.collect_error_at is not None:
+                    machine.collect_error_at = None
+                    session.flush()
     except Exception as e:
         logger.warning("apply status snapshot failed: %s", e)
         skipped += 1
@@ -841,6 +861,43 @@ def rebuild_pinned_chain() -> Path | None:
     return bundle
 
 
+# 帧处理队列上限（契约 C7）：快照幂等覆盖，满时丢最旧（丢旧不丢新），receive 永不阻塞
+FRAME_QUEUE_MAXSIZE = 8
+
+
+def _enqueue_frame(queue: asyncio.Queue, frame: dict) -> None:
+    """投递帧到处理队列；满时丢最旧（快照幂等覆盖，丢旧不丢新，删帧由下帧 vanish 兜底）。"""
+    try:
+        queue.put_nowait(frame)
+    except asyncio.QueueFull:
+        try:
+            queue.get_nowait()
+            queue.put_nowait(frame)
+        except asyncio.QueueEmpty:  # pragma: no cover
+            pass
+
+
+async def _consume_frames(queue: asyncio.Queue, uid: str) -> None:
+    """串行消费帧（契约 C7）：快照/删除落库在独立线程执行——DB 慢不阻塞 receive 事件循环，
+    C4 读超时只度量 socket 活性。单消费者保证帧序。"""
+    while True:
+        frame = await queue.get()
+        try:
+            ftype = frame.get("type")
+            if ftype == "snapshot_batch":
+                await asyncio.to_thread(apply_snapshot_batch, frame)
+            elif ftype == "delete":
+                container_name = frame.get("container_name")
+                if container_name:
+                    await asyncio.to_thread(_handle_container_deleted, container_name)
+            else:
+                logger.warning("handle_node_ws: consumer unknown frame type %r", ftype)
+        except Exception as e:
+            logger.warning("handle_node_ws: frame processing error uid=%s: %s", uid, e)
+        finally:
+            queue.task_done()
+
+
 async def handle_node_ws(websocket) -> None:
     """Node → Ctrl `/ws/node` WebSocket 接收处理器。
 
@@ -888,6 +945,11 @@ async def handle_node_ws(websocket) -> None:
     close_reason = None
     reachable_after_close = None
 
+    # 读写解耦（契约 C7）：快照落库（同步 DB 写）走单消费者队列，事件循环只负责 receive——
+    # C4 读超时只度量 socket 活性，不再被 DB 慢拖累。帧级容错：坏帧 continue，不杀连接。
+    frame_queue: asyncio.Queue = asyncio.Queue(maxsize=FRAME_QUEUE_MAXSIZE)
+    consumer_task = asyncio.create_task(_consume_frames(frame_queue, uid))
+
     try:
         while True:
             # 半开连接防护（数据通路对账契约 C4）：read 超时（默认 30s）→
@@ -896,18 +958,20 @@ async def handle_node_ws(websocket) -> None:
                 websocket.receive_text(),
                 timeout=CommsConfig.WSS_READ_TIMEOUT,
             )
-            frame = json.loads(raw)
+            try:
+                frame = json.loads(raw)
+            except Exception as e:
+                logger.warning("handle_node_ws: malformed frame from %s: %s", uid, e)
+                continue
             if not isinstance(frame, dict):
                 logger.warning("handle_node_ws: non-dict frame from %s", uid)
                 continue
             if frame.get("type") == "snapshot_batch":
-                apply_snapshot_batch(frame)
+                _enqueue_frame(frame_queue, frame)
             elif frame.get("type") == "delete":
                 # 容器在 Node 侧消失（外部删除/对账清理）→ 抹 Ctrl DB 记录。
                 # 这是 Ctrl 现有 404 语义（删 DB 记录）的唯一替代品（文档 WSS 协议硬项）。
-                container_name = frame.get("container_name")
-                if container_name:
-                    _handle_container_deleted(container_name)
+                _enqueue_frame(frame_queue, frame)
             elif frame.get("type") == "event":
                 # 运行事件（event_log 素材）：记录日志；container_events 表随 WSS 推送落地时规划
                 logger.info("handle_node_ws: container event uid=%s name=%s type=%s exit_code=%s",
@@ -921,6 +985,12 @@ async def handle_node_ws(websocket) -> None:
         # probe 是同步 HTTP（最多 attempts 次），丢到线程池避免阻塞 WSS 事件循环
         reachable_after_close = await asyncio.to_thread(probe_machine_connectivity, machine_id)
     finally:
+        # 断连后丢弃未处理帧（状态靠重连后的全量快照补齐，不追存量）
+        consumer_task.cancel()
+        try:
+            await consumer_task
+        except (asyncio.CancelledError, Exception):
+            pass
         if reachable_after_close is False:
             Update_machine(machine_id, machine_status=MachineStatus.OFFLINE)
 
