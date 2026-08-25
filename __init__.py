@@ -47,6 +47,14 @@ def _init_database() -> None:
         import logging
 
         logging.getLogger(__name__).warning("image seed skipped: %s", e)
+    try:
+        from .services.settings_tasks import seed_system_settings_defaults
+
+        seed_system_settings_defaults()
+    except Exception as e:
+        import logging
+
+        logging.getLogger(__name__).warning("system settings seed skipped: %s", e)
 
 
 def _should_start_background_tasks() -> bool:

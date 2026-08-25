@@ -93,6 +93,9 @@ def db_session(app):
     # 镜像内置模板同样重跑（幂等），镜像测试可依赖 seed 存在
     from ..services.image_tasks import seed_image_defaults
     seed_image_defaults()
+    # 必要系统设置同样重跑（幂等），镜像注入模板依赖 seed 存在。
+    from ..services.settings_tasks import seed_system_settings_defaults
+    seed_system_settings_defaults()
     try:
         yield SessionRegistry
     finally:

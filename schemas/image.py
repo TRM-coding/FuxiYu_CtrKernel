@@ -15,9 +15,10 @@ ImageStatus = Literal["draft", "ready", "disabled"]
 
 
 class ImageFileContent(BaseModel):
-    """镜像模板文件内容。当前只保留 Dockerfile 与可选 pre_build.sh。"""
+    """镜像模板内容。最终 Dockerfile 由构建器临时拼接，不入库。"""
 
-    dockerfile: str = Field(..., min_length=1, description="Dockerfile 文件内容。")
+    base_image: str = Field(..., min_length=1, max_length=255, description="基础镜像，对应最终 Dockerfile 的 FROM。")
+    dockerfile_body: str = Field(default="", description="用户业务 Dockerfile 片段，不包含平台注入片段。")
     pre_build: str | None = Field(default=None, description="可选 pre_build.sh 文件内容。")
 
 
@@ -42,7 +43,8 @@ class UpdateImageRequest(BaseModel):
     image_id: int = Field(..., ge=1)
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=500)
-    dockerfile: str | None = Field(default=None, min_length=1)
+    base_image: str | None = Field(default=None, min_length=1, max_length=255)
+    dockerfile_body: str | None = None
     pre_build: str | None = None
     status: ImageStatus | None = None
 
@@ -76,7 +78,8 @@ class ImageDetail(BaseModel):
     name: str
     description: str | None = None
     status: ImageStatus
-    dockerfile: str | None = None
+    base_image: str | None = None
+    dockerfile_body: str | None = None
     pre_build: str | None = None
     created_by_user_id: int | None = None
     created_at: str | None = None
@@ -92,6 +95,7 @@ class ImageBriefItem(BaseModel):
     image_id: int
     name: str
     description: str | None = None
+    base_image: str | None = None
     status: ImageStatus
     created_by_user_id: int | None = None
     updated_at: str | None = None

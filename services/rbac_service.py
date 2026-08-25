@@ -36,6 +36,8 @@ AUTH_ENTITIES: list[tuple[str, str]] = [
     ("image:edit", "镜像编辑（Dockerfile/脚本）"),
     ("image:manage", "镜像管理面 + 镜像资源通配"),
     ("image:view", "镜像查看"),
+    # settings
+    ("settings:manage", "系统设置管理"),
     # 通配（显式权限点，不依赖任何组存在；operator 组 = 全部 entity，自动包含）
     ("bypass_resource", "资源判定通配：对所有资源放行"),
     ("bypass_auth_entity", "实体权限通配：对所有权限点放行"), # 不包括bypass_resource

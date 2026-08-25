@@ -18,6 +18,30 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_text(name: str, default: str) -> str:
+    """读取可用 \n 写入 .env 的长文本配置。"""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.replace("\\n", "\n")
+
+
+DEFAULT_IMAGE_PLATFORM_INJECTION_CONTENT = """USER root
+SHELL ["/bin/sh", "-c"]
+RUN set -eu; \\
+    if command -v apt-get >/dev/null 2>&1; then \\
+        apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server passwd && rm -rf /var/lib/apt/lists/*; \\
+    elif command -v apk >/dev/null 2>&1; then \\
+        apk add --no-cache openssh; \\
+    elif command -v dnf >/dev/null 2>&1; then \\
+        dnf install -y openssh-server shadow-utils && dnf clean all; \\
+    else \\
+        echo "unsupported package manager for Fuxi platform image injection" >&2; exit 1; \\
+    fi; \\
+    mkdir -p /run/sshd
+EXPOSE 22"""
+
+
 class SqlConfig:
     SQLNAME = "fuxi"
     SQLURL = "127.0.0.1"
@@ -132,6 +156,11 @@ class AppConfig(SqlConfig, KeyConfig):
     ANNOUNCEMENT_MAX_RECIPIENTS = int(os.getenv("ANNOUNCEMENT_MAX_RECIPIENTS", "200"))
     ANNOUNCEMENT_SEND_COOLDOWN_SECONDS = int(os.getenv("ANNOUNCEMENT_SEND_COOLDOWN_SECONDS", "60"))
     ANNOUNCEMENT_BATCH_SEND_MAX = int(os.getenv("ANNOUNCEMENT_BATCH_SEND_MAX", "20"))
+    # 镜像构建平台注入片段：启动时 seed 到 system_settings，设置页后续编辑 DB 值。
+    IMAGE_PLATFORM_INJECTION_CONTENT = _env_text(
+        "IMAGE_PLATFORM_INJECTION_CONTENT",
+        DEFAULT_IMAGE_PLATFORM_INJECTION_CONTENT,
+    )
 
 
 def get_config(env: str | None = None):

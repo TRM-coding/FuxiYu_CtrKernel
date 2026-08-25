@@ -7,8 +7,8 @@ from ..extensions import db
 class Image(db.Model):
     """镜像模板主表。
 
-    镜像在 Ctrl 侧是 Dockerfile 管理对象；内容直接存 DB Text（与元数据同事务，
-    无文件系统悬挂态）；Node 构建时由 Ctrl 下发内容或落临时文件。
+    镜像在 Ctrl 侧保存用户可维护的环境模板内容；最终 Dockerfile 由构建器
+    在临时目录中生成，不回写 DB。
     """
 
     __tablename__ = "images"
@@ -16,7 +16,8 @@ class Image(db.Model):
     id: int = db.Column(db.Integer, primary_key=True)
     name: str = db.Column(db.String(120), unique=True, nullable=False, index=True)
     description: str | None = db.Column(db.String(500), nullable=True)
-    dockerfile: str = db.Column(db.Text, nullable=False)
+    base_image: str = db.Column(db.String(255), nullable=False)
+    dockerfile_body: str = db.Column(db.Text, nullable=False, default="")
     pre_build: str | None = db.Column(db.Text, nullable=True)
     status: ImageStatus = db.Column(
         db.Enum(ImageStatus, values_callable=lambda obj: [e.value for e in obj]),

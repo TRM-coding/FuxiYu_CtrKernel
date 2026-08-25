@@ -28,6 +28,7 @@ def _search_filter(search: str | None):
         cast(Image.id, String).like(keyword),
         Image.name.like(keyword),
         Image.description.like(keyword),
+        Image.base_image.like(keyword),
         cast(Image.status, String).like(keyword),
     )
 
@@ -89,7 +90,8 @@ def create_image(
     *,
     name: str,
     description: str | None,
-    dockerfile: str,
+    base_image: str,
+    dockerfile_body: str,
     pre_build: str | None,
     status: ImageStatus = ImageStatus.DRAFT,
     created_by_user_id: int | None,
@@ -98,7 +100,8 @@ def create_image(
     image = Image(
         name=name,
         description=description,
-        dockerfile=dockerfile,
+        base_image=base_image,
+        dockerfile_body=dockerfile_body,
         pre_build=pre_build,
         status=status,
         created_by_user_id=created_by_user_id,
@@ -112,7 +115,7 @@ def update_image(image_id: int, *, session: Session, **fields) -> bool:
     image = get_by_id(image_id, session=session)
     if image is None:
         return False
-    allowed = {"name", "description", "dockerfile", "pre_build", "status"}
+    allowed = {"name", "description", "base_image", "dockerfile_body", "pre_build", "status"}
     dirty = False
     for key, value in fields.items():
         if key not in allowed or value is None:

@@ -1,7 +1,7 @@
 """镜像模板服务。
 
-镜像第一阶段只管理 Ctrl 侧长期保存的 Dockerfile 与可选 pre_build.sh；
-Node 构建、lint 和运行分发后续再接。
+镜像第一阶段只管理 Ctrl 侧长期保存的基础镜像、用户业务 Dockerfile 片段
+与可选 pre_build.sh；最终 Dockerfile 由构建器临时生成。
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ def _coerce_status(value: str | ImageStatus | None) -> ImageStatus | None:
 
 
 def _serialize(image, *, include_content: bool = False) -> dict:
-    """镜像概要序列化。内容（dockerfile/pre_build）直读 DB 列。
+    """镜像概要序列化。大字段只在详情接口返回。
 
     include_content 仅详情用；列表不带内容，避免大字段进分页响应。
     """
@@ -42,13 +42,14 @@ def _serialize(image, *, include_content: bool = False) -> dict:
         "image_id": image.id,
         "name": image.name,
         "description": image.description,
+        "base_image": image.base_image,
         "status": _status_value(image.status),
         "created_by_user_id": image.created_by_user_id,
         "created_at": image.created_at.isoformat() if image.created_at else None,
         "updated_at": image.updated_at.isoformat() if image.updated_at else None,
     }
     if include_content:
-        result["dockerfile"] = image.dockerfile
+        result["dockerfile_body"] = image.dockerfile_body
         result["pre_build"] = image.pre_build
     return result
 
@@ -72,19 +73,21 @@ def _visible_scope(viewer_user_id: int | None) -> tuple[set[int] | None, bool]:
 def Create_image(
     *,
     name: str,
-    dockerfile: str,
+    base_image: str,
+    dockerfile_body: str = "",
     pre_build: str | None = None,
     description: str | None = None,
     operator_user_id: int | None = None,
 ) -> int:
-    """创建镜像模板，并把创建者绑定到 user-i。内容直存 DB。"""
+    """创建镜像模板，并把创建者绑定到 user-i。"""
 
     try:
         with session_scope() as session:
             image = image_repo.create_image(
                 name=name,
                 description=description,
-                dockerfile=dockerfile,
+                base_image=base_image,
+                dockerfile_body=dockerfile_body,
                 pre_build=pre_build,
                 status=ImageStatus.DRAFT,
                 created_by_user_id=operator_user_id,
@@ -121,19 +124,21 @@ def Update_image(
     operator_user_id: int | None = None,
     name: str | None = None,
     description: str | None = None,
-    dockerfile: str | None = None,
+    base_image: str | None = None,
+    dockerfile_body: str | None = None,
     pre_build: str | None = None,
     status: str | ImageStatus | None = None,
 ) -> bool:
-    """更新镜像模板元数据或内容（内容直存 DB）。"""
+    """更新镜像模板元数据或内容。"""
 
     fields = {
         "name": name,
         "description": description,
+        "base_image": base_image,
         "status": _coerce_status(status),
     }
-    if dockerfile is not None:
-        fields["dockerfile"] = dockerfile
+    if dockerfile_body is not None:
+        fields["dockerfile_body"] = dockerfile_body
     if pre_build is not None:
         fields["pre_build"] = pre_build
 
@@ -227,18 +232,19 @@ def List_image_bref_information(
 SEED_IMAGES: list[dict] = [
     {
         "name": "Ubuntu 22.04 · 基础",
-        # 镜像构建契约（2026-08）：模板只表达业务环境；sshd/建号工具等
-        # 基础设施由平台构建注入保证，不在模板里预装。
+        # 镜像构建契约（2026-08）：模板只表达业务环境；FROM 单独存，
+        # 平台基础设施由构建注入保证，不在模板里预装。
         "description": "Ubuntu 22.04 通用环境模板（平台内置）。",
         "status": ImageStatus.READY,
-        "dockerfile": "FROM ubuntu:22.04\n",
+        "base_image": "ubuntu:22.04",
+        "dockerfile_body": "",
         "pre_build": None,
     },
 ]
 
 
 def seed_image_defaults() -> None:
-    """幂等 seed：写入内置镜像模板（内容直存 DB）。
+    """幂等 seed：写入内置镜像模板。
 
     - created_by_user_id 置空 → 系统镜像，全员可见（_visible_scope 的 include_public）
     - 同名已存在时跳过，不覆盖人工修改
@@ -250,7 +256,8 @@ def seed_image_defaults() -> None:
             image_repo.create_image(
                 name=item["name"],
                 description=item["description"],
-                dockerfile=item["dockerfile"],
+                base_image=item["base_image"],
+                dockerfile_body=item["dockerfile_body"],
                 pre_build=item.get("pre_build"),
                 status=item["status"],
                 created_by_user_id=None,
