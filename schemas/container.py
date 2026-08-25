@@ -51,7 +51,7 @@ class CreateContainerRequest(_CompatBaseModel):
     优先使用 container 配置块；顶层大写字段保留给旧调用兼容。
     """
 
-    user_name: str = ""
+    owner_user_id: int = Field(default=0, ge=0)
     machine_id: int = Field(default=0, ge=0)
     container: ContainerConfigInput | None = None
     public_key: str | None = None

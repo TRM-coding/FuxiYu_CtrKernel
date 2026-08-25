@@ -1,5 +1,4 @@
 from sqlalchemy.exc import IntegrityError
-
 from ...api import container_api, deps
 from ...services import container_tasks
 
@@ -42,7 +41,7 @@ def test_create_container_api_duplicate_returns_409(client, monkeypatch):
 
     resp = client.post(
         "/api/containers/create_container",
-        json={"user_name": "u", "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
+        json={"owner_user_id": 2, "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
     )
 
     assert resp.status_code == 409
@@ -58,10 +57,26 @@ def test_create_container_api_machine_permission_denied_returns_403(client, monk
 
     resp = client.post(
         "/api/containers/create_container",
-        json={"user_name": "u", "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
+        json={"owner_user_id": 2, "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
     )
 
     assert resp.status_code == 403
+
+
+def test_create_container_api_rejects_owner_without_machine_access(client, monkeypatch):
+    _auth(monkeypatch)
+    monkeypatch.setattr(
+        "FuxiYu_CtrKernel.services.rbac_service.user_has_resource",
+        lambda uid, rtype, rid: uid == 1,
+    )
+
+    resp = client.post(
+        "/api/containers/create_container",
+        json={"owner_user_id": 2, "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["error_reason"] == "resource_access_denied"
 
 
 def test_create_container_api_success(client, monkeypatch):
@@ -70,7 +85,7 @@ def test_create_container_api_success(client, monkeypatch):
 
     resp = client.post(
         "/api/containers/create_container",
-        json={"user_name": "u", "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
+        json={"owner_user_id": 2, "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
     )
 
     assert resp.status_code == 200

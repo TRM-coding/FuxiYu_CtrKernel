@@ -239,11 +239,14 @@ def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -
 
 
 # 将user_id作为admin，创建新容器
-def Create_container(owner_name:str,machine_id:int,container:Container_info,public_key=None, operator_user_id:int|None=None)->bool:
+def Create_container(owner_user_id:int,machine_id:int,container:Container_info,public_key=None, operator_user_id:int|None=None)->bool:
     # ensure machine is online before attempting creation
     _ensure_machine_online_for_operation(machine_id, 'create')
     machine_ip=get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/create_container")
+    owner_name = get_name_by_id(owner_user_id)
+    if not owner_name:
+        raise NodeServiceError(f"owner user {owner_user_id} not found", reason="invalid_payload")
 
     free_port = get_the_first_free_port(machine_id=machine_id)
     container.set_port(free_port)
@@ -312,8 +315,7 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
 
     # 建立用户绑定（包含必须的 role/username/public_key）
     container_id=get_id_by_name_machine(container_name=container.NAME, machine_id=machine_id)
-    user = get_by_name(owner_name)
-    add_binding(user_id=user.id,
+    add_binding(user_id=owner_user_id,
                 container_id=container_id,
                 public_key=public_key,
                 username='root', # 强制使用 root 作为用户名

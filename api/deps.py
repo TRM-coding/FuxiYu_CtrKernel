@@ -78,12 +78,13 @@ async def _read_resource_id(request: Request, id_field: str):
     return rid
 
 
-def require_resource(resource_type: str, id_field: str = "id"):
+
+def require_resource(resource_type: str, id_field: str = "id", subject_id_field: str | None = None):
     """第二层 · 资源级判别：用户对指定资源有访问权。
 
-    *id_field*: 从 path 参数/请求体读取资源 id 的字段名（如 "container_id"/"machine_id"）。
-
-    用法：Depends(require_resource("container", "container_id"))
+    用法：user_id: int = Depends(require_resource("container", "container_id"))
+    主体（subject）默认是当前用户；subject_id_field 用于「主体不是当前用户」的场景
+    （如 user 资源：管理/被管理关系按目标用户判定），从请求读取该字段作为主体。
     """
     async def dep(request: Request, user_id: int = Depends(require_current_user)) -> int:
         rid = await _read_resource_id(request, id_field)
@@ -91,14 +92,22 @@ def require_resource(resource_type: str, id_field: str = "id"):
             raise HTTPException(status_code=400,
                                 detail={"success": 0, "message": f"missing resource id field {id_field!r}",
                                         "error_reason": "invalid_resource_id"})
+        subject_user_id = user_id
+        if subject_id_field is not None:
+            subject_user_id = await _read_resource_id(request, subject_id_field)
+            if subject_user_id is None:
+                raise HTTPException(status_code=400,
+                                    detail={"success": 0, "message": f"missing subject id field {subject_id_field!r}",
+                                            "error_reason": "invalid_payload"})
+
         from ..services.rbac_service import user_has_resource
-        if not user_has_resource(user_id, resource_type, int(rid)):
+        if not user_has_resource(int(subject_user_id), resource_type, int(rid)):
             raise HTTPException(
                 status_code=403,
                 detail={"success": 0, "message": "resource access denied",
                         "error_reason": "resource_access_denied"},
             )
-        return user_id
+        return int(subject_user_id)
 
     return dep
 

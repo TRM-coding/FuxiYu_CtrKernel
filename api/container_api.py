@@ -165,11 +165,11 @@ def create_container_api(
     payload: CreateContainerRequest = Body(default_factory=CreateContainerRequest),
     operator_user_id: int = Depends(require_permission("container:create")),
     _res: int = Depends(require_resource("machine", "machine_id")),
+    owner_user_id: int = Depends(require_resource("machine", "machine_id", subject_id_field="owner_user_id")),
 ):
     """创建容器。"""
 
     data = _payload_data(payload)
-    owner_name = data.get("user_name", "")
     machine_id = int(data.get("machine_id", 0) or 0)
 
     container_raw = data.get("container") or {}
@@ -208,7 +208,7 @@ def create_container_api(
 
     try:
         if not container_service.Create_container(
-            owner_name=owner_name,
+            owner_user_id=owner_user_id,
             machine_id=machine_id,
             container=container_obj,
             public_key=public_key,

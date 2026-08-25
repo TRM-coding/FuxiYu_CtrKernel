@@ -23,7 +23,7 @@ def test_create_container_success_sends_node_then_creates_db_record_and_root_bin
     calls = mock_node_send(NODE_SUCCESS_TRUE)
 
     assert container_tasks.Create_container(
-        owner_name=owner.username,
+        owner_user_id=owner.id,
         machine_id=machine.id,
         container=container_info,
         public_key=VALID_PUBLIC_KEY,
@@ -45,7 +45,7 @@ def test_create_container_success_sends_node_then_creates_db_record_and_root_bin
 
 def test_create_container_rejects_machine_not_found(db_session, container_info):
     with pytest.raises(container_tasks.NodeServiceError) as excinfo:
-        container_tasks.Create_container("missing", 999999, container_info)
+        container_tasks.Create_container(999999, 999999, container_info)
 
     assert excinfo.value.reason == "machine_not_found"
 
@@ -55,7 +55,7 @@ def test_create_container_rejects_machine_maintenance(db_session, container_info
     machine = create_machine(is_maintenance=True)
 
     with pytest.raises(container_tasks.NodeServiceError) as excinfo:
-        container_tasks.Create_container(owner.username, machine.id, container_info)
+        container_tasks.Create_container(owner.id, machine.id, container_info)
 
     assert excinfo.value.reason == "machine_maintenance"
 
@@ -66,7 +66,7 @@ def test_create_container_rejects_machine_offline(db_session, container_info):
     machine = create_machine(machine_status=MachineStatus.OFFLINE)
 
     with pytest.raises(container_tasks.NodeServiceError) as excinfo:
-        container_tasks.Create_container(owner.username, machine.id, container_info)
+        container_tasks.Create_container(owner.id, machine.id, container_info)
 
     assert excinfo.value.reason == "machine_offline"
 
@@ -77,7 +77,7 @@ def test_create_container_rejects_invalid_resource_payload(db_session, container
     container_info.MEMORY = 8
 
     with pytest.raises(container_tasks.NodeServiceError) as excinfo:
-        container_tasks.Create_container(owner.username, machine.id, container_info)
+        container_tasks.Create_container(owner.id, machine.id, container_info)
 
     assert excinfo.value.reason == "invalid_config"
 
@@ -90,11 +90,13 @@ def test_create_container_rejects_duplicate_name_before_node_write(
 ):
     owner = create_user()
     machine = create_machine()
+    machine_permission_repo.add_permission(machine.id, owner.id, session=db_session)
+    db_session.commit()
     create_container(machine=machine, name=container_info.NAME)
     calls = mock_node_send(NODE_SUCCESS_TRUE)
 
     with pytest.raises(IntegrityError):
-        container_tasks.Create_container(owner.username, machine.id, container_info)
+        container_tasks.Create_container(owner.id, machine.id, container_info)
 
     assert calls == []
 
@@ -107,10 +109,12 @@ def test_create_container_node_failure_does_not_create_local_record(
 ):
     owner = create_user()
     machine = create_machine()
+    machine_permission_repo.add_permission(machine.id, owner.id, session=db_session)
+    db_session.commit()
     mock_node_send({"success": 0, "error_reason": "docker_init_failed"})
 
     with pytest.raises(container_tasks.NodeServiceError) as excinfo:
-        container_tasks.Create_container(owner.username, machine.id, container_info)
+        container_tasks.Create_container(owner.id, machine.id, container_info)
 
     assert excinfo.value.reason == "docker_init_failed"
     assert db_session.scalars(select(Container).where(Container.name == container_info.NAME)).first() is None
@@ -124,9 +128,11 @@ def test_create_container_success_after_node_ack(
     # 心跳三件套已退役（WSS 推送接管状态推进）：创建成功即返回 True
     owner = create_user()
     machine = create_machine()
+    machine_permission_repo.add_permission(machine.id, owner.id, session=db_session)
+    db_session.commit()
     mock_node_send(NODE_SUCCESS_TRUE)
 
-    assert container_tasks.Create_container(owner.username, machine.id, container_info) is True
+    assert container_tasks.Create_container(owner.id, machine.id, container_info) is True
 
     assert db_session.scalars(select(Container).where(Container.name == container_info.NAME)).first() is not None
 
@@ -222,5 +228,3 @@ def test_unpause_container_does_not_directly_write_online(
 
     db_session.expire_all()
     assert db_session.get(Container, container.id).container_status == ContainerStatus.PAUSED
-
-
