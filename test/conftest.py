@@ -90,6 +90,9 @@ def db_session(app):
     # 每次重建表后重跑 seed，保证 RBAC 实体/组数据完整（app 创建时的 seed 会被 drop 清掉）
     from ..services.rbac_service import seed_rbac_defaults
     seed_rbac_defaults()
+    # 镜像内置模板同样重跑（幂等），镜像测试可依赖 seed 存在
+    from ..services.image_tasks import seed_image_defaults
+    seed_image_defaults()
     try:
         yield SessionRegistry
     finally:

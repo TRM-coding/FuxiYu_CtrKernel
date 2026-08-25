@@ -3,6 +3,7 @@ from fastapi import APIRouter
 
 from . import announcement_api
 from . import container_api
+from . import image_api
 from . import machine_api
 from . import operation_log_api
 from . import user_api
@@ -11,6 +12,7 @@ router = APIRouter(prefix="/api")
 
 router.include_router(announcement_api.router)
 router.include_router(container_api.router)
+router.include_router(image_api.router)
 router.include_router(machine_api.router)
 router.include_router(operation_log_api.router)
 router.include_router(user_api.router)

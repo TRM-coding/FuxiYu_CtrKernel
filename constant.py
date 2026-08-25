@@ -20,6 +20,12 @@ class ContainerStatus(Enum):
     PAUSED = "paused"
 
 
+class ImageStatus(Enum):
+    DRAFT = "draft"
+    READY = "ready"
+    DISABLED = "disabled"
+
+
 
 class ROLE(Enum):
     ADMIN="ADMIN"
@@ -76,6 +82,10 @@ class OperationType(str, Enum):
     CHANGE_PASSWORD = "change_password"
     DELETE_USER = "delete_user"
     RESET_PASSWORD = "reset_password"
+    # 镜像
+    CREATE_IMAGE = "create_image"
+    UPDATE_IMAGE = "update_image"
+    DELETE_IMAGE = "delete_image"
     # 定时任务（operator=系统）
     SEND_CLEANUP_REMINDER = "send_cleanup_reminder"
     PAUSE_CONTAINER = "pause_container"

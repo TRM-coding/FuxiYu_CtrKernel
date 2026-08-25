@@ -39,6 +39,14 @@ def _init_database() -> None:
         import logging
 
         logging.getLogger(__name__).warning("rbac seed skipped: %s", e)
+    try:
+        from .services.image_tasks import seed_image_defaults
+
+        seed_image_defaults()
+    except Exception as e:
+        import logging
+
+        logging.getLogger(__name__).warning("image seed skipped: %s", e)
 
 
 def _should_start_background_tasks() -> bool:

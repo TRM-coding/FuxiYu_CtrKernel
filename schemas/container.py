@@ -20,6 +20,12 @@ def _blank_to_none(value):
     return None if value == "" else value
 
 
+def _blank_to_zero(value):
+    """将创建容器的可选 owner 空值归一为 0，由 API 边界再归一为当前用户。"""
+
+    return 0 if value in ("", None) else value
+
+
 class _CompatBaseModel(BaseModel):
     if ConfigDict is not None:
         model_config = ConfigDict(populate_by_name=True, extra="ignore")
@@ -61,6 +67,11 @@ class CreateContainerRequest(_CompatBaseModel):
     NAME: str = ""
     image: str = ""
     SHARED_MEM: int = Field(default=0, ge=0)
+
+    if field_validator is not None:
+        _normalize_blank_owner = field_validator("owner_user_id", mode="before")(_blank_to_zero)
+    else:  # pragma: no cover
+        _normalize_blank_owner = validator("owner_user_id", pre=True, allow_reuse=True)(_blank_to_zero)
 
 
 class CreateContainerResponse(SuccessMessageResponse):

@@ -62,6 +62,7 @@ REASON_STATUS_MAP = {
     "container_not_found": 404,
     "machine_permission_denied": 403,
     "container_permission_denied": 403,
+    "insufficient_permission": 403,
     "long_term_limit_reached": 409,
 }
 
@@ -165,12 +166,31 @@ def create_container_api(
     payload: CreateContainerRequest = Body(default_factory=CreateContainerRequest),
     operator_user_id: int = Depends(require_permission("container:create")),
     _res: int = Depends(require_resource("machine", "machine_id")),
-    owner_user_id: int = Depends(require_resource("machine", "machine_id", subject_id_field="owner_user_id")),
 ):
-    """创建容器。"""
+    """创建容器。
+
+    主体判定在 API 边界：owner 缺失/0/自己 → 自己（一般操作）；
+    代建（owner≠自己）须持有 container:manage 且 owner 对该机器有权限。
+    """
 
     data = _payload_data(payload)
     machine_id = int(data.get("machine_id", 0) or 0)
+    owner_user_id = int(data.get("owner_user_id") or 0) or operator_user_id
+    if owner_user_id != operator_user_id:
+        # 代建门禁（API 边界）：切换主体须 container:manage，且 owner 对该机器有权限
+        from ..services.rbac_service import user_has_entity, user_has_resource
+        if not user_has_entity(operator_user_id, "container:manage"):
+            return _error(
+                403,
+                "creating container for another user requires container:manage",
+                "insufficient_permission",
+            )
+        if not user_has_resource(owner_user_id, "machine", machine_id):
+            return _error(
+                403,
+                f"owner user {owner_user_id} has no access to machine {machine_id}",
+                "machine_permission_denied",
+            )
 
     container_raw = data.get("container") or {}
     if not container_raw:
