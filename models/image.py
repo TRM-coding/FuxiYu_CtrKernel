@@ -18,7 +18,6 @@ class Image(db.Model):
     description: str | None = db.Column(db.String(500), nullable=True)
     base_image: str = db.Column(db.String(255), nullable=False)
     dockerfile_body: str = db.Column(db.Text, nullable=False, default="")
-    pre_build: str | None = db.Column(db.Text, nullable=True)
     status: ImageStatus = db.Column(
         db.Enum(ImageStatus, values_callable=lambda obj: [e.value for e in obj]),
         nullable=False,

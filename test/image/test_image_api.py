@@ -30,7 +30,7 @@ def test_legacy_image_table_is_upgraded_before_list(client, monkeypatch):
 
     _ensure_image_template_schema()
     columns = {column["name"] for column in inspect(extensions.engine).get_columns("images")}
-    assert {"base_image", "dockerfile_body", "pre_build", "status", "created_by_user_id"} <= columns
+    assert {"base_image", "dockerfile_body", "status", "created_by_user_id"} <= columns
 
     from ...services.image_tasks import seed_image_defaults
 
@@ -50,7 +50,6 @@ def test_create_image_success(client, monkeypatch):
             "description": "PyTorch CUDA",
             "base_image": "ubuntu:24.04",
             "dockerfile_body": "RUN pip install torch\n",
-            "pre_build": "#!/bin/sh\n",
         },
     )
 

@@ -79,7 +79,6 @@ def _ensure_image_template_schema() -> None:
     required_sqlite = {
         "base_image": "ALTER TABLE images ADD COLUMN base_image VARCHAR(255) NOT NULL DEFAULT 'ubuntu:22.04'",
         "dockerfile_body": "ALTER TABLE images ADD COLUMN dockerfile_body TEXT NOT NULL DEFAULT ''",
-        "pre_build": "ALTER TABLE images ADD COLUMN pre_build TEXT NULL",
         "status": "ALTER TABLE images ADD COLUMN status VARCHAR(8) NOT NULL DEFAULT 'draft'",
         "created_by_user_id": "ALTER TABLE images ADD COLUMN created_by_user_id INTEGER NULL",
         "created_at": "ALTER TABLE images ADD COLUMN created_at DATETIME NULL",
@@ -88,7 +87,6 @@ def _ensure_image_template_schema() -> None:
     required_mysql = {
         "base_image": "ALTER TABLE images ADD COLUMN base_image VARCHAR(255) NOT NULL DEFAULT 'ubuntu:22.04'",
         "dockerfile_body": "ALTER TABLE images ADD COLUMN dockerfile_body TEXT NOT NULL",
-        "pre_build": "ALTER TABLE images ADD COLUMN pre_build TEXT NULL",
         "status": "ALTER TABLE images ADD COLUMN status ENUM('draft', 'ready', 'disabled') NOT NULL DEFAULT 'draft'",
         "created_by_user_id": "ALTER TABLE images ADD COLUMN created_by_user_id INT NULL",
         "created_at": "ALTER TABLE images ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",

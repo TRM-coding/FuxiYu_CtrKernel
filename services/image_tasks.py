@@ -1,7 +1,7 @@
 """镜像模板服务。
 
-镜像第一阶段只管理 Ctrl 侧长期保存的基础镜像、用户业务 Dockerfile 片段
-与可选 pre_build.sh；最终 Dockerfile 由构建器临时生成。
+镜像第一阶段只管理 Ctrl 侧长期保存的基础镜像与用户业务 Dockerfile
+片段；最终 Dockerfile 由构建器临时生成。
 """
 
 from __future__ import annotations
@@ -52,7 +52,6 @@ def _serialize(image, *, include_content: bool = False) -> dict:
     }
     if include_content:
         result["dockerfile_body"] = image.dockerfile_body
-        result["pre_build"] = image.pre_build
     return result
 
 
@@ -92,7 +91,6 @@ def build_image_payload(image_id: int) -> dict | None:
                 platform_injection=platform_injection,
                 dockerfile_body=image.dockerfile_body,
             ),
-            "pre_build": image.pre_build or None,
             "base_image": image.base_image,
         }
 
@@ -118,7 +116,6 @@ def Create_image(
     name: str,
     base_image: str,
     dockerfile_body: str = "",
-    pre_build: str | None = None,
     description: str | None = None,
     operator_user_id: int | None = None,
 ) -> int:
@@ -131,7 +128,6 @@ def Create_image(
                 description=description,
                 base_image=base_image,
                 dockerfile_body=dockerfile_body,
-                pre_build=pre_build,
                 status=ImageStatus.DRAFT,
                 created_by_user_id=operator_user_id,
                 session=session,
@@ -169,7 +165,6 @@ def Update_image(
     description: str | None = None,
     base_image: str | None = None,
     dockerfile_body: str | None = None,
-    pre_build: str | None = None,
     status: str | ImageStatus | None = None,
 ) -> bool:
     """更新镜像模板元数据或内容。"""
@@ -182,8 +177,6 @@ def Update_image(
     }
     if dockerfile_body is not None:
         fields["dockerfile_body"] = dockerfile_body
-    if pre_build is not None:
-        fields["pre_build"] = pre_build
 
     try:
         with session_scope() as session:
@@ -281,7 +274,6 @@ SEED_IMAGES: list[dict] = [
         "status": ImageStatus.READY,
         "base_image": "ubuntu:22.04",
         "dockerfile_body": "",
-        "pre_build": None,
     },
 ]
 
@@ -301,7 +293,6 @@ def seed_image_defaults() -> None:
                 description=item["description"],
                 base_image=item["base_image"],
                 dockerfile_body=item["dockerfile_body"],
-                pre_build=item.get("pre_build"),
                 status=item["status"],
                 created_by_user_id=None,
                 session=session,

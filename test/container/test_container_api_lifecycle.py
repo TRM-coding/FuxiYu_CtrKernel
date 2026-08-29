@@ -158,7 +158,6 @@ def test_create_container_with_image_id_builds_payload(client, monkeypatch):
         "image_id": 7,
         "image_tag": "fuxi/image-7:20260826T000000Z",
         "dockerfile_text": "FROM ubuntu:22.04\nRUN echo hello\n",
-        "pre_build": "echo pre-build",
     }
     captured = {}
 

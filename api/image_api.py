@@ -62,7 +62,6 @@ def create_image_api(
             description=data.get("description"),
             base_image=data["base_image"],
             dockerfile_body=data.get("dockerfile_body") or "",
-            pre_build=data.get("pre_build"),
             operator_user_id=operator_user_id,
         )
     except IntegrityError as exc:
@@ -131,7 +130,7 @@ def get_image_detail_information_api(
     _: int = Depends(require_permission("image:view")),
     __: int = Depends(require_resource("image", "image_id")),
 ):
-    """查询镜像模板详情，包含基础镜像、业务 Dockerfile 片段与 pre_build.sh。"""
+    """查询镜像模板详情，包含基础镜像与业务 Dockerfile 片段。"""
 
     image = image_service.Get_image_detail(image_id)
     if image is None:

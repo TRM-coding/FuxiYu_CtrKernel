@@ -19,7 +19,6 @@ class ImageFileContent(BaseModel):
 
     base_image: str = Field(..., min_length=1, max_length=255, description="基础镜像，对应最终 Dockerfile 的 FROM。")
     dockerfile_body: str = Field(default="", description="用户业务 Dockerfile 片段，不包含平台注入片段。")
-    pre_build: str | None = Field(default=None, description="可选 pre_build.sh 文件内容。")
 
 
 #####################
@@ -45,7 +44,6 @@ class UpdateImageRequest(BaseModel):
     description: str | None = Field(default=None, max_length=500)
     base_image: str | None = Field(default=None, min_length=1, max_length=255)
     dockerfile_body: str | None = None
-    pre_build: str | None = None
     status: ImageStatus | None = None
 
 
@@ -80,7 +78,6 @@ class ImageDetail(BaseModel):
     status: ImageStatus
     base_image: str | None = None
     dockerfile_body: str | None = None
-    pre_build: str | None = None
     created_by_user_id: int | None = None
     created_at: str | None = None
     updated_at: str | None = None

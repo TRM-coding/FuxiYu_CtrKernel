@@ -573,7 +573,7 @@ def build_container_restore_snapshot(container_id: int, cleanup_context: dict | 
     """
     Build a pre-removal snapshot with enough metadata to recreate the container and bindings.
 
-    # 注：字段集将来可能被 image 蓝图（Dockerfile + 脚本 + pre_build）参考，
+    # 注：字段集将来可能被 image 蓝图（Dockerfile / 环境模板）参考，
     # image 域（FuxiYu_Global/fuxi平台继续开发.md「新增需求」）落地时评估是否吸收。
     """
     container = get_by_id(container_id)

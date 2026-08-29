@@ -1,4 +1,4 @@
--- 镜像模板主表：Ctrl 长期保存基础镜像、用户业务 Dockerfile 片段与可选 pre_build.sh。
+-- 镜像模板主表：Ctrl 长期保存基础镜像与用户业务 Dockerfile 片段。
 -- 最终 Dockerfile 由平台构建器在临时目录生成，不回写 DB。
 CREATE TABLE IF NOT EXISTS images (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -6,7 +6,6 @@ CREATE TABLE IF NOT EXISTS images (
     description VARCHAR(500) NULL,
     base_image VARCHAR(255) NOT NULL,
     dockerfile_body TEXT NOT NULL,
-    pre_build TEXT NULL,
     status ENUM('draft', 'ready', 'disabled') NOT NULL DEFAULT 'draft',
     created_by_user_id INT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
