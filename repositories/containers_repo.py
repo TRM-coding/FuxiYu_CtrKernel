@@ -175,6 +175,8 @@ def update_container(container_id: int, *, session: Session, **fields) -> Contai
         "image",
         "machine_id",
         "container_status",
+        "failed_reason",
+        "failed_detail",
         "disk_overlay_rw_bytes",
         "disk_bind_mount_bytes",
         "disk_total_bytes",
@@ -183,8 +185,9 @@ def update_container(container_id: int, *, session: Session, **fields) -> Contai
         "bind_mount_path",
     }
     dirty = False
+    nullable_clear_fields = {"failed_reason", "failed_detail"}
     for key, value in fields.items():
-        if key not in allowed or value is None:
+        if key not in allowed or (value is None and key not in nullable_clear_fields):
             continue
         if getattr(container, key) != value:
             setattr(container, key, value)

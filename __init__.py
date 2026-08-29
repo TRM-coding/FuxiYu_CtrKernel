@@ -33,6 +33,7 @@ def _init_database() -> None:
 
     db.create_all()
     _ensure_image_template_schema()
+    _ensure_container_failure_schema()
     try:
         from .services.rbac_service import seed_rbac_defaults
 
@@ -102,6 +103,33 @@ def _ensure_image_template_schema() -> None:
         for name in missing:
             conn.execute(text(required[name]))
     logging.getLogger(__name__).warning("image schema upgraded: added columns %s", ", ".join(missing))
+
+
+def _ensure_container_failure_schema() -> None:
+    """补齐开发期旧 containers 表缺失的失败诊断列。"""
+
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    current_engine = extensions.engine
+    inspector = inspect(current_engine)
+    if not inspector.has_table("containers"):
+        return
+
+    existing = {column["name"] for column in inspector.get_columns("containers")}
+    required = {
+        "failed_reason": "ALTER TABLE containers ADD COLUMN failed_reason VARCHAR(255) NULL",
+        "failed_detail": "ALTER TABLE containers ADD COLUMN failed_detail TEXT NULL",
+    }
+    missing = [name for name in required if name not in existing]
+    if not missing:
+        return
+
+    with current_engine.begin() as conn:
+        for name in missing:
+            conn.execute(text(required[name]))
+    logging.getLogger(__name__).warning("container schema upgraded: added columns %s", ", ".join(missing))
 
 
 def _should_start_background_tasks() -> bool:

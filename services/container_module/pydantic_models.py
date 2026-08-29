@@ -14,6 +14,8 @@ class container_bref_information(BaseModel):
     port:int
     container_status:str
     display_status: str | None = None  # 派生展示态（如 host_offline），DB 不落库
+    failed_reason: str | None = None
+    failed_detail: str | None = None
     accounts: list[dict] = Field(default_factory=list)
     is_long_term: bool = False
     long_term_container_can_enable: bool = True
@@ -39,6 +41,8 @@ class container_detail_information(BaseModel):
     machine_id:int
     machine_ip:str
     container_status:str
+    failed_reason: str | None = None
+    failed_detail: str | None = None
     memory_gb:int
     shared_gb:int
     gpu_number:int

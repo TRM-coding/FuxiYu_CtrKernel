@@ -695,7 +695,11 @@ def container_status_api(
             container = containers_repo.get_by_id(container_id, session=session)
             if not container:
                 return {"container_status": None}
-            return {"container_status": container.container_status.value}
+            return {
+                "container_status": container.container_status.value,
+                "failed_reason": getattr(container, "failed_reason", None),
+                "failed_detail": getattr(container, "failed_detail", None),
+            }
     except Exception as e:
         return _error(500, str(e), "internal_error")
 

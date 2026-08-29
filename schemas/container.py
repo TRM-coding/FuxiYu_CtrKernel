@@ -149,6 +149,8 @@ class ContainerStatusRequest(_CompatBaseModel):
 
 class ContainerStatusResponse(_CompatBaseModel):
     container_status: str | None = None
+    failed_reason: str | None = None
+    failed_detail: str | None = None
 
 
 #####################
@@ -204,6 +206,8 @@ class ContainerBriefInformation(_CompatBaseModel):
     port: int | None = None
     container_status: str | None = None
     display_status: str | None = None
+    failed_reason: str | None = None
+    failed_detail: str | None = None
     accounts: list[dict[str, Any]] = Field(default_factory=list)
     is_long_term: bool = False
     long_term_container_can_enable: bool = True
@@ -231,6 +235,8 @@ class ContainerDetailInformation(_CompatBaseModel):
     machine_ip: str | None = None
     container_status: str | None = None
     display_status: str | None = None
+    failed_reason: str | None = None
+    failed_detail: str | None = None
     memory_gb: int | None = None
     shared_gb: int | None = None
     gpu_number: int | None = None

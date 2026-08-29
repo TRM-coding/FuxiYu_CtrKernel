@@ -319,7 +319,7 @@ def Create_container(
                      gpu_number=gpu_count,
                      cpu_number=container.CPU_NUMBER,
                      port=free_port,
-                     status=ContainerStatus.CREATING
+                     status=ContainerStatus.BUILDING if image_build else ContainerStatus.CREATING
                      )
 
     # 建立用户绑定（包含必须的 role/username/public_key）
@@ -999,6 +999,8 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         "machine_ip": get_machine_ip_by_id(container.machine_id),
         "container_status": container.container_status.value,
         "display_status": _derive_display_status(container.container_status, container.machine_id),
+        "failed_reason": getattr(container, "failed_reason", None),
+        "failed_detail": getattr(container, "failed_detail", None),
         "memory_gb": container.memory_gb,
         "shared_gb": container.shared_gb,
         "gpu_number": container.gpu_number,
@@ -1119,6 +1121,8 @@ def list_all_container_bref_information(
             port=container.port,
             container_status=container.container_status.value,
             display_status=_derive_display_status(container.container_status, container.machine_id),
+            failed_reason=getattr(container, "failed_reason", None),
+            failed_detail=getattr(container, "failed_detail", None),
             accounts=[
                 {"user_id": binding.get('user_id'), "username": binding.get("username"), "role": (ROLE(binding.get('role')).value if binding.get('role') is not None else None)}
                 for binding in bindings

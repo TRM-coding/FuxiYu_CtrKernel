@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
 
@@ -58,7 +58,11 @@ def _serialize(image, *, include_content: bool = False) -> dict:
 def format_image_build_tag(image_id: int, updated_at: datetime | None) -> str:
     """把镜像模板映射为 Docker tag。"""
 
-    stamp = (updated_at or datetime.utcnow()).strftime("%Y%m%dT%H%M%SZ")
+    version_time = updated_at or datetime.now(timezone.utc)
+    if version_time.tzinfo is not None:
+        version_time = version_time.astimezone(timezone.utc).replace(tzinfo=None)
+    version_time = version_time.replace(microsecond=0)
+    stamp = version_time.strftime("%Y%m%dT%H%M%SZ")
     return f"fuxi/image-{int(image_id)}:{stamp}"
 
 

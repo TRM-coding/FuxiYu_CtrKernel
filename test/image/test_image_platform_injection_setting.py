@@ -62,3 +62,13 @@ def test_build_payload_includes_platform_injection(client, monkeypatch):
     assert "FROM ubuntu:24.04" in payload["dockerfile_text"]
     assert "openssh-server" in payload["dockerfile_text"]
     assert "RUN echo hello" in payload["dockerfile_text"]
+
+
+def test_image_build_tag_uses_second_level_utc_timestamp():
+    from datetime import datetime, timezone, timedelta
+
+    from ...services.image_tasks import format_image_build_tag
+
+    updated_at = datetime(2026, 8, 29, 12, 34, 56, 789123, tzinfo=timezone(timedelta(hours=8)))
+
+    assert format_image_build_tag(7, updated_at) == "fuxi/image-7:20260829T043456Z"

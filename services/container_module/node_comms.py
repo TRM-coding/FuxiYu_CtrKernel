@@ -391,7 +391,7 @@ def register_machine(
 # Node 推送形状（wss.py build_snapshot_batch）：
 #   {"type": "snapshot_batch", "node_uid", "certificate_fingerprint",
 #    "payload": [{"type": "snapshot", "topic": "container_status"|"last_ssh"|"disk_usage", "payload": ...}]}
-#   container_status: {name: {"source", "status", "error_reason"?, "cache_updated_at"?}}
+#   container_status: {name: {"source", "status", "failed_reason"?, "failed_detail"?, "cache_updated_at"?}}
 #   last_ssh:         {name: {"last_ssh_connect_time", "updated_at"}}
 #   disk_usage:       {"machine_disk": {...}, "containers": {name: {"overlay_rw_bytes", "bind_mount_bytes", "bind_mount_path", "total_bytes"}}}
 
@@ -400,6 +400,7 @@ def register_machine(
 _NODE_STATUS_TO_CTRL = {
     "online": ContainerStatus.ONLINE,
     "offline": ContainerStatus.OFFLINE,
+    "building": ContainerStatus.BUILDING,
     "creating": ContainerStatus.CREATING,
     "starting": ContainerStatus.STARTING,
     "restarting": ContainerStatus.RESTARTING,
@@ -495,11 +496,17 @@ def apply_container_status_snapshot(data: dict, machine_id: int | None = None) -
                 if container is None:
                     skipped += 1
                     continue
+                failed_reason = (entry or {}).get("failed_reason") or (entry or {}).get("error_reason")
+                failed_detail = (entry or {}).get("failed_detail")
                 containers_repo.update_container(
                     container.id,
                     container_status=ctrl_status,
+                    failed_reason=failed_reason if ctrl_status == ContainerStatus.FAILED else None,
+                    failed_detail=failed_detail if ctrl_status == ContainerStatus.FAILED else None,
                     session=session,
                 )
+                if ctrl_status == ContainerStatus.FAILED:
+                    failed += 1
                 updated += 1
             # 正常快照 → 清除机器采集异常标志（契约 C1 恢复；标志已清时不动，避免无谓写）。
             # 直接属性赋值：update_machine 的 None 保护（value is None → 跳过）不适用于清除语义。

@@ -1,6 +1,4 @@
--- Add container restarting transition state.
--- MySQL ENUM columns must be altered before Ctrl can persist Node WSS snapshots
--- containing "restarting".
+-- Add container building transition state for image build/create split.
 
 ALTER TABLE containers
   MODIFY COLUMN container_status ENUM(

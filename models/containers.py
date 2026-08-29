@@ -21,6 +21,8 @@ class Container(db.Model):
         nullable=False,
         default=ContainerStatus.CREATING
     )
+    failed_reason: str = db.Column(db.String(255), nullable=True)
+    failed_detail: str = db.Column(db.Text, nullable=True)
     port: int = db.Column(db.Integer, nullable=False, index=True)
 
     memory_gb: int = db.Column(db.Integer, nullable=False)

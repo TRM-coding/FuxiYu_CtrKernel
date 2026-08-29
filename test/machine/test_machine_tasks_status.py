@@ -8,7 +8,7 @@ import pytest
 from ...constant import ContainerStatus, MachineStatus, PERMISSION
 from ...models.containers import Container
 from ...models.machine import Machine
-from ...repositories import machine_repo
+from ...repositories import containers_repo, machine_repo
 from ...extensions import session_scope
 from ...services import machine_tasks
 from ...services.container_module import node_comms
@@ -424,6 +424,7 @@ def test_node_emittable_statuses_covered_by_ctrl_mapping():
     emittable |= set(node_status_cache._EVENT_STATUS_MAP.values())
     emittable |= {
         NodeContainerStatus.CREATING.value,   # begin_action create（api.py）
+        NodeContainerStatus.BUILDING.value,   # begin_build（api.py）
         NodeContainerStatus.STOPPING.value,   # begin_action stop
         "pausing",                            # begin_action pause（api.py 字面量）
         "unpausing",                          # begin_action unpause（api.py 字面量）
@@ -462,6 +463,56 @@ def test_apply_container_status_snapshot_accepts_restarting(db_session):
     assert result["skipped"] == 0
     assert result["vanished"] == 0
     assert db_session.get(Container, container.id).container_status == ContainerStatus.RESTARTING
+
+
+def test_apply_container_status_snapshot_persists_failed_diagnostics(db_session):
+    machine = create_machine()
+    container = create_container(machine=machine, name="build_failed_on_node", status=ContainerStatus.BUILDING)
+
+    result = node_comms.apply_container_status_snapshot(
+        {
+            "build_failed_on_node": {
+                "status": ContainerStatus.FAILED.value,
+                "failed_reason": "build_failed",
+                "failed_detail": "docker build failed",
+            }
+        },
+        machine.id,
+    )
+
+    db_session.expire_all()
+    refreshed = db_session.get(Container, container.id)
+    assert result["updated"] == 1
+    assert result["failed"] == 1
+    assert result["vanished"] == 0
+    assert refreshed.container_status == ContainerStatus.FAILED
+    assert refreshed.failed_reason == "build_failed"
+    assert refreshed.failed_detail == "docker build failed"
+
+
+def test_apply_container_status_snapshot_clears_failed_diagnostics_on_recovery(db_session):
+    machine = create_machine()
+    container = create_container(machine=machine, name="recover_failed_diag", status=ContainerStatus.FAILED)
+    with session_scope() as session:
+        containers_repo.update_container(
+            container.id,
+            container_status=ContainerStatus.FAILED,
+            failed_reason="build_failed",
+            failed_detail="docker build failed",
+            session=session,
+        )
+
+    result = node_comms.apply_container_status_snapshot(
+        {"recover_failed_diag": {"status": ContainerStatus.ONLINE.value}},
+        machine.id,
+    )
+
+    db_session.expire_all()
+    refreshed = db_session.get(Container, container.id)
+    assert result["updated"] == 1
+    assert refreshed.container_status == ContainerStatus.ONLINE
+    assert refreshed.failed_reason is None
+    assert refreshed.failed_detail is None
 
 
 def test_list_machine_bref_does_not_probe_or_mutate_offline_machine(monkeypatch, db_session):

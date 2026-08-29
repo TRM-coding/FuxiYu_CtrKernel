@@ -43,6 +43,36 @@ def test_create_container_success_sends_node_then_creates_db_record_and_root_bin
     assert calls[0]["payload"]["owner_name"] == owner.username
 
 
+def test_create_container_with_image_build_records_building_and_forwards_payload(
+    db_session,
+    container_info,
+    mock_node_send,
+):
+    owner = create_user(username="owner_building")
+    machine = create_machine(max_shared_gb=8, max_memory_gb=64)
+    machine_permission_repo.add_permission(machine.id, owner.id, session=db_session)
+    db_session.commit()
+    calls = mock_node_send({"success": 1, "container_status": "building", "container_name": container_info.NAME})
+    image_build = {
+        "dockerfile_text": "FROM ubuntu:22.04\nRUN echo ok\n",
+        "image_tag": "fuxi/image-1:20260829T000000Z",
+    }
+
+    assert container_tasks.Create_container(
+        owner_user_id=owner.id,
+        machine_id=machine.id,
+        container=container_info,
+        image_build=image_build,
+    ) is True
+
+    created = db_session.scalars(
+        select(Container).where(Container.name == container_info.NAME, Container.machine_id == machine.id)
+    ).first()
+    assert created is not None
+    assert created.container_status == ContainerStatus.BUILDING
+    assert calls[0]["payload"]["image_build"] == image_build
+
+
 def test_create_container_rejects_machine_not_found(db_session, container_info):
     with pytest.raises(container_tasks.NodeServiceError) as excinfo:
         container_tasks.Create_container(999999, 999999, container_info)
