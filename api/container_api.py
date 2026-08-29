@@ -176,6 +176,7 @@ def create_container_api(
     data = _payload_data(payload)
     machine_id = int(data.get("machine_id", 0) or 0)
     owner_user_id = int(data.get("owner_user_id") or 0) or operator_user_id
+    image_id = int(data.get("image_id") or 0) or None
     if owner_user_id != operator_user_id:
         # 代建门禁（API 边界）：切换主体须 container:manage，且 owner 对该机器有权限
         from ..services.rbac_service import user_has_entity, user_has_resource
@@ -203,7 +204,19 @@ def create_container_api(
         }
 
     public_key = data.get("public_key") or None
+    image_build = None
     try:
+        if image_id is not None:
+            from ..services import image_tasks as image_service
+            from ..services.rbac_service import user_has_resource
+
+            if not user_has_resource(operator_user_id, "image", image_id):
+                return _error(403, "image access denied", "image_access_denied")
+            image_build = image_service.build_image_payload(image_id)
+            if image_build is None:
+                return _error(404, f"image {image_id} not found", "image_not_found")
+            container_raw["image"] = image_build["image_tag"]
+
         gpu_list = container_raw.get("GPU_LIST") or container_raw.get("gpu_list") or []
         cpu_number = int(container_raw.get("CPU_NUMBER") or container_raw.get("cpu_number") or 0)
         memory = int(container_raw.get("MEMORY") or container_raw.get("memory") or 0)
@@ -233,6 +246,7 @@ def create_container_api(
             container=container_obj,
             public_key=public_key,
             operator_user_id=operator_user_id,
+            image_build=image_build,
         ):
             _log_failure(
                 operation=OperationType.CREATE_CONTAINER,
@@ -665,26 +679,20 @@ def container_status_api(
     _res: int = Depends(require_resource("container:collaborator", "container_id")),
     _machine: int = Depends(require_machine_of_container("container_id")),
 ):
-    """查询容器状态（与其他 getter 同构：view + 容器角色 + 机器）。"""
+    """查询容器状态（与其他 getter 同构：view + 容器角色 + 机器）。
+
+    查询与鉴权统一以 container_id 为键（前端心跳本就传该字段）；name+machine
+    不再作为查询载体，杜绝「用自己可访问的 container_id 过资源检查、再按任意
+    name+machine 探测他人容器状态」的错位。
+    """
 
     data = _payload_data(payload)
-    container_name = data.get("container_name", "")
-    machine_id = data.get("machine_id", None)
-    if not container_name or machine_id is None or machine_id == "":
-        return {"container_status": None}
-    machine_id = _machine_id_or_none(machine_id)
-    if machine_id is None:
+    container_id = _machine_id_or_none(data.get("container_id"))
+    if container_id is None:
         return {"container_status": None}
     try:
         with session_scope(commit=False) as session:
-            cid = containers_repo.get_id_by_name_machine(
-                container_name=container_name,
-                machine_id=machine_id,
-                session=session,
-            )
-            if not cid:
-                return {"container_status": None}
-            container = containers_repo.get_by_id(cid, session=session)
+            container = containers_repo.get_by_id(container_id, session=session)
             if not container:
                 return {"container_status": None}
             return {"container_status": container.container_status.value}

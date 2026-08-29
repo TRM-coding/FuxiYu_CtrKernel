@@ -1,4 +1,7 @@
 from ...api import deps
+from ... import _ensure_image_template_schema
+from ... import extensions
+from sqlalchemy import inspect, text
 
 
 def _auth(monkeypatch, *, user_id=1, entity=True, resource=True):
@@ -15,6 +18,26 @@ def test_create_image_requires_auth(client, monkeypatch):
     resp = client.post("/api/images/create_image", json={"name": "img", "base_image": "ubuntu:24.04"})
 
     assert resp.status_code == 401
+
+
+def test_legacy_image_table_is_upgraded_before_list(client, monkeypatch):
+    """旧开发库 images 表缺新列时，启动期补列后列表接口不应 500。"""
+    _auth(monkeypatch, user_id=7)
+    with extensions.engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS user_images"))
+        conn.execute(text("DROP TABLE IF EXISTS images"))
+        conn.execute(text("CREATE TABLE images (id INTEGER PRIMARY KEY, name VARCHAR(120) NOT NULL UNIQUE, description VARCHAR(500) NULL)"))
+
+    _ensure_image_template_schema()
+    columns = {column["name"] for column in inspect(extensions.engine).get_columns("images")}
+    assert {"base_image", "dockerfile_body", "pre_build", "status", "created_by_user_id"} <= columns
+
+    from ...services.image_tasks import seed_image_defaults
+
+    seed_image_defaults()
+    resp = client.get("/api/images/list_image_bref_information?page_number=1&page_size=100")
+    assert resp.status_code == 200
+    assert resp.json()["total_number"] >= 1
 
 
 def test_create_image_success(client, monkeypatch):

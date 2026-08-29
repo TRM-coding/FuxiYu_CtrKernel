@@ -239,7 +239,14 @@ def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -
 
 
 # 将user_id作为admin，创建新容器
-def Create_container(owner_user_id:int,machine_id:int,container:Container_info,public_key=None, operator_user_id:int|None=None)->bool:
+def Create_container(
+    owner_user_id: int,
+    machine_id: int,
+    container: Container_info,
+    public_key=None,
+    operator_user_id: int | None = None,
+    image_build: dict | None = None,
+) -> bool:
     # ensure machine is online before attempting creation
     _ensure_machine_online_for_operation(machine_id, 'create')
     machine_ip=get_machine_ip_by_id(machine_id)
@@ -276,6 +283,8 @@ def Create_container(owner_user_id:int,machine_id:int,container:Container_info,p
     container_info['config']=container.get_config()
     if public_key:
         container_info['public_key']=public_key
+    if image_build:
+        container_info["image_build"] = image_build
     # 名称/长度/格式等校验已在参数检查阶段由 container_repo.validate_create_params 完成
 
     # check duplicate container name on this machine before sending to Node

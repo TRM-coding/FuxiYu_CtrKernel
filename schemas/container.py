@@ -59,6 +59,7 @@ class CreateContainerRequest(_CompatBaseModel):
 
     owner_user_id: int = Field(default=0, ge=0)
     machine_id: int = Field(default=0, ge=0)
+    image_id: int | None = Field(default=None, ge=1)
     container: ContainerConfigInput | None = None
     public_key: str | None = None
     GPU_LIST: list[int] = Field(default_factory=list)
@@ -141,13 +142,9 @@ class UpdateRoleRequest(_CompatBaseModel):
 
 
 class ContainerStatusRequest(_CompatBaseModel):
-    machine_id: int | None = Field(default=None, ge=0)
-    container_name: str = ""
-
-    if field_validator is not None:
-        _normalize_blank_machine_id = field_validator("machine_id", mode="before")(_blank_to_none)
-    else:  # pragma: no cover
-        _normalize_blank_machine_id = validator("machine_id", pre=True, allow_reuse=True)(_blank_to_none)
+    # 查询键与鉴权键统一为 container_id；前端心跳仍会附传 machine_id/container_name，
+    # 由 extra="ignore" 忽略，不再参与查询，避免按任意 name+machine 探测他人容器。
+    container_id: int | None = Field(default=None, ge=1)
 
 
 class ContainerStatusResponse(_CompatBaseModel):

@@ -7,12 +7,14 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime
 
 from sqlalchemy.exc import IntegrityError
 
 from ..constant import ImageStatus, OperationType
 from ..extensions import session_scope
 from ..repositories import image_repo, userimage_repo
+from . import settings_tasks
 from .operation_log_tasks import write_operation_log as write_op_log
 
 
@@ -52,6 +54,47 @@ def _serialize(image, *, include_content: bool = False) -> dict:
         result["dockerfile_body"] = image.dockerfile_body
         result["pre_build"] = image.pre_build
     return result
+
+
+def format_image_build_tag(image_id: int, updated_at: datetime | None) -> str:
+    """把镜像模板映射为 Docker tag。"""
+
+    stamp = (updated_at or datetime.utcnow()).strftime("%Y%m%dT%H%M%SZ")
+    return f"fuxi/image-{int(image_id)}:{stamp}"
+
+
+def render_final_dockerfile(*, base_image: str, platform_injection: str, dockerfile_body: str | None = None) -> str:
+    """拼出最终 Dockerfile 文本。"""
+
+    parts: list[str] = [f"FROM {base_image}".strip()]
+    injection = (platform_injection or "").strip()
+    if injection:
+        parts.append(injection)
+    body = (dockerfile_body or "").strip()
+    if body:
+        parts.append(body)
+    return "\n\n".join(parts).rstrip() + "\n"
+
+
+def build_image_payload(image_id: int) -> dict | None:
+    """按 image_id 生成给 Node 的构建 payload。"""
+
+    with session_scope(commit=False) as session:
+        image = image_repo.get_by_id(image_id, session=session)
+        if image is None:
+            return None
+        platform_injection = settings_tasks.get_image_platform_injection_content()
+        return {
+            "image_id": image.id,
+            "image_tag": format_image_build_tag(image.id, image.updated_at),
+            "dockerfile_text": render_final_dockerfile(
+                base_image=image.base_image,
+                platform_injection=platform_injection,
+                dockerfile_body=image.dockerfile_body,
+            ),
+            "pre_build": image.pre_build or None,
+            "base_image": image.base_image,
+        }
 
 
 def _visible_scope(viewer_user_id: int | None) -> tuple[set[int] | None, bool]:

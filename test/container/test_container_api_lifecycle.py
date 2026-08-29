@@ -152,6 +152,46 @@ def test_create_container_blank_owner_creates_for_self(client, monkeypatch):
     assert captured["owner_user_id"] == 1
 
 
+def test_create_container_with_image_id_builds_payload(client, monkeypatch):
+    _auth(monkeypatch)
+    build_payload = {
+        "image_id": 7,
+        "image_tag": "fuxi/image-7:20260826T000000Z",
+        "dockerfile_text": "FROM ubuntu:22.04\nRUN echo hello\n",
+        "pre_build": "echo pre-build",
+    }
+    captured = {}
+
+    monkeypatch.setattr(
+        "FuxiYu_CtrKernel.services.image_tasks.build_image_payload",
+        lambda image_id: build_payload if image_id == 7 else None,
+    )
+    monkeypatch.setattr(
+        "FuxiYu_CtrKernel.services.rbac_service.user_has_resource",
+        lambda uid, rtype, rid: True,
+    )
+
+    def _fake_create(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(container_api.container_service, "Create_container", _fake_create)
+
+    resp = client.post(
+        "/api/containers/create_container",
+        json={
+            "owner_user_id": 2,
+            "machine_id": 1,
+            "image_id": 7,
+            "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "ignored"},
+        },
+    )
+
+    assert resp.status_code == 200
+    assert captured["image_build"] == build_payload
+    assert captured["container"].image == build_payload["image_tag"]
+
+
 def test_delete_container_api_not_found_returns_404(client, monkeypatch):
     _auth(monkeypatch)
 

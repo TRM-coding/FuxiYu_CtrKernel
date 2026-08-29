@@ -386,14 +386,13 @@ def Update_user(user_id:int,**fields)->User|None:
 
 #####################################
 #忘记密码
-#TODO:实现邮件发送功能
-# 暂时默认重置为 "[graduation_year][username]
+# 重置为随机密码，明文仅在本次响应中返回（管理员转交本人后应由其改密）
 def Reset_password(user_id:int)->str|None:
     with session_scope() as session:
         user = get_by_id(user_id, session=session)
         if not user:
             return None
-        new_password=f"{user.graduation_year}{user.username}"
+        new_password = secrets.token_urlsafe(12)
         try:
             update_user(user_id,password_hash=generate_password_hash(new_password), session=session)
         except Exception as e:

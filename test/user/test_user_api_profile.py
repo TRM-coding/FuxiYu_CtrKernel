@@ -106,6 +106,19 @@ def test_change_password_wrong_old_password(client, monkeypatch):
     assert resp.json()["error_reason"] == "old_password_incorrect"
 
 
+def test_change_password_others_requires_self(client, monkeypatch):
+    """改密只能改自己：目标 user_id 与会话用户不一致 → 403，Change_password 不应被调用。"""
+    _valid_token(monkeypatch, user_id=2)  # 当前用户 2，目标用户 1
+    called = []
+    monkeypatch.setattr(user_api.user_tasks, "Change_password", lambda user, old, new: called.append(user.id) or True)
+
+    resp = client.post("/api/users/change_password", json={"user_id": 1, "old_password": "old", "new_password": "new"} )
+
+    assert resp.status_code == 403
+    assert resp.json()["error_reason"] == "insufficient_permission"
+    assert called == []
+
+
 def test_delete_user_success(client, monkeypatch):
     monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
 

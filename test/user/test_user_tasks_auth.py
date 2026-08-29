@@ -74,12 +74,15 @@ def test_change_password_wrong_old_password_keeps_original(db_session):
     assert check_password_hash(refreshed.password_hash, "old_password")
 
 
-def test_reset_password_success_returns_expected_plain_password_and_saves_hash(db_session):
+def test_reset_password_success_returns_random_password_and_saves_hash(db_session):
     user = create_user(username="reset_user", password="old_password", graduation_year="2026")
 
     new_password = user_tasks.Reset_password(user.id)
 
-    assert new_password == "2026reset_user"
+    # 随机密码：非可预测的 "年份+用户名"，且长度足够
+    assert new_password
+    assert new_password != "2026reset_user"
+    assert len(new_password) >= 12
     db_session.expire_all()
     refreshed = db_session.get(User, user.id)
     assert check_password_hash(refreshed.password_hash, new_password)

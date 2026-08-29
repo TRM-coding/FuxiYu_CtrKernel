@@ -209,9 +209,12 @@ def list_all_user_bref_information_api(
 def change_password_user(
     message: ChangePasswordRequest,
     request: Request,
-    _: int = Depends(require_current_user),
+    current_user_id: int = Depends(require_current_user),
 ):
-    """修改用户密码。"""
+    """修改用户密码（仅本人：user_id 必须等于会话用户）。"""
+
+    if message.user_id != current_user_id:
+        return _error(403, "can only change your own password", "insufficient_permission")
 
     with session_scope(commit=False) as session:
         user = user_repo.get_by_id(message.user_id, session=session)

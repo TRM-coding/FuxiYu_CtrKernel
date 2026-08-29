@@ -1,4 +1,5 @@
 from ...api import container_api, deps
+from ...constant import ContainerStatus
 from ...models.containers import Container
 from ...services import container_tasks
 from ..factories import create_container
@@ -74,6 +75,35 @@ def test_container_status_api_success(client, monkeypatch, db_session):
 
     assert resp.status_code == 200
     assert resp.json()["container_status"] == container.container_status.value
+
+
+def test_container_status_api_query_key_is_container_id_not_name_machine(client, monkeypatch, db_session):
+    """查询键与鉴权键统一为 container_id：name+machine 指向他容器不影响结果。"""
+    _auth(monkeypatch)
+    target = create_container(status=ContainerStatus.ONLINE)
+    decoy = create_container(status=ContainerStatus.OFFLINE)
+
+    resp = client.post(
+        "/api/containers/container_status",
+        json={"container_id": target.id, "machine_id": decoy.machine_id, "container_name": decoy.name},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["container_status"] == "online"
+
+
+def test_container_status_api_without_container_id_rejected(client, monkeypatch, db_session):
+    """只传 name+machine（无 container_id）在鉴权层被拒（400），不能探测他人容器。"""
+    _auth(monkeypatch)
+    container = create_container(status=ContainerStatus.ONLINE)
+
+    resp = client.post(
+        "/api/containers/container_status",
+        json={"machine_id": container.machine_id, "container_name": container.name},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error_reason"] == "invalid_resource_id"
 
 
 def test_refresh_last_ssh_login_time_api_node_endpoint_missing_returns_502(client, monkeypatch, db_session):

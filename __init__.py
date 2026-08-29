@@ -12,6 +12,7 @@ load_dotenv(_DOTENV_PATH, override=True)
 
 from .api import register_api
 from .config import AppConfig, build_allowed_origins
+from . import extensions
 from .extensions import configure_database, db
 from .utils.logging_config import configure_daily_logging
 
@@ -31,6 +32,7 @@ def _init_database() -> None:
     from . import models  # noqa: F401
 
     db.create_all()
+    _ensure_image_template_schema()
     try:
         from .services.rbac_service import seed_rbac_defaults
 
@@ -55,6 +57,53 @@ def _init_database() -> None:
         import logging
 
         logging.getLogger(__name__).warning("system settings seed skipped: %s", e)
+
+
+def _ensure_image_template_schema() -> None:
+    """补齐开发期旧 images 表缺失的镜像模板列。
+
+    create_all 只创建新表，不会修改旧表；镜像模板在开发期经历过字段拆分，
+    旧 SQLite 库会缺 base_image/dockerfile_body 等列，导致列表接口 500。
+    """
+
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    current_engine = extensions.engine
+    inspector = inspect(current_engine)
+    if not inspector.has_table("images"):
+        return
+
+    existing = {column["name"] for column in inspector.get_columns("images")}
+    required_sqlite = {
+        "base_image": "ALTER TABLE images ADD COLUMN base_image VARCHAR(255) NOT NULL DEFAULT 'ubuntu:22.04'",
+        "dockerfile_body": "ALTER TABLE images ADD COLUMN dockerfile_body TEXT NOT NULL DEFAULT ''",
+        "pre_build": "ALTER TABLE images ADD COLUMN pre_build TEXT NULL",
+        "status": "ALTER TABLE images ADD COLUMN status VARCHAR(8) NOT NULL DEFAULT 'draft'",
+        "created_by_user_id": "ALTER TABLE images ADD COLUMN created_by_user_id INTEGER NULL",
+        "created_at": "ALTER TABLE images ADD COLUMN created_at DATETIME NULL",
+        "updated_at": "ALTER TABLE images ADD COLUMN updated_at DATETIME NULL",
+    }
+    required_mysql = {
+        "base_image": "ALTER TABLE images ADD COLUMN base_image VARCHAR(255) NOT NULL DEFAULT 'ubuntu:22.04'",
+        "dockerfile_body": "ALTER TABLE images ADD COLUMN dockerfile_body TEXT NOT NULL",
+        "pre_build": "ALTER TABLE images ADD COLUMN pre_build TEXT NULL",
+        "status": "ALTER TABLE images ADD COLUMN status ENUM('draft', 'ready', 'disabled') NOT NULL DEFAULT 'draft'",
+        "created_by_user_id": "ALTER TABLE images ADD COLUMN created_by_user_id INT NULL",
+        "created_at": "ALTER TABLE images ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "updated_at": "ALTER TABLE images ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
+    }
+    required = required_sqlite if current_engine.dialect.name == "sqlite" else required_mysql
+
+    missing = [name for name in required if name not in existing]
+    if not missing:
+        return
+
+    with current_engine.begin() as conn:
+        for name in missing:
+            conn.execute(text(required[name]))
+    logging.getLogger(__name__).warning("image schema upgraded: added columns %s", ", ".join(missing))
 
 
 def _should_start_background_tasks() -> bool:

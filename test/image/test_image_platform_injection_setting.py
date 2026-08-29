@@ -38,3 +38,27 @@ def test_platform_injection_setting_api_roundtrip(client, monkeypatch):
     assert update_resp.json()["success"] == 1
     assert get_resp.status_code == 200
     assert get_resp.json()["content"] == custom
+
+
+def test_build_payload_includes_platform_injection(client, monkeypatch):
+    _auth(monkeypatch, user_id=7)
+    image_resp = client.post(
+        "/api/images/create_image",
+        json={
+            "name": "build-template",
+            "description": "template for container build",
+            "base_image": "ubuntu:24.04",
+            "dockerfile_body": "RUN echo hello\n",
+        },
+    )
+    image_id = image_resp.json()["image_id"]
+
+    from ...services.image_tasks import build_image_payload
+
+    payload = build_image_payload(image_id)
+
+    assert payload is not None
+    assert payload["image_tag"].startswith(f"fuxi/image-{image_id}:")
+    assert "FROM ubuntu:24.04" in payload["dockerfile_text"]
+    assert "openssh-server" in payload["dockerfile_text"]
+    assert "RUN echo hello" in payload["dockerfile_text"]
