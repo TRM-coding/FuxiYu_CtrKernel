@@ -6,6 +6,7 @@ class Container(db.Model):
     __tablename__ = "containers"
 
     id: int = db.Column(db.Integer, primary_key=True)
+    created_at = db.Column(db.DateTime, nullable=True)
     name: str = db.Column(db.String(120), nullable=False)
     image: str = db.Column(db.String(200), nullable=False)
     # 外键列：引用 machines.id
@@ -29,12 +30,19 @@ class Container(db.Model):
     shared_gb: int = db.Column(db.Integer, nullable=False)
     gpu_number: int = db.Column(db.Integer, nullable=False)
     cpu_number: int = db.Column(db.Integer, nullable=False)
+    # ── GPU 三集合建模（2026-08-30 决策） ──
+    # gpu_chosen_list：分配——创建时在机器 allow_list 内选定并锁定的物理卡集合
+    gpu_chosen_list: list | None = db.Column(db.JSON, nullable=True)
+    # 端口映射（2026-08 决策）：docker 自动分配后由 WSS 快照回填，
+    # [{container_port, host_port, protocol}]；port = 22 的宿主端口。
+    port_mappings: list | None = db.Column(db.JSON, nullable=True)
 
-    # 磁盘用量快照（bytes），定期检测时更新
+    # 磁盘用量快照（bytes），定期检测时更新。
+    # disk_limit_bytes 已移除（2026-09-01 决策）：容器磁盘上限统一以
+    # machine.max_disk_size_gb 现算派生，不再落库机器级快照拷贝。
     disk_overlay_rw_bytes: int = db.Column(db.BigInteger, nullable=True)
     disk_bind_mount_bytes: int = db.Column(db.BigInteger, nullable=True)
     disk_total_bytes: int = db.Column(db.BigInteger, nullable=True)
-    disk_limit_bytes: int = db.Column(db.BigInteger, nullable=True)
     disk_checked_at = db.Column(db.DateTime, nullable=True)
 
     # 宿主机 bind mount 路径，磁盘检测时由 NodeKernel 返回并持久化

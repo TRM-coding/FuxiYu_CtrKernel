@@ -126,33 +126,25 @@ def _refresh_disk_async(container_id: int) -> None:
     try:
         du = container_service.get_container_disk_usage(container_id, timeout=20.0)
         if isinstance(du, dict) and du.get("container"):
-            from ..repositories import machine_repo, containers_repo as repo
+            from ..repositories import containers_repo as repo
 
             with session_scope(commit=False) as session:
                 c = repo.get_by_id(container_id, session=session)
                 if not c:
                     return
-                machine_id = c.machine_id
                 container_pk = c.id
             cd = du["container"]
             overlay = int(cd.get("overlay_rw_bytes") or 0)
             bind = int(cd.get("bind_mount_bytes") or 0)
             total = int(cd.get("total_bytes") or 0)
-            limit = 0
-            try:
-                with session_scope(commit=False) as session:
-                    m = machine_repo.get_by_id(machine_id, session=session)
-                dg = getattr(m, "disk_size_gb", 0) or 0
-                limit = int(dg * 1024**3)
-            except Exception:
-                pass
+            # 容器磁盘上限统一以 machine.max_disk_size_gb 现算派生（2026-09-01 决策），
+            # 不再落库 disk_limit_bytes 机器级拷贝。
             with session_scope() as session:
                 repo.update_container(
                     container_pk,
                     disk_overlay_rw_bytes=overlay,
                     disk_bind_mount_bytes=bind,
                     disk_total_bytes=total,
-                    disk_limit_bytes=limit,
                     disk_checked_at=datetime.utcnow(),
                     session=session,
                 )
@@ -695,13 +687,58 @@ def container_status_api(
             container = containers_repo.get_by_id(container_id, session=session)
             if not container:
                 return {"container_status": None}
+            from ..services.container_module.node_comms import get_cached_container_runtime_metrics
             return {
                 "container_status": container.container_status.value,
                 "failed_reason": getattr(container, "failed_reason", None),
                 "failed_detail": getattr(container, "failed_detail", None),
+                "runtime_metrics": get_cached_container_runtime_metrics(container.machine_id, container.name),
             }
     except Exception as e:
         return _error(500, str(e), "internal_error")
+
+
+@router.post("/get_container_operation_logs")
+def get_container_operation_logs_api(
+    request: Request,
+    payload: ContainerIdRequest = Body(default_factory=ContainerIdRequest),
+    operator_user_id: int = Depends(require_permission("container:view")),
+    _res: int = Depends(require_resource("container:collaborator", "container_id")),
+    _machine: int = Depends(require_machine_of_container("container_id")),
+):
+    """该容器的操作历史（能看容器的即可看其事件；operator 全量仍走 /admin/operation_logs）。"""
+
+    from ..repositories import operation_log_repo
+    from ..repositories import user_repo
+
+    data = _payload_data(payload)
+    container_id = int(data.get("container_id", 0) or 0)
+    try:
+        with session_scope(commit=False) as session:
+            container = containers_repo.get_by_id(container_id, session=session)
+            # 容器 id 复用区分（2026-09）：SQLite 删除后 id 可复用，op log 不级联删除，
+            # 旧容器日志早于当前容器 created_at——按时间锚过滤，新容器只看自己的历史。
+            # created_at 为 NULL 的旧容器（未回填）不过滤，回退旧行为。
+            created_after = container.created_at.isoformat() if (container and container.created_at) else None
+            rows, _ = operation_log_repo.list_logs(
+                session=session,
+                page=1,
+                page_size=50,
+                target_type="container",
+                target_id=container_id,
+                start=created_after,
+            )
+            logs = []
+            for row in rows:
+                item = operation_log_repo.serialize(row)
+                username = None
+                if item.get("operator_user_id") is not None:
+                    username = user_repo.get_name_by_id(item["operator_user_id"], session=session)
+                item["operator_username"] = username
+                logs.append(item)
+    except Exception as e:
+        return _error(500, f"failed to list container operation logs: {e}", "internal_error")
+    return {"success": 1, "logs": logs}
 
 
 @router.post("/refresh_last_ssh_login_time", response_model=RefreshLastSshLoginTimeResponse)

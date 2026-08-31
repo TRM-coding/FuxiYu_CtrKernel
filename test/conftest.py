@@ -96,12 +96,40 @@ def db_session(app):
     # 必要系统设置同样重跑（幂等），镜像注入模板依赖 seed 存在。
     from ..services.settings_tasks import seed_system_settings_defaults
     seed_system_settings_defaults()
+    from ..services.container_module.node_comms import clear_runtime_buffers
+    clear_runtime_buffers()
     try:
         yield SessionRegistry
     finally:
         SessionRegistry.remove()
         db.drop_all()
         db.create_all()
+
+
+@pytest.fixture()
+def ensure_auth_users(db_session):
+    """幂等补建 API 测试伪造认证常用的固定用户（1 / 7）。
+
+    SQLite 已开启 PRAGMA foreign_keys=ON（extensions._make_engine，2026-09 决策）：
+    插入引用 users.id 的行（如 images.created_by_user_id / operation_logs.operator）
+    要求用户真实存在；而不少 API 测试用 monkeypatch 伪造固定假 user_id 不建用户。
+    相关测试文件用 pytestmark usefixtures 挂载本 fixture。
+    """
+
+    from ..constant import PERMISSION
+    from ..models.user import User
+
+    for uid, uname in ((1, "auth_user_1"), (7, "auth_user_7")):
+        if db_session.get(User, uid) is None:
+            db_session.add(User(
+                id=uid,
+                username=uname,
+                email=f"{uname}@bjtu.edu.cn",
+                password_hash="unused",
+                graduation_year="2026",
+                permission=PERMISSION.USER,
+            ))
+    db_session.commit()
 
 
 @pytest.fixture(autouse=True)

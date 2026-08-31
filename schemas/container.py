@@ -151,6 +151,7 @@ class ContainerStatusResponse(_CompatBaseModel):
     container_status: str | None = None
     failed_reason: str | None = None
     failed_detail: str | None = None
+    runtime_metrics: dict[str, Any] | None = None
 
 
 #####################
@@ -201,11 +202,23 @@ class ContainerAccountEntry(_CompatBaseModel):
 class ContainerBriefInformation(_CompatBaseModel):
     container_id: int | None = None
     container_name: str | None = None
+    container_image: str | None = None
+    # 容器创建时间（2026-09）：id 在 SQLite 删除后可复用，created_at 作新旧区分锚
+    created_at: str | None = None
     machine_id: int | None = None
     machine_ip: str | None = None
     port: int | None = None
     container_status: str | None = None
     display_status: str | None = None
+    # 展示派生：机器实际缩水 trim 后，容器申请超上限时展示砍后值（容器 DB 不动）
+    alloc_cpu_number: int | None = None
+    alloc_memory_gb: int | None = None
+    alloc_gpu_number: int | None = None
+    alloc_degraded: bool = False
+    # GPU 三集合（决策）：容器分配锁定的物理卡集合
+    gpu_chosen_list: list[int] | None = None
+    # 端口映射（docker 自动分配回填）：[{container_port, host_port, protocol}]
+    port_mappings: list[dict[str, Any]] | None = None
     failed_reason: str | None = None
     failed_detail: str | None = None
     accounts: list[dict[str, Any]] = Field(default_factory=list)
@@ -221,6 +234,7 @@ class ContainerBriefInformation(_CompatBaseModel):
     disk_total_gb: float | None = None
     disk_limit_gb: float | None = None
     disk_usage_percent: float | None = None
+    runtime_metrics: dict[str, Any] | None = None
     freeze_first_frozen_at: str | None = None
     freeze_grace_until: str | None = None
     freeze_days_frozen: int | None = None
@@ -231,6 +245,10 @@ class ContainerDetailInformation(_CompatBaseModel):
     container_id: int | None = None
     container_name: str | None = None
     container_image: str | None = None
+    # 容器创建时间（2026-09）：id 在 SQLite 删除后可复用，created_at 作新旧区分锚
+    created_at: str | None = None
+    # 完整 Dockerfile（由镜像模板 render，非平台镜像/已删为 None）
+    image_dockerfile: str | None = None
     machine_id: int | None = None
     machine_ip: str | None = None
     container_status: str | None = None
@@ -242,13 +260,28 @@ class ContainerDetailInformation(_CompatBaseModel):
     gpu_number: int | None = None
     cpu_number: int | None = None
     port: int | None = None
+    # 展示派生：机器实际缩水 trim 后，容器申请超上限时展示砍后值（容器 DB 不动）
+    alloc_cpu_number: int | None = None
+    alloc_memory_gb: int | None = None
+    alloc_gpu_number: int | None = None
+    alloc_degraded: bool = False
+    # GPU 三集合（决策）：容器分配锁定的物理卡集合
+    gpu_chosen_list: list[int] | None = None
+    # 端口映射（docker 自动分配回填）：[{container_port, host_port, protocol}]
+    port_mappings: list[dict[str, Any]] | None = None
     owners: list[str] = Field(default_factory=list)
     accounts: list[ContainerAccountEntry] = Field(default_factory=list)
     is_long_term: bool = False
     long_term_container_can_enable: bool = True
     long_term_container_blocked_user_ids: list[int] = Field(default_factory=list)
     long_term_container_remaining_by_user: dict[int, int] = Field(default_factory=dict)
+    last_ssh_login_time: str | None = None
+    cleanup_after_days: int | None = None
+    cleanup_at: str | None = None
+    seconds_until_cleanup: int | None = None
+    cleanup_status: str | None = None
     disk_usage: dict[str, Any] | None = None
+    runtime_metrics: dict[str, Any] | None = None
     freeze_state: dict[str, Any] | None = None
 
 

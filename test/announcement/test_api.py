@@ -2,7 +2,11 @@
 
 import json
 
+import pytest
+
 from ...constant import AnnouncementStatus, AnnouncementTemplateCategory, PERMISSION
+
+pytestmark = pytest.mark.usefixtures("ensure_auth_users")
 from ...extensions import session_scope
 from ...models.announcement import Announcement, AnnouncementDraft, AnnouncementTemplate
 from ...repositories import announcement_repo

@@ -7,7 +7,7 @@ from datetime import datetime
 from ..config import AppConfig
 from ..constant import OperationType
 from ..extensions import session_scope
-from ..repositories import long_term_container_repo, container_cleanup_reminder_repo
+from ..repositories import containers_repo, long_term_container_repo, container_cleanup_reminder_repo
 from ..repositories import container_ssh_login_repo
 from ..services import container_tasks
 from ..utils.mail import send as send_mail
@@ -78,7 +78,8 @@ def _send_cleanup_reminders_if_needed(container_id: int, info: dict, config=AppC
             container_id,
             cleanup_context={**info, "reminder_threshold_hours": hours},
         )
-        recipients = container_tasks.get_container_root_owner_emails(container_id)
+        with session_scope(commit=False) as session:
+            recipients = containers_repo.get_container_root_owner_emails(container_id, session=session)
         if not recipients:
             logger.info("[container-cleanup] reminder skipped for container_id=%s: no root owner email", container_id)
             return

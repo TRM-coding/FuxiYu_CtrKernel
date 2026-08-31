@@ -20,6 +20,9 @@ class NodeHardwareProfile(BaseModel):
     cpu_core_number: int = Field(default=0, ge=0)
     gpu_number: int = Field(default=0, ge=0)
     gpu_type: str | None = None
+    # GPU 三集合（决策）：gpu_list 事实（smi 枚举，sys_snapshot 更新）
+    gpu_list: list[int] | None = None
+    gpu_allow_list: list[int] | None = None
     memory_size_gb: int = Field(default=0, ge=0)
     disk_size_gb: int = Field(default=0, ge=0)
 
@@ -31,6 +34,8 @@ class MachineAllocationLimit(BaseModel):
     max_cpu_core_number: int = Field(default=0, ge=0)
     max_gpu_number: int = Field(default=0, ge=0)
     max_memory_gb: int = Field(default=0, ge=0)
+    # 容器磁盘可用上限（管理员维护）；与 disk_size_gb（显示用分区容量）无约束关系
+    max_disk_size_gb: int | None = Field(default=None, ge=0)
 
 
 #####################
@@ -123,12 +128,15 @@ class MachineUpdateFields(BaseModel):
     cpu_core_number: int | None = Field(default=None, ge=0)
     gpu_number: int | None = Field(default=None, ge=0)
     gpu_type: str | None = None
+    # GPU 三集合（决策）：gpu_allow_list 管理员许可集合（人工维护；空/None = 未配置按全量）
+    gpu_allow_list: list[int] | None = None
     memory_size: int | None = Field(default=None, ge=0)
     disk_size: int | None = Field(default=None, ge=0)
     max_shared_gb: int | None = Field(default=None, ge=0)
     max_memory_gb: int | None = Field(default=None, ge=0)
     max_gpu_number: int | None = Field(default=None, ge=0)
     max_cpu_core_number: int | None = Field(default=None, ge=0)
+    max_disk_size_gb: int | None = Field(default=None, ge=0)
 
 
 class UpdateMachineRequest(BaseModel):
@@ -159,6 +167,17 @@ class MachineIdRequest(BaseModel):
     machine_id: int = Field(..., ge=1)
 
 
+class MachineStatusRequest(BaseModel):
+    machine_id: int = Field(..., ge=1)
+
+
+class MachineStatusResponse(BaseModel):
+    machine_status: MachineStatus | None = None
+    is_maintenance: bool = False
+    display_status: MachineDisplayStatus | None = None
+    runtime_snapshot: dict[str, Any] | None = None
+
+
 class MachineDetailResponse(NodeHardwareProfile, MachineAllocationLimit):
     machine_name: str = ""
     machine_ip: str = ""
@@ -168,6 +187,7 @@ class MachineDetailResponse(NodeHardwareProfile, MachineAllocationLimit):
     display_status: MachineDisplayStatus = "offline"
     machine_description: str | None = None
     containers: list[int] = Field(default_factory=list)
+    runtime_snapshot: dict[str, Any] | None = None
 
 
 #####################
@@ -248,7 +268,10 @@ class SysSnapshotGpu(BaseModel):
     vendor: str
     index: int | None = Field(default=None, ge=0)
     name: str | None = None
+    memory_used_gb: float | None = Field(default=None, ge=0)
     memory_gb: float | None = Field(default=None, ge=0)
+    utilization_gpu_percent: float | None = Field(default=None, ge=0)
+    memory_usage_percent: float | None = Field(default=None, ge=0)
 
 
 class SysSnapshotDisk(BaseModel):

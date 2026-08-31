@@ -7,13 +7,15 @@ import time
 import base64
 import datetime
 import ssl
+import threading
 import warnings
+import copy
 from pathlib import Path
 import requests
 import traceback
 from urllib3.exceptions import InsecureRequestWarning
 
-from ...config import CommsConfig
+from ...config import AppConfig, CommsConfig, NetConfig
 from ...constant import ContainerStatus, MachineStatus
 from ...extensions import session_scope
 from ...repositories import machine_repo, containers_repo
@@ -24,6 +26,152 @@ from .exceptions import NodeServiceError
 from .utils import _parse_last_ssh_time
 
 logger = logging.getLogger(__name__)
+
+_RUNTIME_BUFFER_LOCK = threading.RLock()
+_CONTAINER_RUNTIME_BUFFER: dict[str, dict[str, dict]] = {}
+_MACHINE_RUNTIME_BUFFER: dict[str, dict] = {}
+
+
+def write_container_runtime_buffer(machine_id: int, snapshot: dict) -> int:
+    """API 主进程写入容器运行态 buffer；snapshot 为 Node container_status 帧子集。"""
+
+    if machine_id is None or not isinstance(snapshot, dict):
+        return 0
+    updates: dict[str, dict] = {}
+    clears: list[str] = []
+    for name, entry in (snapshot or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        runtime = entry.get("runtime_metrics")
+        if runtime is not None:
+            updates[str(name)] = copy.deepcopy(runtime)
+        else:
+            clears.append(str(name))
+    if not updates and not clears:
+        return 0
+    machine_key = str(machine_id)
+    with _RUNTIME_BUFFER_LOCK:
+        machine_buffer = _CONTAINER_RUNTIME_BUFFER.setdefault(machine_key, {})
+        for name in clears:
+            machine_buffer.pop(name, None)
+        machine_buffer.update(updates)
+    return len(updates) + len(clears)
+
+
+def write_machine_runtime_buffer(machine_id: int, snapshot: dict) -> int:
+    """API 主进程写入机器运行态 buffer；snapshot 为 Node sys_snapshot 帧。"""
+
+    if machine_id is None or not isinstance(snapshot, dict):
+        return 0
+    with _RUNTIME_BUFFER_LOCK:
+        _MACHINE_RUNTIME_BUFFER[str(machine_id)] = copy.deepcopy(snapshot)
+    return 1
+
+
+def get_cached_container_runtime_metrics(machine_id: int | None, container_name: str | None) -> dict | None:
+    """API getter 读取容器运行指标 buffer；不打 Node，不写 SQL。"""
+
+    if machine_id is None or not container_name:
+        return None
+    with _RUNTIME_BUFFER_LOCK:
+        value = ((_CONTAINER_RUNTIME_BUFFER.get(str(machine_id)) or {}).get(container_name))
+        return copy.deepcopy(value) if isinstance(value, dict) else None
+
+
+def get_cached_machine_runtime_snapshot(machine_id: int | None) -> dict | None:
+    """API getter 读取宿主机运行快照 buffer；不打 Node，不写 SQL。"""
+
+    if machine_id is None:
+        return None
+    with _RUNTIME_BUFFER_LOCK:
+        value = _MACHINE_RUNTIME_BUFFER.get(str(machine_id))
+        return copy.deepcopy(value) if isinstance(value, dict) else None
+
+
+def clear_runtime_buffers() -> None:
+    """测试/重启前清空运行态 buffer。"""
+
+    with _RUNTIME_BUFFER_LOCK:
+        _CONTAINER_RUNTIME_BUFFER.clear()
+        _MACHINE_RUNTIME_BUFFER.clear()
+
+
+def _ctrl_api_internal_origin() -> str:
+    scheme = "https" if getattr(AppConfig, "SSL_ENABLED", False) else "http"
+    return f"{scheme}://127.0.0.1:{NetConfig.CTRL_PORT}"
+
+
+def _ctrl_api_internal_verify():
+    if not getattr(AppConfig, "SSL_ENABLED", False):
+        return False
+    try:
+        from ...utils.cert_utils import ctrl_certificate_paths
+
+        ca_cert = ctrl_certificate_paths().ca_cert
+        if ca_cert.exists():
+            return str(ca_cert)
+    except Exception as e:
+        logger.warning("runtime buffer push: Ctrl CA resolve failed: %s", e)
+    logger.warning("runtime buffer push: Ctrl CA missing; TLS verify disabled for loopback runtime push")
+    return False
+
+
+def _internal_token_path() -> Path:
+    """内部运行时推送共享 token 文件（API 主进程与 WSS 子进程同机共享，缺失即生成）。"""
+
+    return Path(os.getenv("CTRL_INTERNAL_TOKEN_FILE", "certs/internal_token"))
+
+
+def _read_internal_token() -> str | None:
+    """读内部推送共享 token；文件缺失时原子生成（与证书同模式，零人工配置）。
+
+    create_app 启动时预热（API 先于 WSS 子进程），保证两进程读到同一 token。
+    """
+    path = _internal_token_path()
+    try:
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(secrets.token_urlsafe(32), encoding="utf-8")
+            os.replace(tmp, path)  # 原子替换，防半写/并发竞态
+        token = path.read_text(encoding="utf-8").strip()
+        return token or None
+    except Exception as e:
+        logger.warning("internal token read failed: %s", e)
+        return None
+
+
+def _post_runtime_buffer(endpoint: str, payload: dict) -> bool:
+    """WSS 子进程通过本机回环 HTTP 把运行态帧投递给 API 主进程（带共享 token）。"""
+
+    url = f"{_ctrl_api_internal_origin()}/api/internal/runtime/{endpoint}"
+    try:
+        token = _read_internal_token()
+        headers = {"X-Internal-Token": token} if token else {}
+        response = requests.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=float(os.getenv("CTRL_RUNTIME_BUFFER_PUSH_TIMEOUT", "0.5")),
+            verify=_ctrl_api_internal_verify(),
+        )
+        response.raise_for_status()
+        return True
+    except Exception as e:
+        logger.warning("runtime buffer push failed: endpoint=%s err=%s", endpoint, e)
+        return False
+
+
+def _publish_container_runtime_snapshot(machine_id: int, snapshot: dict) -> None:
+    if not snapshot:
+        return
+    _post_runtime_buffer("containers", {"machine_id": machine_id, "snapshot": snapshot})
+
+
+def _publish_machine_runtime_snapshot(machine_id: int, snapshot: dict) -> None:
+    if not snapshot:
+        return
+    _post_runtime_buffer("machines", {"machine_id": machine_id, "snapshot": snapshot})
 
 
 ####################################################
@@ -347,6 +495,7 @@ def register_machine(
                 memory_size=limits["memory_size_gb"],
                 max_shared_gb=2,
                 disk_size=limits["disk_size_gb"],
+                max_disk_size_gb=limits["disk_size_gb"],
                 max_cpu_core_number=limits["max_cpu_core_number"],
                 max_gpu_number=limits["max_gpu_number"],
                 max_memory_gb=limits["max_memory_gb"],
@@ -425,6 +574,7 @@ def apply_container_status_snapshot(data: dict, machine_id: int | None = None) -
     - 正常快照：更新已登记容器；机器内未上报的容器视为 Node 侧已消失，复用删除清理
     """
     updated = skipped = vanished = failed = 0
+    runtime_snapshot_to_publish = None
     if not isinstance(data, dict):
         return {"updated": updated, "skipped": skipped, "vanished": vanished, "failed": failed}
 
@@ -459,6 +609,10 @@ def apply_container_status_snapshot(data: dict, machine_id: int | None = None) -
         with session_scope() as session:
             containers_by_name = {}
             if machine_id is not None:
+                machine = machine_repo.get_by_id(machine_id, session=session)
+                machine_status = getattr(machine, "machine_status", None) if machine is not None else None
+                machine_status_value = machine_status.value if hasattr(machine_status, "value") else str(machine_status or "")
+                machine_online_for_runtime = machine_status_value == MachineStatus.ONLINE.value
                 containers = containers_repo.list_containers(
                     limit=1000000,
                     offset=0,
@@ -466,6 +620,23 @@ def apply_container_status_snapshot(data: dict, machine_id: int | None = None) -
                     session=session,
                 )
                 containers_by_name = {container.name: container for container in containers}
+                known_snapshot = {
+                    name: entry
+                    for name, entry in data.items()
+                    if name in containers_by_name
+                }
+                if known_snapshot:
+                    if machine_online_for_runtime:
+                        runtime_snapshot_to_publish = known_snapshot
+                    else:
+                        runtime_snapshot_to_publish = {
+                            name: {
+                                "status": (entry or {}).get("status"),
+                                "failed_reason": (entry or {}).get("failed_reason") or (entry or {}).get("error_reason"),
+                                "failed_detail": (entry or {}).get("failed_detail"),
+                            }
+                            for name, entry in known_snapshot.items()
+                        }
 
                 snapshot_names = set(data.keys())
                 missing_names = sorted(set(containers_by_name) - snapshot_names)
@@ -498,11 +669,15 @@ def apply_container_status_snapshot(data: dict, machine_id: int | None = None) -
                     continue
                 failed_reason = (entry or {}).get("failed_reason") or (entry or {}).get("error_reason")
                 failed_detail = (entry or {}).get("failed_detail")
+                # 端口映射（docker 自动分配，Node 创建后 inspect 回填随快照下发）：
+                # update_container 的 None 保护 → 无端口信息时保持 DB 现值（存量容器兼容）
                 containers_repo.update_container(
                     container.id,
                     container_status=ctrl_status,
                     failed_reason=failed_reason if ctrl_status == ContainerStatus.FAILED else None,
                     failed_detail=failed_detail if ctrl_status == ContainerStatus.FAILED else None,
+                    port=(entry or {}).get("port"),
+                    port_mappings=(entry or {}).get("port_mappings"),
                     session=session,
                 )
                 if ctrl_status == ContainerStatus.FAILED:
@@ -519,8 +694,11 @@ def apply_container_status_snapshot(data: dict, machine_id: int | None = None) -
         logger.warning("apply status snapshot failed: %s", e)
         skipped += 1
 
+    if runtime_snapshot_to_publish:
+        _publish_container_runtime_snapshot(machine_id, runtime_snapshot_to_publish)
+
     for name in missing_names:
-        _handle_container_deleted(name)
+        _handle_container_deleted(name, machine_id)
         vanished += 1
 
     logger.info(
@@ -630,6 +808,8 @@ def apply_sys_snapshot(data: dict, machine_id: int | None = None) -> dict:
     if not isinstance(data, dict) or machine_id is None:
         return {"checked": checked, "drifted": drifted}
 
+    _publish_machine_runtime_snapshot(machine_id, data)
+
     machine = None
     try:
         with session_scope(commit=False) as session:
@@ -643,22 +823,63 @@ def apply_sys_snapshot(data: dict, machine_id: int | None = None) -> dict:
     checked += 1
     cpu = (data.get("cpu") or {}).get("cores")
     mem = (data.get("memory") or {}).get("total_gb")
-    disk = (data.get("disk") or {}).get("total_gb")
+    # disk 新契约（2026-08）：bind_mount/docker_data 两挂载点，disk_size_gb 存 bind_mount 分区容量（显示用）
+    disk = (data.get("disk") or {}).get("bind_mount", {}).get("total_gb")
     gpus = data.get("gpu") or []
 
+    new_cpu = int(cpu) if cpu is not None else None
+    new_mem = int(mem) if mem is not None else None
+    new_disk = int(disk) if disk is not None else None
+    new_gpu_count = len(gpus)
+
     drift = {}
-    if cpu is not None and int(cpu) != (machine.cpu_core_number or 0):
-        drift["cpu_core_number"] = f"{machine.cpu_core_number} -> {int(cpu)}"
-    if mem is not None and int(mem) != (machine.memory_size_gb or 0):
-        drift["memory_size_gb"] = f"{machine.memory_size_gb} -> {int(mem)}"
-    if disk is not None and int(disk) != (machine.disk_size_gb or 0):
-        drift["disk_size_gb"] = f"{machine.disk_size_gb} -> {int(disk)}"
-    if len(gpus) != (machine.gpu_number or 0):
-        drift["gpu_number"] = f"{machine.gpu_number} -> {len(gpus)}"
+    if new_cpu is not None and new_cpu != (machine.cpu_core_number or 0):
+        drift["cpu_core_number"] = f"{machine.cpu_core_number} -> {new_cpu}"
+    if new_mem is not None and new_mem != (machine.memory_size_gb or 0):
+        drift["memory_size_gb"] = f"{machine.memory_size_gb} -> {new_mem}"
+    if new_disk is not None and new_disk != (machine.disk_size_gb or 0):
+        drift["disk_size_gb"] = f"{machine.disk_size_gb} -> {new_disk}"
+    if new_gpu_count != (machine.gpu_number or 0):
+        drift["gpu_number"] = f"{machine.gpu_number} -> {new_gpu_count}"
 
     if drift:
         drifted += 1
-        logger.warning("apply_sys_snapshot: HARDWARE DRIFT on machine %s (%s): %s",
+        # 实际硬件变化 → 更新 DB，并把分配上限 trim 到新实际（新申请不超配）
+        fields: dict = {}
+        if "cpu_core_number" in drift:
+            fields["cpu_core_number"] = new_cpu
+            if (machine.max_cpu_core_number or 0) > new_cpu:
+                fields["max_cpu_core_number"] = new_cpu
+        if "memory_size_gb" in drift:
+            fields["memory_size_gb"] = new_mem
+            if (machine.max_memory_gb or 0) > new_mem:
+                fields["max_memory_gb"] = new_mem
+        if "disk_size_gb" in drift:
+            fields["disk_size_gb"] = new_disk
+        if "gpu_number" in drift:
+            fields["gpu_number"] = new_gpu_count
+            gpu_type = (gpus[0].get("name", "") if gpus else "")
+            if gpu_type:
+                fields["gpu_type"] = gpu_type
+            # GPU 三集合建模（决策）：gpu_list 是事实（smi 枚举）随帧更新；
+            # 许可（gpu_allow_list）与 max_gpu_number 不自动 trim——GPU index 由
+            # nvidia-smi 决定、非系统可控，许可调整走人工（枚举变化时告警见上）。
+            gpu_indices = []
+            for g in gpus:
+                idx = g.get("index")
+                if idx is not None:
+                    try:
+                        gpu_indices.append(int(idx))
+                    except (TypeError, ValueError):
+                        continue
+            fields["gpu_list"] = gpu_indices
+        if fields:
+            try:
+                with session_scope() as session:
+                    machine_repo.update_machine(machine_id, session=session, **fields)
+            except Exception as e:
+                logger.warning("apply_sys_snapshot: hardware db update failed for machine %s: %s", machine_id, e)
+        logger.warning("apply_sys_snapshot: HARDWARE DRIFT on machine %s (%s): %s -> db updated, max_* trimmed",
                        machine.id, data.get("hostname"), drift)
 
     logger.info("apply_sys_snapshot: machine %s (%s) cpu=%s%% mem=%s%% disk=%s%%",
@@ -809,20 +1030,27 @@ def probe_machines_online_once() -> dict:
 #   3. 断线 → 由挂载方调用 probe_machine_connectivity 回退探测（连续两次不达判宿主机离线）
 # 应用层落库按统一 session_scope 范式处理，不再依赖 app_context。
 
-def _handle_container_deleted(container_name: str) -> None:
+def _handle_container_deleted(container_name: str, machine_id: int | None = None) -> None:
     """Node 推 delete 帧：容器在 Node 侧消失 → 抹 Ctrl DB 记录（绑定 + 容器行）。
 
     关联表（usercontainer/container_ssh_login/freeze/long_term）均 ondelete=CASCADE，
     删容器行即级联清理。外部删除是异常路径，记录 warning。
+
+    作用域（2026-09 修复）：删除必须限定在发送机器内——容器名只在单机内唯一，
+    machine_id 由连接 uid 归位（apply_snapshot_batch / _consume_frames 传入）；
+    machine_id 缺失或名字不属于该机器 → 拒绝，避免跨机器重名误删他人容器记录。
     """
     try:
         from ...repositories.usercontainer_repo import remove_binding
         with session_scope() as session:
-            container = containers_repo.get_by_container_name(container_name, session=session)
-            if container is None:
-                logger.debug("handle_node_ws delete: container %r already gone (skip)", container_name)
+            if machine_id is None:
+                logger.warning("handle_node_ws delete: machine_id missing for %r (refuse)", container_name)
                 return
-            container_id, machine_id = container.id, container.machine_id
+            container_id = containers_repo.get_id_by_name_machine(container_name, machine_id, session=session)
+            if container_id is None:
+                logger.debug("handle_node_ws delete: container %r already gone or not on machine %s (skip)",
+                             container_name, machine_id)
+                return
             remove_binding(0, container_id, all=True, session=session)
             containers_repo.delete_container(container_id, session=session)
         logger.warning("handle_node_ws delete: container %r (id=%s) removed from DB (vanished on node)",
@@ -884,9 +1112,12 @@ def _enqueue_frame(queue: asyncio.Queue, frame: dict) -> None:
             pass
 
 
-async def _consume_frames(queue: asyncio.Queue, uid: str) -> None:
+async def _consume_frames(queue: asyncio.Queue, uid: str, machine_id: int) -> None:
     """串行消费帧（契约 C7）：快照/删除落库在独立线程执行——DB 慢不阻塞 receive 事件循环，
-    C4 读超时只度量 socket 活性。单消费者保证帧序。"""
+    C4 读超时只度量 socket 活性。单消费者保证帧序。
+
+    machine_id 由连接 uid 归位（handle_node_ws）：delete 帧删除操作限定在发送机器内。
+    """
     while True:
         frame = await queue.get()
         try:
@@ -896,7 +1127,7 @@ async def _consume_frames(queue: asyncio.Queue, uid: str) -> None:
             elif ftype == "delete":
                 container_name = frame.get("container_name")
                 if container_name:
-                    await asyncio.to_thread(_handle_container_deleted, container_name)
+                    await asyncio.to_thread(_handle_container_deleted, container_name, machine_id)
             else:
                 logger.warning("handle_node_ws: consumer unknown frame type %r", ftype)
         except Exception as e:
@@ -955,7 +1186,7 @@ async def handle_node_ws(websocket) -> None:
     # 读写解耦（契约 C7）：快照落库（同步 DB 写）走单消费者队列，事件循环只负责 receive——
     # C4 读超时只度量 socket 活性，不再被 DB 慢拖累。帧级容错：坏帧 continue，不杀连接。
     frame_queue: asyncio.Queue = asyncio.Queue(maxsize=FRAME_QUEUE_MAXSIZE)
-    consumer_task = asyncio.create_task(_consume_frames(frame_queue, uid))
+    consumer_task = asyncio.create_task(_consume_frames(frame_queue, uid, machine_id))
 
     try:
         while True:

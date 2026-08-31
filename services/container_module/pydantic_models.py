@@ -9,9 +9,12 @@ from ..machine_tasks import get_machine_reachable, is_machine_in_maintenance, is
 class container_bref_information(BaseModel):
     container_id: int # 加入这个 只是为了方便调取详细信息
     container_name:str
+    container_image: str | None = None
+    created_at: str | None = None
     machine_id:int
     machine_ip:str
     port:int
+    port_mappings: list[dict] | None = None
     container_status:str
     display_status: str | None = None  # 派生展示态（如 host_offline），DB 不落库
     failed_reason: str | None = None
@@ -29,6 +32,7 @@ class container_bref_information(BaseModel):
     disk_total_gb: float | None = None
     disk_limit_gb: float | None = None
     disk_usage_percent: float | None = None
+    runtime_metrics: dict | None = None
     freeze_first_frozen_at: str | None = None
     freeze_grace_until: str | None = None
     freeze_days_frozen: int | None = None
@@ -38,6 +42,7 @@ class container_detail_information(BaseModel):
     container_id: int # 与上方结构对称
     container_name:str
     container_image:str
+    created_at: str | None = None
     machine_id:int
     machine_ip:str
     container_status:str
@@ -48,6 +53,7 @@ class container_detail_information(BaseModel):
     gpu_number:int
     cpu_number:int
     port:int
+    port_mappings: list[dict] | None = None
     owners:list[str]
     accounts:list[(str,ROLE)]
     is_long_term: bool = False
@@ -55,6 +61,7 @@ class container_detail_information(BaseModel):
     long_term_container_blocked_user_ids: list[int] = Field(default_factory=list)
     long_term_container_remaining_by_user: dict[int, int] = Field(default_factory=dict)
     disk_usage: dict | None = None
+    runtime_metrics: dict | None = None
     freeze_state: dict | None = None
 ####################################################
 # 派生状态定义

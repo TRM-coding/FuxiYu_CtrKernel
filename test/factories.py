@@ -68,12 +68,15 @@ def create_machine(
     cpu_core_number: int = 32,
     gpu_number: int = 4,
     gpu_type: str = "A100",
+    gpu_list: list | None = None,
+    gpu_allow_list: list | None = None,
     memory_size_gb: int = 256,
     max_shared_gb: int = 8,
     max_cpu_core_number: int = 32,
     max_gpu_number: int = 4,
     max_memory_gb: int = 256,
     disk_size_gb: int = 1024,
+    max_disk_size_gb: int | None = None,
     machine_description: str = "test machine",
 ) -> Machine:
     idx = next(_ids)
@@ -86,11 +89,15 @@ def create_machine(
         cpu_core_number=cpu_core_number,
         gpu_number=gpu_number,
         gpu_type=gpu_type,
+        gpu_list=gpu_list,
+        gpu_allow_list=gpu_allow_list,
         memory_size_gb=memory_size_gb,
         max_shared_gb=max_shared_gb,
         max_cpu_core_number=max_cpu_core_number,
         max_gpu_number=max_gpu_number,
         max_memory_gb=max_memory_gb,
+        # 上限默认延续 disk_size_gb（与迁移回填语义一致）
+        max_disk_size_gb=max_disk_size_gb if max_disk_size_gb is not None else disk_size_gb,
         disk_size_gb=disk_size_gb,
         machine_description=machine_description,
     )

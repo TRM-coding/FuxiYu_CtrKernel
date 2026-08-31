@@ -1,7 +1,11 @@
+import pytest
+
 from ...api import deps
 from ... import _ensure_image_template_schema
 from ... import extensions
 from sqlalchemy import inspect, text
+
+pytestmark = pytest.mark.usefixtures("ensure_auth_users")
 
 
 def _auth(monkeypatch, *, user_id=1, entity=True, resource=True):

@@ -4,6 +4,7 @@ repo 只接收显式 session，负责查询、写入和 flush；事务边界由 
 的 session_scope 决定。
 """
 
+from datetime import datetime
 from typing import Any, Sequence
 
 from sqlalchemy import String, cast, func, or_, select
@@ -145,6 +146,7 @@ def create_container(
     cpu_number: int,
     port: int,
     status=None,
+    gpu_chosen_list: list | None = None,
     *,
     session: Session,
 ) -> Container:
@@ -157,6 +159,8 @@ def create_container(
         gpu_number=gpu_number,
         cpu_number=cpu_number,
         port=port,
+        gpu_chosen_list=gpu_chosen_list,
+        created_at=datetime.utcnow(),
     )
     if status is not None:
         container.container_status = status
@@ -180,9 +184,10 @@ def update_container(container_id: int, *, session: Session, **fields) -> Contai
         "disk_overlay_rw_bytes",
         "disk_bind_mount_bytes",
         "disk_total_bytes",
-        "disk_limit_bytes",
         "disk_checked_at",
         "bind_mount_path",
+        "port",
+        "port_mappings",
     }
     dirty = False
     nullable_clear_fields = {"failed_reason", "failed_detail"}
@@ -256,7 +261,10 @@ def ensure_machine_exists(machine_id: int, *, session: Session) -> Any:
 
 
 def validate_gpu_request(machine: Machine, container: Container_info, *, session: Session) -> None:
-    max_gpu = int(get_max_gpu_number(machine.id, session=session) or 0)
+    # max_gpu_number 已退役（GPU 三集合决策）：许可数量 = allow_list 长度（配置时）
+    # 或 gpu_number（未配置回退）。GPU_LIST 具体 id 由系统在 allow_list 内生成，不做 id 校验。
+    allow = machine.gpu_allow_list or []
+    max_gpu = len(allow) if allow else int(getattr(machine, "gpu_number", 0) or 0)
     try:
         gpu_list = getattr(container, "GPU_LIST", []) or []
     except Exception:
@@ -275,21 +283,9 @@ def validate_gpu_request(machine: Machine, container: Container_info, *, session
         return
 
     if len(gpu_list) > max_gpu:
-        error = ValueError(f"Requested GPU count {len(gpu_list)} exceeds machine GPU count {max_gpu}")
+        error = ValueError(f"Requested GPU count {len(gpu_list)} exceeds machine GPU allowance {max_gpu}")
         setattr(error, "error_reason", "invalid_config")
         raise error
-
-    for gpu_id in gpu_list:
-        try:
-            parsed_gpu_id = int(gpu_id)
-        except Exception:
-            error = ValueError(f"Invalid GPU id in GPU_LIST: {gpu_id}")
-            setattr(error, "error_reason", "invalid_config")
-            raise error
-        if parsed_gpu_id < 0 or parsed_gpu_id >= max_gpu:
-            error = ValueError(f"GPU id {parsed_gpu_id} out of range for machine with {max_gpu} GPUs")
-            setattr(error, "error_reason", "invalid_config")
-            raise error
 
 
 def validate_shared_request(
@@ -411,6 +407,44 @@ def validate_create_params(
 
 #####################
 # 视图辅助
+
+
+def derive_port_mappings(port: int | None, port_mappings: list | None) -> list | None:
+    """出参层补齐结构化端口映射（22→port 派生）+ 去重；不修 DB 历史数据。"""
+
+    def _int_or_none(value):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    mappings = []
+    seen = set()
+    for item in port_mappings or []:
+        if not isinstance(item, dict):
+            continue
+        key = (
+            _int_or_none(item.get("container_port")),
+            _int_or_none(item.get("host_port")),
+            str(item.get("protocol") or "tcp"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        mappings.append(item)
+    if port:
+        has_ssh_mapping = any(
+            _int_or_none(item.get("container_port")) == 22
+            and _int_or_none(item.get("host_port")) == int(port)
+            for item in mappings
+        )
+        if not has_ssh_mapping:
+            mappings.insert(0, {
+                "container_port": 22,
+                "host_port": int(port),
+                "protocol": "tcp",
+            })
+    return mappings or None
 
 
 def get_container_root_owner_emails(container_id: int, *, session: Session) -> list[str]:

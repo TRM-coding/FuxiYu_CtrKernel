@@ -19,12 +19,20 @@ class Machine(db.Model):
     memory_size_gb: int = db.Column(db.Integer, nullable=True)
     gpu_number: int = db.Column(db.Integer, nullable=True)
     gpu_type: str = db.Column(db.String(120), nullable=True)
+    # ── GPU 三集合建模（2026-08-30 决策，见 FuxiYu_Global 速查 · 决策备忘） ──
+    # gpu_list：事实——smi 当前枚举的物理卡集合（sys_snapshot 自动更新）
+    # gpu_allow_list：许可——管理员允许分配的卡集合（人工维护；空 = 未配置）
+    gpu_list: list | None = db.Column(db.JSON, nullable=True)
+    gpu_allow_list: list | None = db.Column(db.JSON, nullable=True)
     max_shared_gb: int = db.Column(db.Integer, nullable=True)
     disk_size_gb: int = db.Column(db.Integer, nullable=True)
     machine_description: str = db.Column(db.String(500), nullable=True)
     max_memory_gb: int = db.Column(db.Integer, nullable=True)
     max_gpu_number: int = db.Column(db.Integer, nullable=True)
     max_cpu_core_number: int = db.Column(db.Integer, nullable=True)
+    # 磁盘上限（2026-08 语义收敛）：max_disk_size_gb = 容器磁盘可用上限（管理员维护，
+    # 冻结/容器展示「已用/上限」用它）；disk_size_gb = 显示用（Node 采集 bind_mount 分区容量）。
+    max_disk_size_gb: int = db.Column(db.Integer, nullable=True)
     # ── TOFU 接入凭据（TLS 方案，2026-08） ──
     # uid：Ctrl 首连颁发的高熵 UID（应用层标识，可独立吊销轮换）
     # node_cert_fingerprint：Node 自签证书 SHA-256 指纹（传输层凭证，Ctrl 从 TLS 层计算）

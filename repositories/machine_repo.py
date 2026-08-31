@@ -82,6 +82,7 @@ def create_machine(
     max_cpu_core_number: int,
     max_gpu_number: int,
     max_memory_gb: int,
+    max_disk_size_gb: int | None = None,
     session: Session,
 ) -> Machine:
     machine = Machine(
@@ -97,6 +98,7 @@ def create_machine(
         max_cpu_core_number=max_cpu_core_number,
         max_gpu_number=max_gpu_number,
         max_memory_gb=max_memory_gb,
+        max_disk_size_gb=max_disk_size_gb,
         disk_size_gb=disk_size,
     )
     session.add(machine)
@@ -129,6 +131,8 @@ def update_machine(machine_id: int, *, session: Session, **fields) -> bool:
         "memory_size_gb",
         "gpu_number",
         "gpu_type",
+        "gpu_list",
+        "gpu_allow_list",
         "disk_size_gb",
         "machine_description",
         "shared_size_gb",
@@ -136,6 +140,7 @@ def update_machine(machine_id: int, *, session: Session, **fields) -> bool:
         "max_memory_gb",
         "max_gpu_number",
         "max_cpu_core_number",
+        "max_disk_size_gb",
         "node_uid",
         "node_cert_fingerprint",
         "cert_pinned_at",

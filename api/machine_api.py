@@ -5,6 +5,8 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
 from ..constant import OperationType
+from ..extensions import session_scope
+from ..repositories import machine_repo
 from ..schemas.machine import (
     AddMachinePermissionRequest,
     AddMachinePermissionResponse,
@@ -15,6 +17,8 @@ from ..schemas.machine import (
     ListMachinePermissionsResponse,
     MachineDetailResponse,
     MachineIdRequest,
+    MachineStatusRequest,
+    MachineStatusResponse,
     RegisterMachineByTrustAnchorRequest,
     RegisterMachineWithProfileResponse,
     RemoveMachineRequest,
@@ -244,6 +248,31 @@ def get_detail_information_api(
     if not machine_info:
         return _error(404, "Machine not found", "machine_not_found")
     return _model_data(machine_info)
+
+
+@router.post("/machine_status", response_model=MachineStatusResponse)
+def machine_status_api(
+    message: MachineStatusRequest,
+    _: int = Depends(require_permission("machine:view")),
+    __: int = Depends(require_resource("machine", "machine_id")),
+):
+    """查询机器状态；只读 Ctrl DB 与 WSS snapshot buffer，不主动请求 Node。"""
+
+    try:
+        with session_scope(commit=False) as session:
+            machine = machine_repo.get_by_id(message.machine_id, session=session)
+            if not machine:
+                return _error(404, "Machine not found", "machine_not_found")
+            machine_status = machine.machine_status.value if hasattr(machine.machine_status, "value") else machine.machine_status
+            display_status = getattr(machine, "display_status", machine_status)
+            return {
+                "machine_status": machine_status,
+                "is_maintenance": bool(getattr(machine, "is_maintenance", False)),
+                "display_status": display_status,
+                "runtime_snapshot": node_comms.get_cached_machine_runtime_snapshot(machine.id),
+            }
+    except Exception as e:
+        return _error(500, f"Internal error: {e}", "internal_error")
 
 
 #####################

@@ -1,6 +1,8 @@
 import pytest
 
 from ...constant import ROLE
+from ...extensions import session_scope
+from ...repositories import usercontainer_repo
 from ...services import container_tasks
 from ..factories import bind_user_container, create_container, create_machine, create_user
 
@@ -8,7 +10,8 @@ from ..factories import bind_user_container, create_container, create_machine, c
 def test_container_fixture_creates_root_binding(container_graph):
     root, _machine, container = container_graph
 
-    bindings = container_tasks.get_container_bindings(container.id)
+    with session_scope(commit=False) as session:
+        bindings = usercontainer_repo.get_container_bindings(container.id, session=session)
 
     assert bindings[0]["user_id"] == root.id
     assert getattr(bindings[0]["role"], "value", bindings[0]["role"]) == ROLE.ROOT.value

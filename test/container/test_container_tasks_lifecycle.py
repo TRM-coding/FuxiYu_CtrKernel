@@ -3,8 +3,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from ...constant import ContainerStatus, MachineStatus, PERMISSION, ROLE
+from ...extensions import session_scope
 from ...models.containers import Container
-from ...repositories import machine_permission_repo
+from ...repositories import containers_repo, machine_permission_repo, machine_repo, usercontainer_repo
 from ...services import container_tasks
 from ..factories import create_container, create_machine, create_user
 from .conftest import NODE_REMOVE_FAILED, NODE_REMOVE_NOT_FOUND, NODE_REMOVE_SUCCESS, NODE_SUCCESS_TRUE, VALID_PUBLIC_KEY
@@ -35,7 +36,8 @@ def test_create_container_success_sends_node_then_creates_db_record_and_root_bin
     ).first()
     assert created is not None
     assert created.container_status == ContainerStatus.CREATING
-    bindings = container_tasks.get_container_bindings(created.id)
+    with session_scope(commit=False) as session:
+        bindings = usercontainer_repo.get_container_bindings(created.id, session=session)
     assert bindings[0]["user_id"] == owner.id
     assert bindings[0]["username"] == "root"
     assert getattr(bindings[0]["role"], "value", bindings[0]["role"]) == ROLE.ROOT.value
@@ -183,7 +185,8 @@ def test_remove_container_success_deletes_bindings_and_container(
 
     db_session.expire_all()
     assert db_session.get(Container, container_id) is None
-    assert container_tasks.get_container_bindings(container_id) == []
+    with session_scope(commit=False) as session:
+        assert usercontainer_repo.get_container_bindings(container_id, session=session) == []
 
     # 审计：删除日志统一 DELETE_CONTAINER（来源由 trigger 区分，operator=系统时为 cleanup）
     from ...models.operation_log import OperationLog
@@ -251,10 +254,56 @@ def test_unpause_container_does_not_directly_write_online(
     # 数据通路对账契约 C6：unpause 成功后不直写 ONLINE——状态推进由 WSS 快照接管
     # （Node 侧 finish_action 已即时更新缓存，下一个快照 ≤5s 覆盖）
     root, _machine, container = container_graph
-    container_tasks.update_container(container.id, container_status=ContainerStatus.PAUSED)
+    with session_scope() as session:
+        containers_repo.update_container(container.id, container_status=ContainerStatus.PAUSED, session=session)
     mock_node_send(NODE_SUCCESS_TRUE)
 
     assert container_tasks.unpause_container(container.id, operator_user_id=root.id) is True
 
     db_session.expire_all()
     assert db_session.get(Container, container.id).container_status == ContainerStatus.PAUSED
+
+
+def test_create_container_selects_gpu_within_allow_list_and_writes_chosen(
+    db_session, container_info, mock_node_send,
+):
+    """GPU 三集合：创建时在 allow_list 内轮转选卡，gpu_chosen_list 写入容器记录。"""
+    owner = create_user(username="owner_gpu_chosen")
+    machine = create_machine(max_shared_gb=8, max_memory_gb=64)
+    with session_scope() as session:
+        machine_repo.update_machine(machine.id, session=session, gpu_allow_list=[0, 1, 2])
+    container_info.GPU_LIST = [0]  # 前端占位 id，系统会替换
+
+    calls = mock_node_send({"success": 1, "container_status": "creating", "container_name": container_info.NAME})
+    container_tasks.Create_container(owner_user_id=owner.id, machine_id=machine.id, container=container_info)
+
+    # 发往 Node 的 GPU_LIST 由系统在 allow_list 内选定（占用最少 → 0）
+    sent = calls[0]["payload"]["config"]
+    assert sent["gpu_list"] == [0]
+    with session_scope(commit=False) as session:
+        c = containers_repo.get_id_by_name_machine(container_info.NAME, machine.id, session=session)
+        rec = containers_repo.get_by_id(c, session=session)
+    assert rec.gpu_chosen_list == [0]
+    assert rec.gpu_number == 1
+
+
+def test_create_container_gpu_chosen_rotates_away_from_used(db_session, container_info, mock_node_send):
+    """轮转：已有容器占用卡 0/1 后，新容器选到卡 2。"""
+    owner = create_user(username="owner_gpu_rotate")
+    machine = create_machine(max_shared_gb=8, max_memory_gb=64)
+    with session_scope() as session:
+        machine_repo.update_machine(machine.id, session=session, gpu_allow_list=[0, 1, 2])
+    # 预置两个容器各占 0、1
+    with session_scope() as session:
+        for i, chosen in enumerate(([0], [1])):
+            containers_repo.create_container(
+                name=f"pre_{i}", image="ubuntu:22.04", machine_id=machine.id,
+                memory_gb=1, shared_gb=0, gpu_number=1, cpu_number=1,
+                port=30000 + i, gpu_chosen_list=chosen, session=session,
+            )
+
+    container_info.GPU_LIST = [0]
+    mock_node_send({"success": 1, "container_status": "creating", "container_name": container_info.NAME})
+    container_tasks.Create_container(owner_user_id=owner.id, machine_id=machine.id, container=container_info)
+
+    assert container_info.GPU_LIST == [2]  # 占用最少 → 卡 2

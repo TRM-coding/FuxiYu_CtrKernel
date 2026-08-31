@@ -1,5 +1,9 @@
+import pytest
+
 from ...api import deps
 from ...services import settings_tasks
+
+pytestmark = pytest.mark.usefixtures("ensure_auth_users")
 
 
 def _auth(monkeypatch, *, user_id=1, entity=True):

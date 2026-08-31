@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from ..config import AppConfig
 from ..extensions import session_scope
-from ..repositories import containers_repo
+from ..repositories import containers_repo, machine_repo
 from ..services import container_tasks
 
 logger = logging.getLogger(__name__)
@@ -69,19 +69,19 @@ def _evaluate_limits(container, usage: dict) -> None:
     if total_bytes is None:
         total_bytes = 0
 
-    # 限额：初期均分 machine.disk_size_gb
+    # 限额：容器磁盘可用上限 = machine.max_disk_size_gb（管理员维护，语义收敛 2026-08）
     try:
         machine = container.machine
-        disk_size_gb = getattr(machine, 'disk_size_gb', None) or 0
+        max_disk_size_gb = getattr(machine, 'max_disk_size_gb', None) or 0
     except Exception:
-        disk_size_gb = 0
+        max_disk_size_gb = 0
 
-    if disk_size_gb <= 0:
-        # 无磁盘限额配置，跳过评估
-        logger.info("[disk-check] skip container_id=%s: machine disk_size_gb not set", container.id)
+    if max_disk_size_gb <= 0:
+        # 无磁盘上限配置，跳过评估
+        logger.info("[disk-check] skip container_id=%s: machine max_disk_size_gb not set", container.id)
         return
 
-    limit_bytes = int(disk_size_gb * 1024**3)
+    limit_bytes = int(max_disk_size_gb * 1024**3)
     if limit_bytes <= 0:
         return
 
@@ -102,7 +102,6 @@ def _evaluate_limits(container, usage: dict) -> None:
                 disk_overlay_rw_bytes=int(overlay_rw),
                 disk_bind_mount_bytes=int(bind_mount),
                 disk_total_bytes=int(total_bytes),
-                disk_limit_bytes=int(limit_bytes),
                 disk_checked_at=datetime.utcnow(),
                 bind_mount_path=bind_mount_path,
                 session=session,
@@ -184,7 +183,8 @@ def _handle_soft_limit(container, usage: dict, app) -> None:
         return
 
     try:
-        emails = container_tasks.get_container_root_owner_emails(container.id)
+        with session_scope(commit=False) as session:
+            emails = containers_repo.get_container_root_owner_emails(container.id, session=session)
     except Exception:
         emails = []
 
@@ -220,7 +220,8 @@ def _handle_hard_limit(container, usage: dict, app) -> None:
     from ..utils.mail import send as send_mail
 
     try:
-        emails = container_tasks.get_container_root_owner_emails(container.id)
+        with session_scope(commit=False) as session:
+            emails = containers_repo.get_container_root_owner_emails(container.id, session=session)
     except Exception:
         emails = []
 
@@ -346,7 +347,8 @@ def _handle_freeze_escalation(container, usage: dict, app, days_frozen: int) -> 
         pass  # 仍在冷却中，但仍执行 remove
     else:
         try:
-            emails = container_tasks.get_container_root_owner_emails(container.id)
+            with session_scope(commit=False) as session:
+                emails = containers_repo.get_container_root_owner_emails(container.id, session=session)
         except Exception:
             emails = []
 
@@ -411,7 +413,8 @@ def _clean_mount_immediately(container) -> None:
         logger.warning("[disk-check] escalation: failed to record mount cleanup for %s: %s", container.id, e)
 
     try:
-        machine_ip = container_tasks.get_machine_ip_by_id(container.machine_id)
+        with session_scope(commit=False) as session:
+            machine_ip = machine_repo.get_machine_ip_by_id(container.machine_id, session=session)
         url = container_tasks.get_full_url(machine_ip, "/clean_mount")
         payload = {"config": {"mount_path": bind_mount}}
         res = container_tasks.send(url, payload, timeout=10.0)
@@ -423,12 +426,13 @@ def _clean_mount_immediately(container) -> None:
 
 
 def _get_limit_gb(container, app) -> float:
+    # 容器磁盘上限（语义收敛 2026-08）：max_disk_size_gb；disk_size_gb 改显示用
     try:
         machine = container.machine
-        disk_size_gb = getattr(machine, 'disk_size_gb', None) or 0
+        max_disk_size_gb = getattr(machine, 'max_disk_size_gb', None) or 0
     except Exception:
-        disk_size_gb = 0
-    return float(disk_size_gb)
+        max_disk_size_gb = 0
+    return float(max_disk_size_gb)
 
 
 def start_container_disk_check_scheduler(interval_seconds: int = 900) -> threading.Thread | None:

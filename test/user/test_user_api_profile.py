@@ -4,6 +4,8 @@ import pytest
 
 from ...api import user_api, deps
 
+pytestmark = pytest.mark.usefixtures("ensure_auth_users")
+
 
 def _valid_token(monkeypatch, user_id=1):
     monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: True)

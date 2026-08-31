@@ -32,14 +32,18 @@ class machine_detail_information(BaseModel):
     cpu_core_number:int
     gpu_number:int
     gpu_type: Optional[str]
+    gpu_list: Optional[list] = None
+    gpu_allow_list: Optional[list] = None
     memory_size_gb:int
     max_shared_gb:int
     max_cpu_core_number:int
     max_gpu_number:int
     max_memory_gb:int
+    max_disk_size_gb: Optional[int] = None
     disk_size_gb:int
     machine_description:str
     containers:list[int] # 容器 id
+    runtime_snapshot: dict | None = None
 #######################################
 
 #######################################
@@ -233,6 +237,7 @@ def Add_machine(machine_name:str,
                 max_memory_gb=max_memory_gb,
                 max_gpu_number=max_gpu_number,
                 max_cpu_core_number=max_cpu_core_number,
+                max_disk_size_gb=disk_size,
                 session=session,
             )
     except Exception as e:
@@ -385,6 +390,7 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
         if not machine:
             return None
         container_ids = [container.id for container in machine.containers]
+        from .container_module.node_comms import get_cached_machine_runtime_snapshot
         return machine_detail_information(
             machine_name=machine.machine_name,
             machine_ip=machine.machine_ip,
@@ -395,14 +401,18 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
             cpu_core_number=machine.cpu_core_number,
             gpu_number=machine.gpu_number,
             gpu_type=machine.gpu_type,
+            gpu_list=machine.gpu_list,
+            gpu_allow_list=machine.gpu_allow_list,
             memory_size_gb=machine.memory_size_gb,
             max_shared_gb=machine.max_shared_gb,
             max_cpu_core_number=machine.max_cpu_core_number,
             max_gpu_number=machine.max_gpu_number,
             max_memory_gb=machine.max_memory_gb,
+            max_disk_size_gb=machine.max_disk_size_gb,
             disk_size_gb=machine.disk_size_gb,
             machine_description=machine.machine_description,
             containers=container_ids,
+            runtime_snapshot=get_cached_machine_runtime_snapshot(machine.id),
         )
 #######################################
 

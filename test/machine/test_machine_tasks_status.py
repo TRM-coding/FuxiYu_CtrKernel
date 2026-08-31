@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from ...constant import ContainerStatus, MachineStatus, PERMISSION
+from ...constant import ContainerStatus, MachineStatus, MachineTypes, PERMISSION
 from ...models.containers import Container
 from ...models.machine import Machine
 from ...repositories import containers_repo, machine_repo
@@ -375,13 +375,13 @@ def test_consume_frames_applies_snapshot_and_delete(monkeypatch):
     # 契约 C7：单消费者串行处理（快照落库线程化，事件循环只 receive）
     applied = []
     monkeypatch.setattr(node_comms, "apply_snapshot_batch", lambda batch: applied.append(batch))
-    monkeypatch.setattr(node_comms, "_handle_container_deleted", lambda name: applied.append(("del", name)))
+    monkeypatch.setattr(node_comms, "_handle_container_deleted", lambda name, machine_id=None: applied.append(("del", name)))
     q = asyncio.Queue()
     q.put_nowait({"type": "snapshot_batch", "payload": [1]})
     q.put_nowait({"type": "delete", "container_name": "ghost_c"})
 
     async def _run():
-        task = asyncio.create_task(node_comms._consume_frames(q, "uid"))
+        task = asyncio.create_task(node_comms._consume_frames(q, "uid", machine_id=7))
         await asyncio.sleep(0.05)
         task.cancel()
         try:
@@ -436,17 +436,151 @@ def test_node_emittable_statuses_covered_by_ctrl_mapping():
     assert not uncovered, f"Node 可发状态未覆盖: {uncovered}"
 
 
-def test_apply_container_status_snapshot_ignores_unknown_node_container(db_session):
+def test_apply_container_status_snapshot_ignores_unknown_node_container(db_session, monkeypatch):
     machine = create_machine()
+    published = []
+    monkeypatch.setattr(node_comms, "_publish_container_runtime_snapshot", lambda machine_id, snapshot: published.append((machine_id, snapshot)))
 
     result = node_comms.apply_container_status_snapshot(
-        {"unknown_on_ctrl": {"status": "online"}},
+        {"unknown_on_ctrl": {"status": "online", "runtime_metrics": {"cpu_usage_percent": 50}}},
         machine.id,
     )
 
     assert result["updated"] == 0
     assert result["skipped"] == 1
     assert result["vanished"] == 0
+    assert node_comms.get_cached_container_runtime_metrics(machine.id, "unknown_on_ctrl") is None
+    assert published == []
+
+
+def test_apply_container_status_snapshot_caches_known_container_runtime_metrics(db_session, monkeypatch):
+    machine = create_machine()
+    create_container(machine=machine, name="metrics_on_ctrl", status=ContainerStatus.ONLINE)
+    published = []
+    monkeypatch.setattr(node_comms, "_publish_container_runtime_snapshot", lambda machine_id, snapshot: published.append((machine_id, snapshot)))
+
+    result = node_comms.apply_container_status_snapshot(
+        {
+            "metrics_on_ctrl": {
+                "status": "online",
+                "runtime_metrics": {
+                    "cpu_usage_percent": 12.5,
+                    "memory_usage_percent": 40,
+                    "gpu": {
+                        "device_ids": ["0"],
+                        "devices": [{"index": 0, "utilization_gpu_percent": 70}],
+                    },
+                },
+            }
+        },
+        machine.id,
+    )
+
+    assert result["updated"] == 1
+    assert published == [
+        (
+            machine.id,
+            {
+                "metrics_on_ctrl": {
+                    "status": "online",
+                    "runtime_metrics": {
+                        "cpu_usage_percent": 12.5,
+                        "memory_usage_percent": 40,
+                        "gpu": {
+                            "device_ids": ["0"],
+                            "devices": [{"index": 0, "utilization_gpu_percent": 70}],
+                        },
+                    },
+                },
+            },
+        )
+    ]
+    node_comms.write_container_runtime_buffer(machine.id, published[0][1])
+    cached = node_comms.get_cached_container_runtime_metrics(machine.id, "metrics_on_ctrl")
+    assert cached["cpu_usage_percent"] == 12.5
+    assert cached["gpu"]["devices"][0]["utilization_gpu_percent"] == 70
+
+
+def test_apply_container_status_snapshot_suppresses_runtime_metrics_when_machine_not_online(db_session, monkeypatch):
+    machine = create_machine(machine_status=MachineStatus.OFFLINE)
+    create_container(machine=machine, name="offline_metrics_on_ctrl", status=ContainerStatus.ONLINE)
+    published = []
+    monkeypatch.setattr(node_comms, "_publish_container_runtime_snapshot", lambda machine_id, snapshot: published.append((machine_id, snapshot)))
+
+    result = node_comms.apply_container_status_snapshot(
+        {
+            "offline_metrics_on_ctrl": {
+                "status": "online",
+                "runtime_metrics": {
+                    "cpu_usage_percent": 88,
+                    "gpu": {
+                        "device_ids": ["0"],
+                        "devices": [{"index": 0, "utilization_gpu_percent": 70}],
+                    },
+                },
+            }
+        },
+        machine.id,
+    )
+
+    assert result["updated"] == 1
+    assert published == [
+        (
+            machine.id,
+            {
+                "offline_metrics_on_ctrl": {
+                    "status": "online",
+                    "failed_reason": None,
+                    "failed_detail": None,
+                },
+            },
+        )
+    ]
+    node_comms.write_container_runtime_buffer(machine.id, published[0][1])
+    assert node_comms.get_cached_container_runtime_metrics(machine.id, "offline_metrics_on_ctrl") is None
+
+
+def test_write_container_runtime_buffer_clears_named_runtime_metrics(db_session):
+    machine = create_machine()
+    node_comms.write_container_runtime_buffer(
+        machine.id,
+        {"buffer_clear_c": {"status": "online", "runtime_metrics": {"cpu_usage_percent": 50}}},
+    )
+    assert node_comms.get_cached_container_runtime_metrics(machine.id, "buffer_clear_c") == {"cpu_usage_percent": 50}
+
+    node_comms.write_container_runtime_buffer(
+        machine.id,
+        {"buffer_clear_c": {"status": "online", "failed_reason": None, "failed_detail": None}},
+    )
+
+    assert node_comms.get_cached_container_runtime_metrics(machine.id, "buffer_clear_c") is None
+
+
+def test_internal_runtime_api_writes_container_and_machine_buffers(client, db_session):
+    machine = create_machine()
+    container_payload = {
+        "machine_id": machine.id,
+        "snapshot": {
+            "api_buffer_c": {
+                "status": "online",
+                "runtime_metrics": {"cpu_usage_percent": 18.5},
+            },
+        },
+    }
+    machine_payload = {
+        "machine_id": machine.id,
+        "snapshot": {"cpu": {"usage_percent": 22.0}},
+    }
+
+    c_resp = client.post("/api/internal/runtime/containers", json=container_payload)
+    m_resp = client.post("/api/internal/runtime/machines", json=machine_payload)
+
+    assert c_resp.status_code == 200
+    assert c_resp.json()["updated"] == 1
+    assert m_resp.status_code == 200
+    assert m_resp.json()["updated"] == 1
+    assert node_comms.get_cached_container_runtime_metrics(machine.id, "api_buffer_c") == {"cpu_usage_percent": 18.5}
+    assert node_comms.get_cached_machine_runtime_snapshot(machine.id) == {"cpu": {"usage_percent": 22.0}}
 
 
 def test_apply_container_status_snapshot_accepts_restarting(db_session):
@@ -642,3 +776,160 @@ def test_list_machine_bref_operator_bypasses_machine_permission(monkeypatch, db_
     result, _ = machine_tasks.List_all_machine_bref_information(0, 10, user_id=operator.id)
 
     assert {m.id for m in result} == {m1.id, m2.id}
+
+
+def test_apply_sys_snapshot_drift_updates_db_and_trims_limits(db_session, monkeypatch):
+    """实际硬件缩水 → 更新 DB 实际值 + trim CPU/内存上限（GPU 不 trim，走三集合）。"""
+    machine = create_machine(
+        machine_type=MachineTypes.GPU,
+        cpu_core_number=8, memory_size_gb=16, gpu_number=2,
+        max_cpu_core_number=8, max_memory_gb=16, max_gpu_number=2,
+    )
+    monkeypatch.setattr(node_comms, "_publish_machine_runtime_snapshot", lambda *a, **k: None)
+
+    result = node_comms.apply_sys_snapshot({
+        "cpu": {"cores": 8, "usage_percent": 10},
+        "memory": {"total_gb": 7, "usage_percent": 50},
+        "disk": {"bind_mount": {"total_gb": 200, "percent": 20}},
+        "gpu": [],
+    }, machine.id)
+
+    assert result["drifted"] == 1
+    db_session.expire_all()
+    m = db_session.get(Machine, machine.id)
+    assert m.memory_size_gb == 7      # 实际更新
+    assert m.max_memory_gb == 7       # trim
+    assert m.gpu_number == 0          # 实际更新
+    assert m.gpu_list == []           # gpu_list 事实字段更新
+    assert m.max_gpu_number == 2      # GPU 不 trim（决策：许可人工）
+    assert m.cpu_core_number == 8     # 无变化不动
+    assert m.max_cpu_core_number == 8
+    assert m.disk_size_gb == 200      # disk_size_gb 显示字段更新（bind_mount 分区容量）
+
+    # 第二次同帧：不再视为 drift（已收敛），不重复写
+    result2 = node_comms.apply_sys_snapshot({
+        "cpu": {"cores": 8},
+        "memory": {"total_gb": 7},
+        "disk": {"bind_mount": {"total_gb": 200}},
+        "gpu": [],
+    }, machine.id)
+    assert result2["drifted"] == 0
+
+
+def test_apply_sys_snapshot_gpu_enum_updates_gpu_list_not_allow(db_session, monkeypatch):
+    """GPU 枚举变化 → 更新 gpu_list/gpu_number（事实），allow_list/max_gpu_number 不动。"""
+    machine = create_machine(
+        machine_type=MachineTypes.GPU,
+        cpu_core_number=8, memory_size_gb=16, gpu_number=2,
+        max_cpu_core_number=8, max_memory_gb=16, max_gpu_number=2,
+        gpu_allow_list=[0, 1],
+    )
+    monkeypatch.setattr(node_comms, "_publish_machine_runtime_snapshot", lambda *a, **k: None)
+
+    result = node_comms.apply_sys_snapshot({
+        "cpu": {"cores": 8},
+        "memory": {"total_gb": 16},
+        "disk": {"bind_mount": {"total_gb": 1024}},
+        "gpu": [{"index": 0, "name": "RTX 4060"}],
+    }, machine.id)
+
+    assert result["drifted"] == 1
+    db_session.expire_all()
+    m = db_session.get(Machine, machine.id)
+    assert m.gpu_number == 1          # 实际数量更新
+    assert m.gpu_list == [0]          # 事实枚举更新
+    assert m.gpu_allow_list == [0, 1]  # 许可不动（人工维护）
+    assert m.max_gpu_number == 2      # 不 trim
+
+
+def test_apply_container_status_snapshot_backfills_port_mappings(db_session):
+    """docker 自动分配端口：快照条目带 port/port_mappings → 落库（None 不覆盖现值）。"""
+    machine = create_machine()
+    container = create_container(machine=machine)
+
+    result = node_comms.apply_container_status_snapshot({
+        container.name: {
+            "status": "online",
+            "port": 32791,
+            "port_mappings": [
+                {"container_port": 22, "host_port": 32791, "protocol": "tcp"},
+                {"container_port": 8888, "host_port": 32792, "protocol": "tcp"},
+            ],
+        },
+    }, machine.id)
+
+    assert result["updated"] == 1
+    db_session.expire_all()
+    c = db_session.get(Container, container.id)
+    assert c.port == 32791
+    assert c.port_mappings[1]["container_port"] == 8888
+
+    # 后续帧无端口信息（None）→ 不覆盖 DB 现值
+    node_comms.apply_container_status_snapshot({container.name: {"status": "online"}}, machine.id)
+    db_session.expire_all()
+    c = db_session.get(Container, container.id)
+    assert c.port == 32791
+    assert c.port_mappings is not None
+
+
+def test_handle_container_deleted_scoped_to_sending_machine(db_session):
+    """delete 帧删除限定在发送机器内：跨机器同名容器不被误删（2026-09 修复）。
+
+    容器名只在单机内唯一——机器 A 的容器 X 消失，机器 B 的 delete 帧
+    不得抹掉机器 A 的记录。
+    """
+    from ...models.containers import Container
+
+    machine_a = create_machine(machine_name="node-a")
+    machine_b = create_machine(machine_name="node-b")
+    ca = create_container(machine=machine_a, name="shared_name")
+    cb = create_container(machine=machine_b, name="shared_name")
+    db_session.commit()
+
+    def _exists(cid):
+        with session_scope(commit=False) as session:
+            return session.get(Container, cid) is not None
+
+    # 机器 B 报 shared_name 消失 → 只应删机器 B 的容器
+    node_comms._handle_container_deleted("shared_name", machine_b.id)
+
+    assert _exists(ca.id), "机器 A 的容器不应被机器 B 的 delete 帧删除"
+    assert not _exists(cb.id), "机器 B 自己的容器应被删除"
+
+    # 无 machine_id → 拒绝删除（不降级全局查找）
+    node_comms._handle_container_deleted("shared_name")
+    assert _exists(ca.id)
+
+    # 机器 A 自己的 vanished 路径正常删除
+    node_comms._handle_container_deleted("shared_name", machine_a.id)
+    assert not _exists(ca.id)
+
+
+def test_internal_runtime_api_requires_shared_token(client, monkeypatch):
+    """内部 buffer 端点双重校验：loopback + 共享 token（2026-09 修复）。
+
+    testclient 豁免仅限 TESTING；模拟本地来源后无/错 token → 403，正确 token → 200。
+    """
+    from ...api import internal_runtime_api
+
+    machine = create_machine()
+    payload = {"machine_id": machine.id, "snapshot": {"token_c": {"runtime_metrics": {"cpu_usage_percent": 1.0}}}}
+
+    # 模拟"本地进程"来源 + 关闭 TESTING 豁免（验证 token 本身，而非 testclient 白名单）
+    monkeypatch.setattr(internal_runtime_api, "_is_loopback", lambda request: True)
+    monkeypatch.setattr(internal_runtime_api.AppConfig, "TESTING", False)
+
+    # 无 token → 403
+    resp = client.post("/api/internal/runtime/containers", json=payload)
+    assert resp.status_code == 403
+
+    # 错误 token → 403
+    resp = client.post("/api/internal/runtime/containers", json=payload, headers={"X-Internal-Token": "wrong-token"})
+    assert resp.status_code == 403
+
+    # 正确 token → 200
+    token = node_comms._read_internal_token()
+    assert token
+    resp = client.post("/api/internal/runtime/containers", json=payload, headers={"X-Internal-Token": token})
+    assert resp.status_code == 200
+    assert resp.json()["updated"] == 1

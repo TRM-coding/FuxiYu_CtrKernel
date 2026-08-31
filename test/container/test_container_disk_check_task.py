@@ -15,6 +15,7 @@ from ...models.containers import Container
 from ...models.container_disk_freeze_state import ContainerDiskFreezeState
 from ...repositories import (
     container_disk_freeze_state_repo,
+    container_ssh_login_repo,
     long_term_container_repo,
 )
 from ...schedulers import container_disk_check_task
@@ -211,7 +212,6 @@ class TestEvaluateLimitsPersistence:
         db_session.expire_all()
         c = db_session.get(Container, container.id)
         assert c.disk_total_bytes == usage["container"]["total_bytes"]
-        assert c.disk_limit_bytes == int(1024 * 1024 ** 3)
         assert c.disk_overlay_rw_bytes == usage["container"]["overlay_rw_bytes"]
         assert c.disk_bind_mount_bytes == usage["container"]["bind_mount_bytes"]
         assert c.disk_checked_at is not None
@@ -236,7 +236,6 @@ class TestEvaluateLimitsPersistence:
         db_session.expire_all()
         c = db_session.get(Container, container.id)
         assert c.disk_total_bytes == usage["container"]["total_bytes"]
-        assert c.disk_limit_bytes == int(1024 * 1024 ** 3)
         assert c.disk_checked_at is not None
 
 
@@ -913,18 +912,30 @@ class TestFreezeReset:
         )
 
     def test_freeze_state_cascade_on_container_delete(self, app, db_session):
-        """容器删 → FreezeState 可通过 repo.reset 清除（级联由 DB FK 保证）。"""
+        """容器删 → FreezeState/SSH 记录/长期标记由 DB FK CASCADE 级联清除。
+
+        SQLite 需 PRAGMA foreign_keys=ON（extensions._make_engine 已开启，
+        2026-09 决策）：否则关联行残留，容器 id 复用时新容器继承旧状态。
+        """
+        from ...models.container_ssh_login import ContainerSSHLogin
+        from ...models.long_term_container import LongTermContainer
+
         _root, machine, container = create_container_graph()
         container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=db_session)
+        container_ssh_login_repo.upsert_last_ssh_login_time(
+            machine.id, container.id, "2026-08-01T00:00:00", session=db_session,
+        )
+        long_term_container_repo.add(container.id, session=db_session)
+        db_session.commit()
         fid = container.id
         assert container_disk_freeze_state_repo.get(fid, session=db_session) is not None
 
-        # 清理时先删 freeze state，再删容器（生产环境由 FK CASCADE 自动处理）
-        container_disk_freeze_state_repo.reset(fid, session=db_session)
         db_session.delete(container)
         db_session.commit()
 
         assert container_disk_freeze_state_repo.get(fid, session=db_session) is None
+        assert db_session.query(ContainerSSHLogin).filter_by(container_id=fid).first() is None
+        assert db_session.query(LongTermContainer).filter_by(container_id=fid).first() is None
 
     def test_grace_cleared_on_usage_below_reset(self, app, db_session, monkeypatch):
         """宽限期内容量回落 < 95% → 整条记录删除（含 grace_until）。"""
@@ -963,7 +974,7 @@ class TestHandleFreezeEscalation:
             lambda cid: removed.append(cid) or True
         )
         monkeypatch.setattr(
-            container_disk_check_task.container_tasks,
+            container_disk_check_task.containers_repo,
             "get_container_root_owner_emails",
             lambda cid: []
         )
@@ -987,9 +998,9 @@ class TestHandleFreezeEscalation:
             lambda cid: True
         )
         monkeypatch.setattr(
-            container_disk_check_task.container_tasks,
+            container_disk_check_task.containers_repo,
             "get_container_root_owner_emails",
-            lambda cid: ["owner@test.com"]
+            lambda cid, **kwargs: ["owner@test.com"]
         )
 
         def _fake_send_mail(*, to, subject, content):
@@ -1022,9 +1033,9 @@ class TestHandleFreezeEscalation:
             lambda cid: removed_count.append(cid) or True
         )
         monkeypatch.setattr(
-            container_disk_check_task.container_tasks,
+            container_disk_check_task.containers_repo,
             "get_container_root_owner_emails",
-            lambda cid: ["owner@test.com"]
+            lambda cid, **kwargs: ["owner@test.com"]
         )
         monkeypatch.setattr(container_disk_check_task.AppConfig, "CONTAINER_DISK_CHECK_ENABLED", True)
 
@@ -1143,7 +1154,7 @@ class TestEscalationMountCleanup:
             lambda cid: True
         )
         monkeypatch.setattr(
-            container_disk_check_task.container_tasks,
+            container_disk_check_task.containers_repo,
             "get_container_root_owner_emails",
             lambda cid: []
         )
@@ -1181,7 +1192,7 @@ class TestEscalationMountCleanup:
             lambda cid: True
         )
         monkeypatch.setattr(
-            container_disk_check_task.container_tasks,
+            container_disk_check_task.containers_repo,
             "get_container_root_owner_emails",
             lambda cid: []
         )
@@ -1211,7 +1222,7 @@ class TestEscalationMountCleanup:
             lambda cid: True
         )
         monkeypatch.setattr(
-            container_disk_check_task.container_tasks,
+            container_disk_check_task.containers_repo,
             "get_container_root_owner_emails",
             lambda cid: []
         )

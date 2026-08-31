@@ -139,3 +139,41 @@ def test_stats_buckets_day_by_offset(db_session):
         tz_offset_minutes=480,
     )
     assert bj_buckets["by_day"]["2026-08-17"]["success"] == 1
+
+
+def test_list_skips_identity_mapping_for_previous_generation_log(db_session):
+    """id 复用（2026-09）：日志早于容器 created_at = 上一代容器日志 → 不映射名称/超管。"""
+    from datetime import timedelta
+
+    from ...models.operation_log import OperationLog
+
+    user = create_user(username="alice")
+    machine = create_machine(machine_name="gpu-01")
+    container = create_container(machine=machine, name="c2")
+    bind_user_container(user, container, role="ROOT")
+    container.created_at = datetime.utcnow() - timedelta(minutes=5)
+    db_session.commit()
+
+    def _log(op, when, name):
+        db_session.add(OperationLog(
+            operator_user_id=user.id, operation=OperationType[op].value,
+            target_type="container", target_id=container.id,
+            detail={"name": name}, success=True, created_at=when,
+        ))
+
+    # 上一代容器（同 id）的日志：早于当前容器创建
+    _log("DELETE_CONTAINER", datetime.utcnow() - timedelta(hours=1), "old_c2")
+    # 当前容器自己的日志：晚于创建
+    _log("START_CONTAINER", datetime.utcnow(), "c2")
+    db_session.commit()
+
+    result = list_operation_logs(page=1, page_size=10)
+    by_op = {log["operation"]: log for log in result["logs"]}
+
+    old = by_op[OperationType.DELETE_CONTAINER.value]
+    assert old["target_name"] is None
+    assert old["root_owner"] is None
+
+    cur = by_op[OperationType.START_CONTAINER.value]
+    assert cur["target_name"] == "c2"
+    assert cur["root_owner"] == "alice"

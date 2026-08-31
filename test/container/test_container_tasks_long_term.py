@@ -57,8 +57,8 @@ def test_build_long_term_state_blocks_only_when_not_already_long_term(db_session
 
     db_session.commit()
 
-    blocked_state = container_tasks._build_long_term_container_state(container.id)
-    existing_state = container_tasks._build_long_term_container_state(second_container.id)
+    blocked_state = container_tasks.build_long_term_container_state(container.id)
+    existing_state = container_tasks.build_long_term_container_state(second_container.id)
 
     assert blocked_state["long_term_container_can_enable"] is False
     assert blocked_state["long_term_container_blocked_user_ids"] == [root.id]

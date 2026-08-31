@@ -62,6 +62,7 @@ def _filtered_stmt(
     operator_user_id: int | None = None,
     operation: str | None = None,
     target_type: str | None = None,
+    target_id: int | None = None,
     success: bool | None = None,
     start: str | None = None,
     end: str | None = None,
@@ -74,6 +75,8 @@ def _filtered_stmt(
         stmt = stmt.where(OperationLog.operation == operation)
     if target_type:
         stmt = stmt.where(OperationLog.target_type == target_type)
+    if target_id is not None:
+        stmt = stmt.where(OperationLog.target_id == int(target_id))
     if success is not None:
         stmt = stmt.where(OperationLog.success.is_(success))
     if start:
@@ -95,6 +98,7 @@ def list_logs(
     operator_user_id: int | None = None,
     operation: str | None = None,
     target_type: str | None = None,
+    target_id: int | None = None,
     success: bool | None = None,
     start: str | None = None,
     end: str | None = None,
@@ -106,6 +110,7 @@ def list_logs(
         operator_user_id=operator_user_id,
         operation=operation,
         target_type=target_type,
+        target_id=target_id,
         success=success,
         start=start,
         end=end,

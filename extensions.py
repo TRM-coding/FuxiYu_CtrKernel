@@ -21,10 +21,25 @@ def _default_database_url() -> str:
 
 def _make_engine(database_url: str):
     kwargs = {"future": True}
-    if database_url in {"sqlite:///:memory:", "sqlite://"}:
+    sqlite = database_url.startswith("sqlite")
+    if sqlite:
         kwargs["connect_args"] = {"check_same_thread": False}
-        kwargs["poolclass"] = StaticPool
-    return create_engine(database_url, **kwargs)
+        if database_url in {"sqlite:///:memory:", "sqlite://"}:
+            kwargs["poolclass"] = StaticPool
+    eng = create_engine(database_url, **kwargs)
+    if sqlite:
+        # SQLite 默认不执行外键约束（PRAGMA foreign_keys=OFF）：删容器时
+        # ssh/freeze/long_term 等 ON DELETE CASCADE 不生效会残留，id 复用后
+        # 新容器继承旧关联数据。与生产 MySQL 行为对齐（2026-09 决策）。
+        from sqlalchemy import event
+
+        @event.listens_for(eng, "connect")
+        def _enable_sqlite_foreign_keys(dbapi_connection, connection_record):  # pragma: no cover
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+    return eng
 
 
 engine = _make_engine(_default_database_url())

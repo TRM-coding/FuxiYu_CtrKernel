@@ -1,6 +1,7 @@
 """操作日志服务层：蓝图 → service → repo 的分层入口。"""
 
 import logging
+from datetime import datetime
 
 from sqlalchemy import select
 
@@ -155,6 +156,19 @@ def _enrich_targets(logs: list[dict]) -> None:
                 with session_scope(commit=False) as session:
                     c = session.get(Container, int(tid))
                     if c:
+                        # 身份校验（id 复用 2026-09）：日志早于容器创建 = 上一代容器日志，
+                        # 不映射名称/超管，前端回退显示 #id、不做错误导航。
+                        log_dt = None
+                        if r.get("created_at"):
+                            try:
+                                log_dt = datetime.fromisoformat(str(r["created_at"]))
+                            except ValueError:
+                                log_dt = None
+                        c_created = getattr(c, "created_at", None)
+                        if c_created is not None and log_dt is not None and log_dt < c_created:
+                            r["target_name"] = None
+                            r["root_owner"] = None
+                            continue
                         r["target_name"] = getattr(c, "name", None)
                     binding = session.scalars(
                         select(UserContainer).where(

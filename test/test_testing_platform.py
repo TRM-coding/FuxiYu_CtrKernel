@@ -4,7 +4,8 @@ from . import mocks
 from .conftest import TEST_AUTH_TOKEN
 from .factories import create_container_graph, create_machine, create_user
 from ..constant import MachineStatus, PERMISSION, ROLE
-from ..repositories import authentications_repo
+from ..extensions import session_scope
+from ..repositories import authentications_repo, usercontainer_repo
 from ..services import container_tasks
 
 
@@ -31,7 +32,8 @@ def test_machine_factory_creates_online_machine_by_default(db_session):
 def test_container_factory_creates_root_binding_by_default(db_session):
     root, _machine, container = create_container_graph()
 
-    bindings = container_tasks.get_container_bindings(container.id)
+    with session_scope(commit=False) as session:
+        bindings = usercontainer_repo.get_container_bindings(container.id, session=session)
 
     assert bindings[0]["user_id"] == root.id
     assert getattr(bindings[0]["role"], "value", bindings[0]["role"]) == ROLE.ROOT.value

@@ -4,7 +4,8 @@ from .. import mocks
 from ..factories import create_auth, create_container_graph, create_machine, create_user
 from ...api import container_api, deps
 from ...constant import PERMISSION
-from ...repositories import machine_permission_repo
+from ...extensions import session_scope
+from ...repositories import containers_repo, machine_permission_repo
 from ...services import container_tasks
 from ...services.container_module import node_comms
 
@@ -46,7 +47,8 @@ def test_ctrl_e2e_user_login_machine_permission_container_create_and_list(
     )
 
     assert create_resp.status_code == 200
-    created = container_tasks.get_id_by_name_machine("e2e_container", machine.id)
+    with session_scope(commit=False) as session:
+        created = containers_repo.get_id_by_name_machine("e2e_container", machine.id, session=session)
     assert created is not None
 
     list_resp = client.post(
