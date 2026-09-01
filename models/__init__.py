@@ -7,6 +7,7 @@ from .container_ssh_login import ContainerSSHLogin  # noqa: F401
 from .container_cleanup_reminder import ContainerCleanupReminder  # noqa: F401
 from .container_disk_freeze_state import ContainerDiskFreezeState  # noqa: F401
 from .container_mount_cleanup import ContainerMountCleanup  # noqa: F401
+from .deleted_container_restore_snapshot import DeletedContainerRestoreSnapshot  # noqa: F401
 
 from .registration_code import RegistrationCode  # noqa: F401
 from .announcement import Announcement, AnnouncementTemplate, AnnouncementDraft  # noqa: F401

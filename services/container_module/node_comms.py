@@ -1050,6 +1050,14 @@ def _handle_container_deleted(container_name: str, machine_id: int | None = None
                 logger.debug("handle_node_ws delete: container %r already gone or not on machine %s (skip)",
                              container_name, machine_id)
                 return
+            from ...services import container_tasks
+            container_tasks.record_deleted_container_artifacts(
+                container_id,
+                removed_trigger="node_vanished",
+                operator_user_id=None,
+                cleanup_context={"trigger": "node_vanished"},
+                session=session,
+            )
             remove_binding(0, container_id, all=True, session=session)
             containers_repo.delete_container(container_id, session=session)
         logger.warning("handle_node_ws delete: container %r (id=%s) removed from DB (vanished on node)",

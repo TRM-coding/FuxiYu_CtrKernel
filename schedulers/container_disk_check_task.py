@@ -391,20 +391,28 @@ def _clean_mount_immediately(container) -> None:
         return
 
     try:
-        from ..repositories.container_mount_cleanup_repo import insert as insert_mount_cleanup
+        from ..repositories import container_mount_cleanup_repo
         from datetime import datetime as dt
 
         with session_scope() as session:
-            insert_mount_cleanup(
-                container_id=container.id,
-                container_name=container.name,
-                machine_id=container.machine_id,
-                mount_path=bind_mount,
-                escalation=True,
-                removed_at=dt.utcnow(),
-                cleaned_at=dt.utcnow(),
+            existing = container_mount_cleanup_repo.get_latest_for_container(
+                container.id,
+                bind_mount,
                 session=session,
             )
+            if existing is not None:
+                container_mount_cleanup_repo.mark_cleaned(existing.id, escalation=True, session=session)
+            else:
+                container_mount_cleanup_repo.insert(
+                    container_id=container.id,
+                    container_name=container.name,
+                    machine_id=container.machine_id,
+                    mount_path=bind_mount,
+                    escalation=True,
+                    removed_at=dt.utcnow(),
+                    cleaned_at=dt.utcnow(),
+                    session=session,
+                )
     except Exception as e:
         logger.warning("[disk-check] escalation: failed to record mount cleanup for %s: %s", container.id, e)
 

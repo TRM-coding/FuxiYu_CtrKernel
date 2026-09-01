@@ -14,6 +14,7 @@ from ..extensions import session_scope
 from ..constant import *
 from sqlalchemy.exc import IntegrityError
 from ..repositories import containers_repo, machine_repo, machine_permission_repo, user_repo, long_term_container_repo
+from ..repositories import container_mount_cleanup_repo, deleted_container_restore_snapshot_repo
 from .operation_log_tasks import write_operation_log as write_op_log
 from . import settings_tasks
 from ..repositories import containers_repo as container_repo
@@ -282,32 +283,16 @@ def remove_container(container_id:int, operator_user_id:int|None=None)->bool:
 
     # 移除所有绑定并删除容器
     with session_scope() as session:
+        record_deleted_container_artifacts(
+            container_id,
+            removed_trigger="api" if operator_user_id else "cleanup",
+            operator_user_id=operator_user_id,
+            session=session,
+        )
         usercontainer_repo.remove_binding(0, container_id, all=True, session=session)
-
-    # 记录 mount 清理信息（删前捕获路径）
-    _bind_mount = getattr(container, 'bind_mount_path', None) if container else None
-    _container_name = getattr(container, 'name', '?') if container else '?'
-
-    with session_scope() as session:
         containers_repo.delete_container(container_id, session=session)
 
-    # 插入 mount 清理追踪（14 天后由定期任务清理）
-    if _bind_mount:
-        try:
-            from ..repositories.container_mount_cleanup_repo import insert as insert_mount_cleanup
-            from datetime import datetime as dt
-            insert_mount_cleanup(
-                container_id=container_id,
-                container_name=_container_name,
-                machine_id=machine_id,
-                mount_path=_bind_mount,
-                escalation=False,
-                removed_at=dt.utcnow(),
-            )
-            logger.info("remove_container: mount cleanup recorded for container %s path=%s", container_id, _bind_mount)
-        except Exception as e:
-            logger.warning("remove_container: failed to record mount cleanup for %s: %s", container_id, e)
-
+    # 记录 mount 清理信息（删前捕获路径）
     return True
 
 def pause_container(container_id: int, operator_user_id: int | None = None, extra_detail: dict | None = None) -> bool:
@@ -505,15 +490,177 @@ def build_container_restore_snapshot(container_id: int, cleanup_context: dict | 
         "machine_name": getattr(machine, "machine_name", None),
         "container_status": status_value,
         "port": container.port,
+        "port_mappings": derive_port_mappings(container.port, container.port_mappings),
         "memory_gb": container.memory_gb,
         "shared_gb": container.shared_gb,
         "gpu_number": container.gpu_number,
+        "gpu_chosen_list": container.gpu_chosen_list,
         "cpu_number": container.cpu_number,
+        "bind_mount_path": getattr(container, "bind_mount_path", None),
         "is_long_term": is_long_term,
         "accounts": accounts,
         "cleanup_context": cleanup_context or {},
     }
     return snapshot
+
+
+def _serialize_dt(value) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def record_deleted_container_artifacts(
+    container_id: int,
+    *,
+    removed_trigger: str = "api",
+    operator_user_id: int | None = None,
+    cleanup_context: dict | None = None,
+    session,
+) -> dict:
+    container = containers_repo.get_by_id(container_id, session=session)
+    if container is None:
+        return {"snapshot": None, "mount_cleanup": None}
+
+    snapshot = build_container_restore_snapshot(container_id, cleanup_context=cleanup_context)
+    bind_mount = getattr(container, "bind_mount_path", None)
+    removed_at = datetime.utcnow()
+    cleanup_row = None
+    if bind_mount:
+        cleanup_row = container_mount_cleanup_repo.get_latest_for_container(
+            container.id,
+            bind_mount,
+            session=session,
+        )
+        if cleanup_row is None:
+            cleanup_row = container_mount_cleanup_repo.insert(
+                container_id=container.id,
+                container_name=container.name,
+                machine_id=container.machine_id,
+                mount_path=bind_mount,
+                escalation=False,
+                removed_at=removed_at,
+                session=session,
+            )
+
+    snapshot_row = deleted_container_restore_snapshot_repo.insert(
+        snapshot,
+        session=session,
+        mount_cleanup_id=getattr(cleanup_row, "id", None),
+        mount_path=bind_mount,
+        removed_trigger=removed_trigger,
+        operator_user_id=operator_user_id,
+        removed_at=removed_at,
+    )
+    return {"snapshot": snapshot_row, "mount_cleanup": cleanup_row}
+
+
+def _deleted_container_record(row, cleanup) -> dict:
+    snapshot = row.snapshot or {}
+    cleaned_at = getattr(cleanup, "cleaned_at", None) if cleanup else None
+    cleanup_escalation = bool(getattr(cleanup, "escalation", False)) if cleanup else False
+    return {
+        "deleted_id": row.id,
+        "original_container_id": row.original_container_id,
+        "container_name": row.container_name,
+        "image": snapshot.get("image"),
+        "machine_id": row.machine_id,
+        "machine_name": row.machine_name,
+        "machine_ip": row.machine_ip,
+        "mount_path": row.mount_path,
+        "mount_cleanup_id": row.mount_cleanup_id,
+        "removed_at": _serialize_dt(row.removed_at),
+        "removed_trigger": row.removed_trigger,
+        "operator_user_id": row.operator_user_id,
+        "cleaned_at": _serialize_dt(cleaned_at),
+        "cleanup_escalation": cleanup_escalation,
+        "data_recoverable": bool(row.mount_path and cleaned_at is None),
+        "snapshot": snapshot,
+    }
+
+
+def list_deleted_containers(page_number: int = 1, page_size: int = 20) -> dict:
+    page_number = max(int(page_number or 1), 1)
+    page_size = min(max(int(page_size or 20), 1), 100)
+    offset = (page_number - 1) * page_size
+    with session_scope(commit=False) as session:
+        rows = deleted_container_restore_snapshot_repo.list_records(
+            session=session,
+            limit=1000000,
+            offset=0,
+        )
+        records = []
+        seen_cleanup_ids = set()
+        for row in rows:
+            cleanup = None
+            if row.mount_cleanup_id:
+                cleanup = container_mount_cleanup_repo.get_by_id(row.mount_cleanup_id, session=session)
+                seen_cleanup_ids.add(row.mount_cleanup_id)
+            records.append(_deleted_container_record(row, cleanup))
+        cleanup_rows = container_mount_cleanup_repo.list_records(limit=1000000, offset=0, session=session)
+        for cleanup in cleanup_rows:
+            if cleanup.id in seen_cleanup_ids:
+                continue
+            machine = machine_repo.get_by_id(cleanup.machine_id, session=session)
+            records.append({
+                "deleted_id": f"mount-{cleanup.id}",
+                "original_container_id": cleanup.container_id,
+                "container_name": cleanup.container_name,
+                "image": None,
+                "machine_id": cleanup.machine_id,
+                "machine_name": getattr(machine, "machine_name", None),
+                "machine_ip": getattr(machine, "machine_ip", None),
+                "mount_path": cleanup.mount_path,
+                "mount_cleanup_id": cleanup.id,
+                "removed_at": _serialize_dt(cleanup.removed_at),
+                "removed_trigger": "mount_cleanup",
+                "operator_user_id": None,
+                "cleaned_at": _serialize_dt(cleanup.cleaned_at),
+                "cleanup_escalation": bool(cleanup.escalation),
+                "data_recoverable": bool(cleanup.mount_path and cleanup.cleaned_at is None),
+                "snapshot": {},
+            })
+        records.sort(key=lambda item: item.get("removed_at") or "", reverse=True)
+        total = len(records)
+        records = records[offset:offset + page_size]
+    return {
+        "records": records,
+        "total_number": total,
+        "total_page": max(math.ceil(total / page_size), 1) if total else 0,
+    }
+
+
+def clean_deleted_container_mount(mount_cleanup_id: int, operator_user_id: int | None = None) -> dict:
+    with session_scope(commit=False) as session:
+        cleanup = container_mount_cleanup_repo.get_by_id(mount_cleanup_id, session=session)
+        if cleanup is None:
+            raise NodeServiceError("mount cleanup record not found", reason="not_found")
+        if cleanup.cleaned_at is not None:
+            return {"mount_cleanup_id": cleanup.id, "cleaned": True, "already_cleaned": True}
+        machine_ip = machine_repo.get_machine_ip_by_id(cleanup.machine_id, session=session)
+        mount_path = cleanup.mount_path
+
+    full_url = get_full_url(machine_ip, "/clean_mount")
+    res = send(full_url, {"config": {"mount_path": mount_path}}, timeout=10.0)
+    _raise_on_node_error(res, "clean_mount")
+    if res.get("success") != 1:
+        raise NodeServiceError(f"NODE clean_mount unexpected response: {res}", reason="clean_mount_failed")
+
+    with session_scope() as session:
+        ok = container_mount_cleanup_repo.mark_cleaned(mount_cleanup_id, session=session)
+        if not ok:
+            raise NodeServiceError("mount cleanup record not found", reason="not_found")
+    write_op_log(
+        success=True,
+        operator_user_id=operator_user_id,
+        operation=OperationType.DELETE_CONTAINER,
+        target_type="container_mount_cleanup",
+        target_id=mount_cleanup_id,
+        detail={"mount_path": mount_path, "trigger": "manual_clean_mount"},
+    )
+    return {"mount_cleanup_id": int(mount_cleanup_id), "cleaned": True, "already_cleaned": False}
 
 
 def set_long_term_container(container_id: int, is_long_term: bool, operator_user_id: int | None = None) -> dict:

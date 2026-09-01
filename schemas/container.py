@@ -95,6 +95,45 @@ class DeleteContainerResponse(SuccessMessageResponse):
 # 长驻容器
 
 
+class ListDeletedContainersRequest(_CompatBaseModel):
+    page_number: int = Field(default=1, ge=1)
+    page_size: int = Field(default=20, ge=1)
+
+
+class DeletedContainerRecord(_CompatBaseModel):
+    deleted_id: int | str
+    original_container_id: int | None = None
+    container_name: str | None = None
+    image: str | None = None
+    machine_id: int | None = None
+    machine_name: str | None = None
+    machine_ip: str | None = None
+    mount_path: str | None = None
+    mount_cleanup_id: int | None = None
+    removed_at: str | None = None
+    removed_trigger: str | None = None
+    operator_user_id: int | None = None
+    cleaned_at: str | None = None
+    cleanup_escalation: bool = False
+    data_recoverable: bool = False
+    snapshot: dict[str, Any] = Field(default_factory=dict)
+
+
+class ListDeletedContainersResponse(_CompatBaseModel):
+    success: int | bool = 1
+    records: list[DeletedContainerRecord | dict[str, Any]] = Field(default_factory=list)
+    total_page: int = 0
+    total_number: int = 0
+
+
+class CleanDeletedContainerMountRequest(_CompatBaseModel):
+    mount_cleanup_id: int = Field(..., ge=1)
+
+
+class CleanDeletedContainerMountResponse(SuccessMessageResponse):
+    mount_cleanup_id: int | None = None
+
+
 class SetLongTermContainerRequest(_CompatBaseModel):
     container_id: int = Field(..., ge=1)
     is_long_term: bool

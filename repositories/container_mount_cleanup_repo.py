@@ -51,12 +51,41 @@ def list_pending(cutoff: dt.datetime, limit: int = 100, *, session: Session) -> 
     return list(session.scalars(stmt).all())
 
 
-def mark_cleaned(record_id: int, *, session: Session) -> bool:
+def get_by_id(record_id: int, *, session: Session) -> ContainerMountCleanup | None:
+    return session.get(ContainerMountCleanup, int(record_id))
+
+
+def get_latest_for_container(
+    container_id: int,
+    mount_path: str | None = None,
+    *,
+    session: Session,
+) -> ContainerMountCleanup | None:
+    stmt = select(ContainerMountCleanup).where(ContainerMountCleanup.container_id == int(container_id))
+    if mount_path:
+        stmt = stmt.where(ContainerMountCleanup.mount_path == str(mount_path))
+    stmt = stmt.order_by(ContainerMountCleanup.removed_at.desc(), ContainerMountCleanup.id.desc()).limit(1)
+    return session.scalars(stmt).first()
+
+
+def list_records(limit: int = 1000, offset: int = 0, *, session: Session) -> list[ContainerMountCleanup]:
+    stmt = (
+        select(ContainerMountCleanup)
+        .order_by(ContainerMountCleanup.removed_at.desc(), ContainerMountCleanup.id.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    return list(session.scalars(stmt).all())
+
+
+def mark_cleaned(record_id: int, *, session: Session, escalation: bool | None = None) -> bool:
     """标记一条记录为已清理。"""
 
     row = session.get(ContainerMountCleanup, int(record_id))
     if row is None:
         return False
+    if escalation is not None:
+        row.escalation = bool(escalation)
     row.cleaned_at = dt.datetime.utcnow()
     session.flush()
     return True

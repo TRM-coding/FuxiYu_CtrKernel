@@ -20,6 +20,8 @@ from ..utils.Container import Container_info
 from ..utils.parsers import parse_bool
 from ..schemas.container import (
     CollaboratorRequest,
+    CleanDeletedContainerMountRequest,
+    CleanDeletedContainerMountResponse,
     ContainerDetailResponse,
     ContainerIdRequest,
     ContainerOperationResponse,
@@ -29,6 +31,8 @@ from ..schemas.container import (
     CreateContainerResponse,
     DeleteContainerRequest,
     DeleteContainerResponse,
+    ListDeletedContainersRequest,
+    ListDeletedContainersResponse,
     ListAllContainerBrefInformationRequest,
     ListAllContainerBrefInformationResponse,
     RefreshLastSshLoginTimeRequest,
@@ -332,6 +336,43 @@ def delete_container_api(
         )
         return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
     return {"success": 1, "message": "Container deleted successfully"}
+
+
+@router.post("/list_deleted_containers", response_model=ListDeletedContainersResponse)
+def list_deleted_containers_api(
+    payload: ListDeletedContainersRequest = Body(default_factory=ListDeletedContainersRequest),
+    _: int = Depends(require_permission("container:manage")),
+):
+    data = _payload_data(payload)
+    try:
+        result = container_service.list_deleted_containers(
+            page_number=int(data.get("page_number", 1) or 1),
+            page_size=int(data.get("page_size", 20) or 20),
+        )
+    except Exception as e:
+        return _error(500, f"Failed to list deleted containers: {e}", "list_failed")
+    return {"success": 1, **result}
+
+
+@router.post("/clean_deleted_container_mount", response_model=CleanDeletedContainerMountResponse)
+def clean_deleted_container_mount_api(
+    payload: CleanDeletedContainerMountRequest = Body(default_factory=CleanDeletedContainerMountRequest),
+    operator_user_id: int = Depends(require_permission("container:manage")),
+):
+    data = _payload_data(payload)
+    mount_cleanup_id = int(data.get("mount_cleanup_id", 0) or 0)
+    try:
+        result = container_service.clean_deleted_container_mount(
+            mount_cleanup_id=mount_cleanup_id,
+            operator_user_id=operator_user_id,
+        )
+    except container_service.NodeServiceError as e:
+        reason = getattr(e, "reason", None)
+        return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
+    except Exception as e:
+        reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
+        return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
+    return {"success": 1, "message": "mount cleaned", "mount_cleanup_id": result.get("mount_cleanup_id")}
 
 
 @router.post("/set_long_term_container", response_model=SetLongTermContainerResponse)
