@@ -10,9 +10,9 @@ import time
 import logging
 from datetime import datetime, timedelta
 
-from ..config import AppConfig
 from ..extensions import session_scope
 from ..repositories import container_mount_cleanup_repo, machine_repo
+from ..services import settings_tasks
 from ..services.container_tasks import get_full_url, send
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ _SCHEDULER_STATE: dict[str, object] = {}
 
 def run_mount_cleanup_once() -> None:
     """扫描并清理到期 mount 目录（执行一次）。"""
-    after_days = int(getattr(AppConfig, "CONTAINER_MOUNT_CLEANUP_AFTER_DAYS", 14) or 14)
+    after_days = settings_tasks.get_container_mount_cleanup_after_days()
 
     cutoff = datetime.utcnow() - timedelta(days=after_days)
     with session_scope(commit=False) as session:
@@ -55,10 +55,12 @@ def run_mount_cleanup_once() -> None:
             logger.error("[mount-cleanup] failed row %s: %s", row.id, e)
 
 
-def start_mount_cleanup_scheduler(interval_seconds: int = 86400) -> threading.Thread | None:
+def start_mount_cleanup_scheduler(interval_seconds: int | None = None) -> threading.Thread | None:
     """启动后台定期 mount 清理任务。"""
-    if not getattr(AppConfig, "CONTAINER_MOUNT_CLEANUP_ENABLED", False):
+    if not settings_tasks.get_container_mount_cleanup_enabled():
         return None
+    if interval_seconds is None:
+        interval_seconds = settings_tasks.get_container_mount_cleanup_interval_seconds()
 
     key = "container_mount_cleanup_scheduler"
     existing = _SCHEDULER_STATE.get(key)

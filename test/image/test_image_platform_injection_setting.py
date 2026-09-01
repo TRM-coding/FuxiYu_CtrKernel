@@ -44,6 +44,59 @@ def test_platform_injection_setting_api_roundtrip(client, monkeypatch):
     assert get_resp.json()["content"] == custom
 
 
+def test_system_settings_matrix_is_seeded(db_session):
+    settings = {item["key"]: item for item in settings_tasks.list_settings()}
+
+    assert "container.cleanup_after_days" in settings
+    assert "container.cleanup_interval_seconds" in settings
+    assert "container.disk_soft_limit_percent" in settings
+    assert "announcement.batch_send_max" in settings
+    assert settings[settings_tasks.IMAGE_PLATFORM_INJECTION_KEY]["multiline"] is True
+
+
+def test_system_settings_seed_removes_deprecated_parallel_keys(db_session):
+    from ...repositories import system_setting_repo
+
+    with db_session() as session:
+        system_setting_repo.create_setting(
+            key="node.parallel_enabled_containers",
+            value="true",
+            description="deprecated",
+            session=session,
+        )
+        session.commit()
+
+    settings_tasks.seed_system_settings_defaults()
+
+    settings = {item["key"]: item for item in settings_tasks.list_settings()}
+    assert "node.parallel_enabled_containers" not in settings
+    with db_session() as session:
+        assert system_setting_repo.get_by_key("node.parallel_enabled_containers", session=session) is None
+
+
+def test_system_settings_api_update_roundtrip(client, monkeypatch):
+    _auth(monkeypatch, user_id=7)
+
+    resp = client.post(
+        "/api/settings",
+        json={"values": {"container.cleanup_after_days": 12, "container.disk_check_enabled": True}},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] == 1
+    assert settings_tasks.get_container_cleanup_after_days() == 12
+    assert settings_tasks.get_container_disk_check_enabled() is True
+
+
+def test_system_settings_api_rejects_unknown_key(client, monkeypatch):
+    _auth(monkeypatch, user_id=7)
+
+    resp = client.post("/api/settings", json={"values": {"unknown.setting": "x"}})
+
+    assert resp.status_code == 422
+    assert resp.json()["error_reason"] == "invalid_setting"
+
+
 def test_build_payload_includes_platform_injection(client, monkeypatch):
     _auth(monkeypatch, user_id=7)
     image_resp = client.post(

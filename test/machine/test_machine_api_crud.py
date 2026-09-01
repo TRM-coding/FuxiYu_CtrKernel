@@ -80,7 +80,7 @@ def test_remove_machine_requires_operator(client, monkeypatch):
 
 def test_remove_machine_success(client, monkeypatch):
     _auth(monkeypatch)
-    monkeypatch.setattr(machine_api.machine_service, "Remove_machine", lambda machine_id, operator_user_id=None: True)
+    monkeypatch.setattr(machine_api.machine_service, "Remove_machine", lambda machine_id, operator_user_id=None: {"removed": list(machine_id), "blocked": []})
 
     resp = client.post("/api/machines/remove_machine", json={"machine_ids": [1]} )
 

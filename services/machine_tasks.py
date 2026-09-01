@@ -5,7 +5,7 @@ from ..repositories.machine_repo import *
 from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy import String, cast, func, or_, select
-from ..repositories import machine_permission_repo, user_repo
+from ..repositories import containers_repo, machine_permission_repo, user_repo
 from .operation_log_tasks import write_operation_log as write_op_log
 from ..constant import MachineStatus, OperationType
 from ..models.machine import Machine
@@ -254,24 +254,43 @@ def Add_machine(machine_name:str,
 
 #######################################
 # 删除集群中的一个（一组）机器
-def Remove_machine(machine_id:list[int], operator_user_id: int | None = None)->bool:
+def Remove_machine(machine_id:list[int], operator_user_id: int | None = None)->dict:
+    """删除一组机器记录。
+
+    2026-09 决策：机器上仍有容器 → 拒绝删除该台并提示先手动清理（不自动级联删
+    物理容器——删除不可被机器记录删除捎带触发）。返回 {"removed": [id], "blocked": [...]}。
+    """
+    removed: list[int] = []
+    blocked: list[dict] = []
     for id in machine_id:
         machine = None
+        ok = False
+        err = None
         try:
             with session_scope() as session:
                 machine = get_by_id(id, session=session)
-                ok = delete_machine(id, session=session)
-            err = None if ok else "delete_failed"
+                if machine is None:
+                    err = "not_found"
+                else:
+                    count = containers_repo.count_containers(machine_id=id, session=session)
+                    if count > 0:
+                        blocked.append({"machine_id": id, "name": machine.machine_name, "container_count": count})
+                        err = "machine_has_containers"
+                    else:
+                        ok = delete_machine(id, session=session)
+                        err = None if ok else "delete_failed"
         except Exception as e:
             ok = False
             err = getattr(e, 'reason', None) or str(e)
+        if ok:
+            removed.append(id)
         write_op_log(success=bool(ok), operator_user_id=operator_user_id, operation=OperationType.REMOVE_MACHINE, target_type="machine", target_id=id,
                      detail={
                          "name": getattr(machine, 'machine_name', None),
                          "ip": getattr(machine, 'machine_ip', None),
                      },
                      error_reason=err)
-    return True
+    return {"removed": removed, "blocked": blocked}
 #######################################
 
 
@@ -323,6 +342,34 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
     # 字段名翻译：前端 disk_size -> 模型 disk_size_gb。
     if 'disk_size' in fields:
         fields['disk_size_gb'] = fields.pop('disk_size')
+
+    # IP 变更自愈（2026-09）：新 IP 首连 + 证书指纹比对——同一证书换 IP → 自动导出新 pin；
+    # 指纹不匹配（证书也换了）→ 拒绝，防机器记录被劫持到攻击者机器。
+    new_ip = str(fields.get('machine_ip') or '').strip() if fields.get('machine_ip') is not None else None
+    if new_ip and new_ip != getattr(machine, 'machine_ip', None):
+        from ..utils.cert_utils import der_cert_to_pem
+        from .container_module.node_comms import _fetch_peer_cert, _pin_file, request_wss_restart
+
+        try:
+            fingerprint, cert_der = _fetch_peer_cert(new_ip)
+        except Exception as e:
+            err = ValueError(f"machine_ip change failed: cannot reach {new_ip} over TLS: {e}")
+            setattr(err, 'error_reason', 'ip_change_unreachable')
+            raise err
+        expected = getattr(machine, 'node_cert_fingerprint', None)
+        if not expected or fingerprint != expected:
+            err = ValueError(f"machine_ip change refused: {new_ip} presents a different certificate (re-register instead)")
+            setattr(err, 'error_reason', 'ip_change_fingerprint_mismatch')
+            raise err
+        # 同一证书换 IP → 导出新 pin + 重建 WSS pin bundle（Node→Ctrl WSS 校验链）
+        try:
+            pin_path = _pin_file(new_ip)
+            pin_path.parent.mkdir(parents=True, exist_ok=True)
+            pin_path.write_bytes(der_cert_to_pem(cert_der))
+            request_wss_restart("pin_bundle_changed")
+        except Exception as e:  # pragma: no cover
+            print(f"[machine-ip-change] pin export failed for {new_ip}: {e}")
+        fields['machine_ip'] = new_ip
     if str(fields.get('machine_status', '')).lower() == MACHINE_DISPLAY_MAINTENANCE:
         raise ValueError("machine_status no longer accepts maintenance; use is_maintenance")
     if 'is_maintenance' in fields:

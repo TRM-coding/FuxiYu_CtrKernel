@@ -18,6 +18,11 @@ def get_value(key: str, *, session: Session) -> str | None:
     return setting.value if setting is not None else None
 
 
+def list_settings(*, session: Session) -> list[SystemSetting]:
+    stmt = select(SystemSetting).order_by(SystemSetting.key)
+    return list(session.scalars(stmt).all())
+
+
 def create_setting(
     *,
     key: str,
@@ -46,6 +51,19 @@ def update_setting(
         setting.description = description
     session.flush()
     return True
+
+
+def delete_settings(*, keys: list[str] | tuple[str, ...], session: Session) -> int:
+    deleted = 0
+    for key in keys:
+        setting = get_by_key(key, session=session)
+        if setting is None:
+            continue
+        session.delete(setting)
+        deleted += 1
+    if deleted:
+        session.flush()
+    return deleted
 
 
 def seed_setting(

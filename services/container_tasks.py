@@ -9,13 +9,13 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
 from pydantic import BaseModel, Field
-from ..config import AppConfig
 from ..extensions import session_scope
 
 from ..constant import *
 from sqlalchemy.exc import IntegrityError
 from ..repositories import containers_repo, machine_repo, machine_permission_repo, user_repo, long_term_container_repo
 from .operation_log_tasks import write_operation_log as write_op_log
+from . import settings_tasks
 from ..repositories import containers_repo as container_repo
 from ..repositories import container_ssh_login_repo
 from ..repositories.machine_repo import *
@@ -49,10 +49,13 @@ from .container_module.utils import (
     derive_allocated_limits,
     select_gpu_allowance,
 )
-from ..repositories.long_term_container_repo import get_long_term_container_limit
 from ..repositories.containers_repo import _binding_role_value, _root_user_ids_from_bindings, derive_port_mappings
 
 logger = logging.getLogger(__name__)
+
+
+def get_long_term_container_limit() -> int:
+    return settings_tasks.get_long_term_container_limit()
 
 
 
@@ -400,7 +403,7 @@ def unpause_container(container_id: int, operator_user_id: int | None = None) ->
             with session_scope() as session:
                 freeze_state = container_disk_freeze_state_repo.get(container_id, session=session)
                 if freeze_state is not None:
-                    grace_days = getattr(AppConfig, "CONTAINER_DISK_FREEZE_GRACE_DAYS", 3)
+                    grace_days = settings_tasks.get_container_disk_freeze_grace_days()
                     container_disk_freeze_state_repo.set_grace(container_id, grace_days, session=session)
             if freeze_state is not None:
                 logger.info(
@@ -904,7 +907,7 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         if fs:
             from datetime import datetime
             days_frozen = (datetime.utcnow() - fs.first_frozen_at).days if fs.first_frozen_at else 0
-            escalation_days = int(getattr(AppConfig, "CONTAINER_DISK_FREEZE_ESCALATION_DAYS", 7) or 7)
+            escalation_days = settings_tasks.get_container_disk_freeze_escalation_days()
             freeze_state_val = {
                 "is_frozen": True,
                 "first_frozen_at": fs.first_frozen_at.isoformat() if fs.first_frozen_at else None,
@@ -926,7 +929,7 @@ def get_container_detail_information(container_id:int)->container_detail_informa
             )
     except Exception:
         logger.warning("failed to read ssh login record for container %s", container.id)
-    cleanup_days = int(getattr(AppConfig, "CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
+    cleanup_days = settings_tasks.get_container_cleanup_after_days()
     cleanup_info = build_cleanup_info(
         ssh_record.last_ssh_login_time if ssh_record else None,
         cleanup_days,
@@ -1050,7 +1053,7 @@ def list_all_container_bref_information(
         if freeze_state and freeze_state.first_frozen_at:
             from datetime import datetime
             freeze_days_frozen = (datetime.utcnow() - freeze_state.first_frozen_at).days
-            freeze_escalation_days = int(getattr(AppConfig, "CONTAINER_DISK_FREEZE_ESCALATION_DAYS", 7) or 7)
+            freeze_escalation_days = settings_tasks.get_container_disk_freeze_escalation_days()
         with session_scope(commit=False) as session:
             ssh_record = container_ssh_login_repo.get_by_machine_container(
                 container.machine_id,
@@ -1058,7 +1061,7 @@ def list_all_container_bref_information(
                 session=session,
             )
         cleanup_days = 7
-        cleanup_days = int(getattr(AppConfig, "CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
+        cleanup_days = settings_tasks.get_container_cleanup_after_days()
         cleanup_info = build_cleanup_info(
             ssh_record.last_ssh_login_time if ssh_record else None,
             cleanup_days,

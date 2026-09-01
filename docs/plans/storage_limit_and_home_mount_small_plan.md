@@ -1,4 +1,6 @@
-﻿# Plan: 容器磁盘用量检测与管控
+# Plan: 容器磁盘用量检测与管控
+
+> 2026-09 ??????????? `CONTAINER_*` / `ANNOUNCEMENT_*` env ??????????????????? `system_settings`??????? `settings_tasks.SETTING_DEFINITIONS` ????????? `settings_tasks.get_*` getter ???`.env.example` ?????? settings ????
 
 ## 方针
 
@@ -80,7 +82,7 @@ def get_container_disk_usage(container_id: int, timeout: float = 10.0) -> dict |
 
 **新文件**: `/home/wyw/FuxiYu_CtrKernel/schemas/container_disk_check_task.py`
 
-参照 `container_ssh_refresh_task.py`：分页遍历 DB 容器、`parallel_node_calls` 并发、记录日志。
+参考当前 scheduler 模式：分页读取 DB 容器记录，消费 WSS 已落库的磁盘快照字段，不再并发请求 Node。
 
 | 配置项 | 默认值 |
 |---|---|

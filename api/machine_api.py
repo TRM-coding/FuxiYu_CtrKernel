@@ -166,13 +166,18 @@ def remove_machine_api(
 ):
     """删除一组机器记录。"""
 
-    success = machine_service.Remove_machine(
+    result = machine_service.Remove_machine(
         machine_id=message.machine_ids,
         operator_user_id=operator_user_id,
     )
-    if success:
-        return {"success": 1, "message": "Machine(s) removed successfully"}
-    return _error(500, "Failed to remove machine(s)", "remove_failed")
+    if result["blocked"]:
+        # 2026-09 决策：机器上仍有容器 → 拒绝删除，提示先手动清理（不自动级联删）
+        details = "；".join(
+            f"机器「{b.get('name') or b['machine_id']}」仍有 {b['container_count']} 个容器"
+            for b in result["blocked"]
+        )
+        return _error(409, f"以下机器未删除，请先手动清理容器：{details}", "machine_has_containers")
+    return {"success": 1, "message": "Machine(s) removed successfully"}
 
 
 #####################

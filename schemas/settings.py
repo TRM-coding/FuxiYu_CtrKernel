@@ -1,6 +1,35 @@
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from .common import SuccessMessageResponse
+
+
+class SettingItem(BaseModel):
+    key: str
+    label: str
+    group: str
+    value_type: str
+    value: Any
+    default_value: Any
+    description: str | None = None
+    unit: str | None = None
+    min_value: int | None = None
+    max_value: int | None = None
+    multiline: bool = False
+
+
+class SystemSettingsResponse(BaseModel):
+    success: int | bool = 1
+    settings: list[SettingItem | dict[str, Any]]
+
+
+class UpdateSystemSettingsRequest(BaseModel):
+    values: dict[str, Any] = Field(..., description="按 setting key 写入的新值。")
+
+
+class UpdateSystemSettingsResponse(SystemSettingsResponse):
+    message: str = "settings updated"
 
 
 #####################

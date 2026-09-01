@@ -3,13 +3,17 @@ import time
 import logging
 from datetime import datetime, timedelta
 
-from ..config import AppConfig
 from ..extensions import session_scope
 from ..repositories import containers_repo, machine_repo
-from ..services import container_tasks
+from ..services import container_tasks, settings_tasks
 
 logger = logging.getLogger(__name__)
 _SCHEDULER_STATE: dict[str, object] = {}
+_DISK_CHECK_CACHE: dict[str, float] = {}
+
+
+def _disk_check_cache(cache: dict[str, float] | None = None) -> dict[str, float]:
+    return cache if isinstance(cache, dict) else _DISK_CHECK_CACHE
 
 
 def check_all_containers_disk_usage_once(page_size: int = 200) -> None:
@@ -59,8 +63,7 @@ def _usage_from_db(container) -> dict | None:
 
 def _evaluate_limits(container, usage: dict) -> None:
     """评估磁盘用量，根据 soft/hard 阈值执行告警/冻结（Phase 3 启用）。"""
-    _app = AppConfig
-    enabled = bool(getattr(_app, "CONTAINER_DISK_CHECK_ENABLED", False))
+    enabled = settings_tasks.get_container_disk_check_enabled()
     if not enabled:
         return
 
@@ -87,8 +90,8 @@ def _evaluate_limits(container, usage: dict) -> None:
 
     usage_percent = (total_bytes / limit_bytes) * 100
 
-    soft_limit = getattr(_app, "CONTAINER_DISK_SOFT_LIMIT_PERCENT", 80)
-    hard_limit = getattr(_app, "CONTAINER_DISK_HARD_LIMIT_PERCENT", 100)
+    soft_limit = settings_tasks.get_container_disk_soft_limit_percent()
+    hard_limit = settings_tasks.get_container_disk_hard_limit_percent()
 
     overlay_rw = container_data.get("overlay_rw_bytes") or 0
     bind_mount = container_data.get("bind_mount_bytes") or 0
@@ -115,10 +118,10 @@ def _evaluate_limits(container, usage: dict) -> None:
         f"overlay={_fmt_bytes(overlay_rw)} bind={_fmt_bytes(bind_mount)}"
     )
 
-    response_enabled = getattr(_app, "CONTAINER_DISK_RESPONSE_ENABLED", False)
+    response_enabled = settings_tasks.get_container_disk_response_enabled()
 
     # 非持久容器只做检测，不接受容量响应（不 pause / 不发邮件）。
-    # 此检查先于全局 CONTAINER_DISK_RESPONSE_ENABLED 判断，
+    # 此检查先于全局 settings: container.disk_response_enabled 判断，
     # 方便在关闭响应的情况下从日志验证行为，无影响上线。
     from ..repositories.long_term_container_repo import is_long_term
     with session_scope(commit=False) as session:
@@ -130,7 +133,7 @@ def _evaluate_limits(container, usage: dict) -> None:
 
     # ── 重置检查（所有容器，不区分长期/短期）──
     from ..repositories import container_disk_freeze_state_repo as freeze_state_repo
-    reset_pct = getattr(_app, "CONTAINER_DISK_FREEZE_RESET_PERCENT", 95)
+    reset_pct = settings_tasks.get_container_disk_freeze_reset_percent()
     if usage_percent < reset_pct:
         with session_scope() as session:
             reset_done = freeze_state_repo.reset(container.id, session=session)
@@ -144,7 +147,7 @@ def _evaluate_limits(container, usage: dict) -> None:
     if usage_percent >= hard_limit:
         logger.error("[disk-check] HARD LIMIT exceeded: %s", log_msg)
         if response_enabled:
-            _handle_hard_limit_with_escalation(container, usage, _app)
+            _handle_hard_limit_with_escalation(container, usage, _DISK_CHECK_CACHE)
         else:
             # 短期容器：不做动作，但检查是否有遗留冻结状态（来自曾是长期的时期）
             _log_freeze_state_if_exists(container)
@@ -152,7 +155,7 @@ def _evaluate_limits(container, usage: dict) -> None:
     elif usage_percent >= soft_limit:
         logger.warning("[disk-check] SOFT LIMIT exceeded: %s", log_msg)
         if response_enabled:
-            _handle_soft_limit(container, usage, _app)
+            _handle_soft_limit(container, usage, _DISK_CHECK_CACHE)
         else:
             logger.info("[disk-check] response disabled, skip action for container %s", container.id)
     else:
@@ -169,16 +172,14 @@ def _fmt_bytes(b: int) -> str:
     return f"{b}B"
 
 
-def _handle_soft_limit(container, usage: dict, app) -> None:
+def _handle_soft_limit(container, usage: dict, cache: dict[str, float] | None = None) -> None:
     """快满时发邮件提醒。同一容器 24 小时内不重复。"""
     from ..utils.mail import send as send_mail
 
     # 冷却: 24 小时
     last_key = f"_soft_limit_last_sent_{container.id}"
     now_ts = time.time()
-    last_sent = getattr(app, '_disk_check_cache', {}) if app else {}
-    if not isinstance(last_sent, dict):
-        last_sent = {}
+    last_sent = _disk_check_cache(cache)
     if now_ts - last_sent.get(last_key, 0) < 24 * 3600:
         return
 
@@ -194,7 +195,7 @@ def _handle_soft_limit(container, usage: dict, app) -> None:
 
     container_data = usage.get("container", {})
     total_gb = (container_data.get("total_bytes") or 0) / (1024**3)
-    limit_gb = _get_limit_gb(container, app)
+    limit_gb = _get_limit_gb(container)
     usage_pct = (total_gb / limit_gb * 100) if limit_gb > 0 else 0
 
     subject = f"伏羲平台 - 容器 {container.name} 磁盘使用接近上限"
@@ -211,11 +212,9 @@ def _handle_soft_limit(container, usage: dict, app) -> None:
         except Exception as e:
             logger.warning("[disk-check] soft limit email failed to %s: %s", email, e)
     last_sent[last_key] = now_ts
-    if app:
-        app._disk_check_cache = last_sent
 
 
-def _handle_hard_limit(container, usage: dict, app) -> None:
+def _handle_hard_limit(container, usage: dict, cache: dict[str, float] | None = None) -> None:
     """超限时 docker pause 容器 + 发邮件。"""
     from ..utils.mail import send as send_mail
 
@@ -227,15 +226,13 @@ def _handle_hard_limit(container, usage: dict, app) -> None:
 
     container_data = usage.get("container", {})
     total_gb = (container_data.get("total_bytes") or 0) / (1024**3)
-    limit_gb = _get_limit_gb(container, app)
+    limit_gb = _get_limit_gb(container)
     usage_pct = (total_gb / limit_gb * 100) if limit_gb > 0 else 0
 
     # 冷却: 同一容器 6 小时内不重复发邮件
     last_key = f"_hard_limit_last_sent_{container.id}"
     now_ts = time.time()
-    last_sent = getattr(app, '_disk_check_cache', {}) if app else {}
-    if not isinstance(last_sent, dict):
-        last_sent = {}
+    last_sent = _disk_check_cache(cache)
     if now_ts - last_sent.get(last_key, 0) < 6 * 3600:
         # 仍在冷却中，但容器仍可能需 pause（首次之后的状态检查）
         pass
@@ -254,8 +251,6 @@ def _handle_hard_limit(container, usage: dict, app) -> None:
             except Exception as ex:
                 logger.warning("[disk-check] hard limit email failed to %s: %s", e, ex)
         last_sent[last_key] = now_ts
-        if app:
-            app._disk_check_cache = last_sent
 
     # docker pause — 仅在线容器执行
     try:
@@ -273,7 +268,7 @@ def _handle_hard_limit(container, usage: dict, app) -> None:
         logger.error("[disk-check] pause failed for container %s: %s", container.id, e)
 
 
-def _handle_hard_limit_with_escalation(container, usage: dict, app) -> None:
+def _handle_hard_limit_with_escalation(container, usage: dict, cache: dict[str, float] | None = None) -> None:
     """长期容器 hard limit 响应：冻结记录 + 宽限判断 + 升级判断。
 
     状态追踪（upsert、宽限、升级天数）总是执行；
@@ -300,11 +295,11 @@ def _handle_hard_limit_with_escalation(container, usage: dict, app) -> None:
 
     # ── 升级判断 ──
     days_frozen = (datetime.utcnow() - freeze_state.first_frozen_at).days
-    escalation_days = getattr(app, "CONTAINER_DISK_FREEZE_ESCALATION_DAYS", 7)
+    escalation_days = settings_tasks.get_container_disk_freeze_escalation_days()
     if days_frozen >= escalation_days:
-        _handle_freeze_escalation(container, usage, app, days_frozen)
+        _handle_freeze_escalation(container, usage, cache, days_frozen)
     else:
-        _handle_hard_limit(container, usage, app)
+        _handle_hard_limit(container, usage, cache)
 
 
 def _log_freeze_state_if_exists(container) -> None:
@@ -327,21 +322,24 @@ def _log_freeze_state_if_exists(container) -> None:
                    container.id, getattr(container, 'name', '?'), days_frozen, grace_info)
 
 
-def _handle_freeze_escalation(container, usage: dict, app, days_frozen: int) -> None:
+def _handle_freeze_escalation(
+    container,
+    usage: dict,
+    cache: dict[str, float] | None = None,
+    days_frozen: int = 0,
+) -> None:
     """冻结满 N 天仍超限 → remove_container + 通知邮件。"""
     from ..utils.mail import send as send_mail
 
     container_data = usage.get("container", {})
     total_gb = (container_data.get("total_bytes") or 0) / (1024**3)
-    limit_gb = _get_limit_gb(container, app)
+    limit_gb = _get_limit_gb(container)
     usage_pct = (total_gb / limit_gb * 100) if limit_gb > 0 else 0
 
     # 冷却: 同一容器 24 小时内不重复发送升级邮件
     last_key = f"_escalation_last_sent_{container.id}"
     now_ts = time.time()
-    last_sent = getattr(app, '_disk_check_cache', {}) if app else {}
-    if not isinstance(last_sent, dict):
-        last_sent = {}
+    last_sent = _disk_check_cache(cache)
 
     if now_ts - last_sent.get(last_key, 0) < 24 * 3600:
         pass  # 仍在冷却中，但仍执行 remove
@@ -367,8 +365,6 @@ def _handle_freeze_escalation(container, usage: dict, app, days_frozen: int) -> 
                 except Exception as ex:
                     logger.warning("[disk-check] escalation email failed to %s: %s", e, ex)
             last_sent[last_key] = now_ts
-            if app:
-                app._disk_check_cache = last_sent
 
     # ── 删除容器 ──
     try:
@@ -425,7 +421,7 @@ def _clean_mount_immediately(container) -> None:
                      container.id, bind_mount, e)
 
 
-def _get_limit_gb(container, app) -> float:
+def _get_limit_gb(container) -> float:
     # 容器磁盘上限（语义收敛 2026-08）：max_disk_size_gb；disk_size_gb 改显示用
     try:
         machine = container.machine
@@ -435,13 +431,15 @@ def _get_limit_gb(container, app) -> float:
     return float(max_disk_size_gb)
 
 
-def start_container_disk_check_scheduler(interval_seconds: int = 900) -> threading.Thread | None:
+def start_container_disk_check_scheduler(interval_seconds: int | None = None) -> threading.Thread | None:
     """
     启动后台定期磁盘检测任务。
-    仅在 CONTAINER_DISK_CHECK_ENABLED=true 时启动。
+    仅在 settings: container.disk_check_enabled=true 时启动。
     """
-    if not getattr(AppConfig, "CONTAINER_DISK_CHECK_ENABLED", False):
+    if not settings_tasks.get_container_disk_check_enabled():
         return None
+    if interval_seconds is None:
+        interval_seconds = settings_tasks.get_container_disk_check_interval_seconds()
 
     key = "container_disk_check_scheduler"
     existing = _SCHEDULER_STATE.get(key)

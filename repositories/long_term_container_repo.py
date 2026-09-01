@@ -5,7 +5,6 @@ from typing import Sequence
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..config import AppConfig
 from ..constant import ROLE
 from ..models.long_term_container import LongTermContainer
 from ..models.usercontainer import UserContainer
@@ -60,8 +59,10 @@ def remove(container_id: int, *, session: Session) -> bool:
 
 
 def get_long_term_container_limit() -> int:
+    from ..services import settings_tasks
+
     try:
-        return max(0, int(getattr(AppConfig, "LONG_TERM_CONTAINER_LIMIT", 1) or 1))
+        return max(0, int(settings_tasks.get_long_term_container_limit() or 1))
     except Exception:
         return 1
 

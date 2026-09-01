@@ -34,7 +34,7 @@ def test_cleanup_expired_containers_sends_reminder_for_countdown(app, db_session
     _root, machine, container = create_container_graph()
     _ssh_record(db_session, machine.id, container.id, (datetime.utcnow() - timedelta(days=6, hours=13)).isoformat())
     reminded = []
-    monkeypatch.setattr(container_cleanup_task, "_send_cleanup_reminders_if_needed", lambda cid, info, app_obj: reminded.append((cid, info["cleanup_status"])))
+    monkeypatch.setattr(container_cleanup_task, "_send_cleanup_reminders_if_needed", lambda cid, info: reminded.append((cid, info["cleanup_status"])))
     monkeypatch.setattr(container_cleanup_task.container_tasks, "remove_container", lambda container_id: True)
 
     container_cleanup_task.cleanup_expired_containers_once(7)

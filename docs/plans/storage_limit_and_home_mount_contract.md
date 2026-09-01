@@ -1,4 +1,6 @@
-﻿# 容器磁盘用量检测与管控 — 收口合约
+# 容器磁盘用量检测与管控 — 收口合约
+
+> 2026-09 ??????????? `CONTAINER_*` / `ANNOUNCEMENT_*` env ??????????????????? `system_settings`??????? `settings_tasks.SETTING_DEFINITIONS` ????????? `settings_tasks.get_*` getter ???`.env.example` ?????? settings ????
 
 ## Phase 1：只读检测（两路求和）
 
@@ -119,7 +121,7 @@ start_container_disk_check_scheduler(app, interval_seconds=900)
 
 check_all_containers_disk_usage_once(page_size=200)
   → 分页遍历 containers_repo.list_containers()
-  → parallel_node_calls() 并发查询
+  → 读取 WSS 已落库的磁盘快照字段，不再并发请求 Node
   → 只 print 日志，不做限制操作
 ```
 

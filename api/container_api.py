@@ -10,11 +10,11 @@ from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
-from ..config import AppConfig
 from ..constant import OperationType, ROLE
 from ..extensions import session_scope
 from ..repositories import containers_repo
 from ..services import container_tasks as container_service
+from ..services import settings_tasks
 from ..services.operation_log_tasks import write_operation_log as write_op_log
 from ..utils.Container import Container_info
 from ..utils.parsers import parse_bool
@@ -762,7 +762,7 @@ def refresh_last_ssh_login_time_api(
         return _error(404, "Container not found", "container_not_found")
     try:
         last_time = container_service.get_container_last_ssh_login_time(container.id)
-        cleanup_days = int(getattr(AppConfig, "CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
+        cleanup_days = settings_tasks.get_container_cleanup_after_days()
         cleanup_info = container_service.build_cleanup_info(last_time, cleanup_days)
         threading.Thread(
             target=_refresh_disk_async,

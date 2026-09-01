@@ -18,8 +18,8 @@ class TestMountCleanupTask:
             container_mount_cleanup_task, "send",
             lambda *a, **kw: sent.append(a) or {"success": 1}
         )
-        monkeypatch.setattr(container_mount_cleanup_task.AppConfig, "CONTAINER_MOUNT_CLEANUP_ENABLED", True)
-        monkeypatch.setattr(container_mount_cleanup_task.AppConfig, "CONTAINER_MOUNT_CLEANUP_AFTER_DAYS", 14)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_after_days", lambda: 14)
 
         container_mount_cleanup_task.run_mount_cleanup_once()
 
@@ -53,8 +53,8 @@ class TestMountCleanupTask:
             "get_machine_ip_by_id",
             lambda mid, **kwargs: "10.0.0.2"
         )
-        monkeypatch.setattr(container_mount_cleanup_task.AppConfig, "CONTAINER_MOUNT_CLEANUP_ENABLED", True)
-        monkeypatch.setattr(container_mount_cleanup_task.AppConfig, "CONTAINER_MOUNT_CLEANUP_AFTER_DAYS", 14)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_after_days", lambda: 14)
 
         container_mount_cleanup_task.run_mount_cleanup_once()
 
@@ -85,8 +85,8 @@ class TestMountCleanupTask:
             container_mount_cleanup_task, "send",
             lambda *a, **kw: sent.append(a) or {"success": 1}
         )
-        monkeypatch.setattr(container_mount_cleanup_task.AppConfig, "CONTAINER_MOUNT_CLEANUP_ENABLED", True)
-        monkeypatch.setattr(container_mount_cleanup_task.AppConfig, "CONTAINER_MOUNT_CLEANUP_AFTER_DAYS", 14)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_after_days", lambda: 14)
 
         container_mount_cleanup_task.run_mount_cleanup_once()
 
@@ -128,8 +128,8 @@ class TestMountCleanupTask:
             "get_machine_ip_by_id",
             lambda mid, **kwargs: "10.0.0.1"
         )
-        monkeypatch.setattr(container_mount_cleanup_task.AppConfig, "CONTAINER_MOUNT_CLEANUP_ENABLED", True)
-        monkeypatch.setattr(container_mount_cleanup_task.AppConfig, "CONTAINER_MOUNT_CLEANUP_AFTER_DAYS", 14)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_after_days", lambda: 14)
 
         container_mount_cleanup_task.run_mount_cleanup_once()
 
@@ -156,8 +156,8 @@ class TestMountCleanupTask:
             "get_machine_ip_by_id",
             lambda mid, **kwargs: None  # machine not found
         )
-        monkeypatch.setattr(container_mount_cleanup_task.AppConfig, "CONTAINER_MOUNT_CLEANUP_ENABLED", True)
-        monkeypatch.setattr(container_mount_cleanup_task.AppConfig, "CONTAINER_MOUNT_CLEANUP_AFTER_DAYS", 14)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_after_days", lambda: 14)
 
         # should not raise
         container_mount_cleanup_task.run_mount_cleanup_once()
@@ -167,12 +167,12 @@ class TestMountCleanupScheduler:
     """start_mount_cleanup_scheduler 调度器。"""
 
     def test_returns_none_when_disabled(self, monkeypatch):
-        monkeypatch.setattr(container_mount_cleanup_task.AppConfig, "CONTAINER_MOUNT_CLEANUP_ENABLED", False)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: False)
         result = container_mount_cleanup_task.start_mount_cleanup_scheduler()
         assert result is None
 
     def test_returns_existing_thread_when_alive(self, monkeypatch):
-        monkeypatch.setattr(container_mount_cleanup_task.AppConfig, "CONTAINER_MOUNT_CLEANUP_ENABLED", True)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
 
         class _Thread:
             def is_alive(self):

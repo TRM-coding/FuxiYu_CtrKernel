@@ -8,7 +8,6 @@ import json
 
 from sqlalchemy import select
 
-from ..config import AppConfig
 from pydantic import BaseModel
 
 from ..constant import AnnouncementStatus, AnnouncementTargetType
@@ -19,6 +18,7 @@ from ..models.machine_permission import MachinePermission
 from ..models.user import User
 from ..models.usercontainer import UserContainer
 from ..repositories import announcement_repo
+from . import settings_tasks
 from ..utils.mail import send as send_mail, send_batch
 
 # ══════════════════════════════════════════════════════════════════════
@@ -139,7 +139,7 @@ def resolve_recipients(targets: list[TargetEntry]) -> ResolveResult:
                         email=user.email,
                     )
 
-    max_recipients = getattr(AppConfig, "ANNOUNCEMENT_MAX_RECIPIENTS", 200)
+    max_recipients = settings_tasks.get_announcement_max_recipients()
     if len(recipients_map) > max_recipients:
         raise ValueError("too_many_recipients")
 
@@ -261,7 +261,7 @@ def batch_send_drafts_service(
 
     单条失败不影响后续。
     """
-    max_batch = getattr(AppConfig, "ANNOUNCEMENT_BATCH_SEND_MAX", 20)
+    max_batch = settings_tasks.get_announcement_batch_send_max()
     if len(draft_ids) > max_batch:
         raise ValueError("batch_too_large")
     if not targets:

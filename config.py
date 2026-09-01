@@ -18,30 +18,6 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _env_text(name: str, default: str) -> str:
-    """读取可用 \n 写入 .env 的长文本配置。"""
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.replace("\\n", "\n")
-
-
-DEFAULT_IMAGE_PLATFORM_INJECTION_CONTENT = """USER root
-SHELL ["/bin/sh", "-c"]
-RUN set -eu; \\
-    if command -v apt-get >/dev/null 2>&1; then \\
-        apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server passwd && rm -rf /var/lib/apt/lists/*; \\
-    elif command -v apk >/dev/null 2>&1; then \\
-        apk add --no-cache openssh; \\
-    elif command -v dnf >/dev/null 2>&1; then \\
-        dnf install -y openssh-server shadow-utils && dnf clean all; \\
-    else \\
-        echo "unsupported package manager for Fuxi platform image injection" >&2; exit 1; \\
-    fi; \\
-    mkdir -p /run/sshd
-EXPOSE 22"""
-
-
 class SqlConfig:
     SQLNAME = "fuxi"
     SQLURL = "127.0.0.1"
@@ -114,54 +90,6 @@ class AppConfig(SqlConfig, KeyConfig):
     # Ctrl HTTPS 默认读取本仓库 certs/ 下的 ctrl.pem / ctrl-key.pem。
     SSL_CERT_PATH = os.getenv("SSL_CERT_PATH", "certs/ctrl.pem")
     SSL_KEY_PATH = os.getenv("SSL_KEY_PATH", "certs/ctrl-key.pem")
-    # 容器自动清理阈值（天）。这里只用于计算和展示，不在此处执行实际清理动作。
-    CONTAINER_CLEANUP_AFTER_DAYS = int(os.getenv("CONTAINER_CLEANUP_AFTER_DAYS", "7"))
-    # 每个用户最多可设置的长期容器数量。
-    LONG_TERM_CONTAINER_LIMIT = int(os.getenv("LONG_TERM_CONTAINER_LIMIT", "1"))
-    # 容器清理前邮件提醒节点，单位小时，逗号分隔。
-    CONTAINER_CLEANUP_REMINDER_HOURS = os.getenv("CONTAINER_CLEANUP_REMINDER_HOURS", "72,24,12")
-    # NodeKernel 并发请求线程池大小上限。
-    NODE_REQUEST_POOL_SIZE = int(os.getenv("NODE_REQUEST_POOL_SIZE", "8"))
-    # 并发化开关，通过环境变量可独立开关。
-    NODE_PARALLEL_ENABLED_MACHINES = os.getenv("NODE_PARALLEL_ENABLED_MACHINES", "true").lower() == "true"
-    NODE_PARALLEL_ENABLED_CONTAINERS = os.getenv("NODE_PARALLEL_ENABLED_CONTAINERS", "true").lower() == "true"
-    NODE_PARALLEL_ENABLED_SSH_REFRESH = os.getenv("NODE_PARALLEL_ENABLED_SSH_REFRESH", "true").lower() == "true"
-    # 容器磁盘检测配置（Phase 1: 只读，默认关闭）
-    CONTAINER_DISK_CHECK_ENABLED = os.getenv("CONTAINER_DISK_CHECK_ENABLED", "false").lower() == "true"
-    CONTAINER_DISK_CHECK_INTERVAL_SECONDS = int(os.getenv("CONTAINER_DISK_CHECK_INTERVAL_SECONDS", "900"))
-    CONTAINER_DISK_SOFT_LIMIT_PERCENT = int(os.getenv("CONTAINER_DISK_SOFT_LIMIT_PERCENT", "80"))
-    CONTAINER_DISK_HARD_LIMIT_PERCENT = int(os.getenv("CONTAINER_DISK_HARD_LIMIT_PERCENT", "100"))
-    CONTAINER_DISK_RESPONSE_ENABLED = os.getenv("CONTAINER_DISK_RESPONSE_ENABLED", "false").lower() == "true"
-    # 磁盘超限冻结升级配置（Phase 5-6）
-    CONTAINER_DISK_FREEZE_ESCALATION_DAYS = int(
-        os.getenv("CONTAINER_DISK_FREEZE_ESCALATION_DAYS", "7")
-    )
-    CONTAINER_DISK_FREEZE_GRACE_DAYS = int(
-        os.getenv("CONTAINER_DISK_FREEZE_GRACE_DAYS", "3")
-    )
-    CONTAINER_DISK_FREEZE_RESET_PERCENT = int(
-        os.getenv("CONTAINER_DISK_FREEZE_RESET_PERCENT", "95")
-    )
-    # 已删除容器 mount 清理配置（Phase 8）
-    CONTAINER_MOUNT_CLEANUP_ENABLED = os.getenv(
-        "CONTAINER_MOUNT_CLEANUP_ENABLED", "false"
-    ).lower() == "true"
-    CONTAINER_MOUNT_CLEANUP_INTERVAL_SECONDS = int(
-        os.getenv("CONTAINER_MOUNT_CLEANUP_INTERVAL_SECONDS", "86400")
-    )
-    CONTAINER_MOUNT_CLEANUP_AFTER_DAYS = int(
-        os.getenv("CONTAINER_MOUNT_CLEANUP_AFTER_DAYS", "14")
-    )
-    # 公告系统配置
-    ANNOUNCEMENT_MAX_RECIPIENTS = int(os.getenv("ANNOUNCEMENT_MAX_RECIPIENTS", "200"))
-    ANNOUNCEMENT_SEND_COOLDOWN_SECONDS = int(os.getenv("ANNOUNCEMENT_SEND_COOLDOWN_SECONDS", "60"))
-    ANNOUNCEMENT_BATCH_SEND_MAX = int(os.getenv("ANNOUNCEMENT_BATCH_SEND_MAX", "20"))
-    # 镜像构建平台注入片段：启动时 seed 到 system_settings，设置页后续编辑 DB 值。
-    IMAGE_PLATFORM_INJECTION_CONTENT = _env_text(
-        "IMAGE_PLATFORM_INJECTION_CONTENT",
-        DEFAULT_IMAGE_PLATFORM_INJECTION_CONTENT,
-    )
-
 
 def get_config(env: str | None = None):
     """

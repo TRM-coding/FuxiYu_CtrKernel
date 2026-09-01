@@ -21,7 +21,6 @@ from ...extensions import session_scope
 from ...repositories import machine_repo, containers_repo
 from ...repositories.container_ssh_login_repo import upsert_last_ssh_login_time
 from ..machine_tasks import Update_machine, is_machine_in_maintenance, is_machine_online_remote
-from ...utils.parallel import parallel_node_calls
 from .exceptions import NodeServiceError
 from .utils import _parse_last_ssh_time
 
@@ -303,7 +302,7 @@ def _node_probe_container(container, machine_ip: str, _app=None) -> dict | None:
     """封装单次 NodeKernel /container_status 查询。
 
     等同于原 for 循环内 ``get_container_status(machine_ip, container.name)``，
-    抽取为独立函数以适配 ``parallel_node_calls``。
+    抽取为独立函数以保留旧 HTTP 探活入口。
 
     *_app* 保留兼容旧调用签名，不再使用。
     """
