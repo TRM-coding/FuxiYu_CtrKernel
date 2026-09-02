@@ -4,7 +4,7 @@ repo 只接收显式 session，负责查询、写入和 flush；事务提交由 
 的 session_scope 决定。
 """
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ..models import AuthEntity, AuthGroup, AuthGroupEntity, UserGroup
@@ -21,6 +21,29 @@ def get_entity(code: str, *, session: Session) -> AuthEntity | None:
 
 def get_group(name: str, *, session: Session) -> AuthGroup | None:
     return session.scalars(select(AuthGroup).where(AuthGroup.name == name)).first()
+
+
+def get_group_by_id(group_id: int, *, session: Session) -> AuthGroup | None:
+    return session.get(AuthGroup, group_id)
+
+
+def list_entities(*, session: Session) -> list[AuthEntity]:
+    return list(session.scalars(select(AuthEntity).order_by(AuthEntity.code)))
+
+
+def list_groups(*, session: Session) -> list[AuthGroup]:
+    return list(session.scalars(select(AuthGroup).order_by(AuthGroup.name)))
+
+
+def list_group_entity_codes(*, session: Session) -> dict[int, set[str]]:
+    stmt = (
+        select(AuthGroupEntity.group_id, AuthEntity.code)
+        .join(AuthEntity, AuthGroupEntity.entity_id == AuthEntity.id)
+    )
+    result: dict[int, set[str]] = {}
+    for group_id, code in session.execute(stmt).all():
+        result.setdefault(group_id, set()).add(code)
+    return result
 
 
 def group_has_entity(group_id: int, entity_code: str, *, session: Session) -> bool:
@@ -98,6 +121,13 @@ def ensure_group(name: str, description: str, *, session: Session) -> AuthGroup:
     return group
 
 
+def create_group(name: str, description: str, *, session: Session) -> AuthGroup:
+    group = AuthGroup(name=name, description=description)
+    session.add(group)
+    session.flush()
+    return group
+
+
 def ensure_group_entity(group_id: int, entity_id: int, *, session: Session) -> None:
     stmt = select(AuthGroupEntity.group_id).where(
         AuthGroupEntity.group_id == group_id,
@@ -116,3 +146,12 @@ def ensure_user_group(user_id: int, group_id: int, *, session: Session) -> None:
     if session.scalars(stmt).first() is None:
         session.add(UserGroup(user_id=user_id, group_id=group_id))
         session.flush()
+
+
+def replace_group_entities(group_id: int, entity_codes: set[str], *, session: Session) -> None:
+    entities = list(session.scalars(select(AuthEntity).where(AuthEntity.code.in_(entity_codes))))
+    entity_ids = {ent.id for ent in entities}
+    session.execute(delete(AuthGroupEntity).where(AuthGroupEntity.group_id == group_id))
+    for entity_id in entity_ids:
+        session.add(AuthGroupEntity(group_id=group_id, entity_id=entity_id))
+    session.flush()

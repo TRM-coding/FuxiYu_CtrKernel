@@ -52,6 +52,15 @@ from .machine import (
     UpdateMachineResponse,
 )
 from .operation_log import OperationLogItem, OperationLogListQuery, OperationLogListResponse, OperationLogStatsResponse
+from .rbac import (
+    CreateRbacGroupRequest,
+    CreateRbacGroupResponse,
+    RbacEntityItem,
+    RbacGroupItem,
+    RbacMatrixResponse,
+    UpdateRbacGroupEntitiesRequest,
+    UpdateRbacGroupEntitiesResponse,
+)
 from .user import (
     ChangePasswordRequest,
     DeleteUserResponse,
@@ -90,6 +99,8 @@ __all__ = [
     "ContainerOperationResponse",
     "ContainerStatusRequest",
     "ContainerStatusResponse",
+    "CreateRbacGroupRequest",
+    "CreateRbacGroupResponse",
     "CreateContainerRequest",
     "CreateContainerResponse",
     "DeleteContainerRequest",
@@ -122,6 +133,9 @@ __all__ = [
     "OperationLogStatsResponse",
     "PageRequest",
     "PermissionValue",
+    "RbacEntityItem",
+    "RbacGroupItem",
+    "RbacMatrixResponse",
     "RefreshLastSshLoginTimeRequest",
     "RefreshLastSshLoginTimeResponse",
     "RegisterMachineByTrustAnchorRequest",
@@ -141,6 +155,8 @@ __all__ = [
     "SysSnapshotPayload",
     "UpdateMachineRequest",
     "UpdateMachineResponse",
+    "UpdateRbacGroupEntitiesRequest",
+    "UpdateRbacGroupEntitiesResponse",
     "UpdateRoleRequest",
     "UpdateUserFields",
     "UpdateUserRequest",

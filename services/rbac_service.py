@@ -8,6 +8,7 @@
 正式组挂载后由 seed 的 user_group 替代，判断函数对两者都放行）。
 """
 import logging
+import re
 
 from ..extensions import session_scope
 from ..repositories import auth_repo, machine_permission_repo, usercontainer_repo
@@ -38,9 +39,11 @@ AUTH_ENTITIES: list[tuple[str, str]] = [
     ("image:view", "镜像查看"),
     # settings
     ("settings:manage", "系统设置管理"),
+    # rbac
+    ("rbac:manage", "权限矩阵管理"),
     # 通配（显式权限点，不依赖任何组存在；operator 组 = 全部 entity，自动包含）
     ("bypass_resource", "资源判定通配：对所有资源放行"),
-    ("bypass_auth_entity", "实体权限通配：对所有权限点放行"), # 不包括bypass_resource
+    ("bypass_auth_entity", "实体权限通配：对非资源通配权限点放行"), # 不包括bypass_resource
 ]
 
 # 预设组：user（基础使用）/ operator（通配）
@@ -49,6 +52,22 @@ _GROUP_DEFS = {
     "user": ("基础用户组：查看机器 + 容器操作 + 查看镜像", _USER_DEFAULTS),
     "operator": ("运维组：通配权限", {"bypass_resource", "bypass_auth_entity"}),
 }
+
+_OPERATOR_LOCKED_ENTITIES = {"bypass_resource", "bypass_auth_entity"}
+_GROUP_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{1,63}$")
+
+
+def _manage_entity_for(entity_code: str) -> str | None:
+    """返回实体权限所属域的 manage 权限；bypass 与 manage 自身不派生。"""
+    normalized = str(entity_code or "").strip()
+    if not normalized or normalized.startswith("bypass_") or ":" not in normalized:
+        return None
+    domain, action = normalized.split(":", 1)
+    if action == "manage":
+        return None
+    manage_code = f"{domain}:manage"
+    valid_codes = {code for code, _ in AUTH_ENTITIES}
+    return manage_code if manage_code in valid_codes else None
 
 
 # ── seed（幂等；create_app 建表后调用一次） ─────────────────────────
@@ -106,9 +125,99 @@ def _has_entity_direct(user_id: int, entity_code: str) -> bool:
 
 def list_user_entities(user_id: int) -> list[str]:
     """用户持有的全部权限点（通配用户返回全部；否则逐点判定）。"""
-    if _has_entity_direct(user_id, "bypass_auth_entity"):
-        return [code for code, _ in AUTH_ENTITIES]
     return [code for code, _ in AUTH_ENTITIES if user_has_entity(user_id, code)]
+
+
+def list_rbac_matrix() -> dict:
+    """返回权限组 × 权限点矩阵，供管理页面展示。"""
+
+    entity_order = {code: index for index, (code, _) in enumerate(AUTH_ENTITIES)}
+    with session_scope(commit=False) as session:
+        entities = auth_repo.list_entities(session=session)
+        groups = auth_repo.list_groups(session=session)
+        group_entities = auth_repo.list_group_entity_codes(session=session)
+
+    entities_data = [
+        {
+            "id": ent.id,
+            "code": ent.code,
+            "name": ent.name,
+            "description": ent.description,
+        }
+        for ent in sorted(entities, key=lambda ent: (entity_order.get(ent.code, 9999), ent.code))
+    ]
+    groups_data = []
+    for group in groups:
+        codes = sorted(group_entities.get(group.id, set()), key=lambda code: (entity_order.get(code, 9999), code))
+        groups_data.append(
+            {
+                "id": group.id,
+                "name": group.name,
+                "description": group.description,
+                "entity_codes": codes,
+                "locked_entity_codes": sorted(_OPERATOR_LOCKED_ENTITIES) if group.name == "operator" else [],
+            }
+        )
+    return {"entities": entities_data, "groups": groups_data}
+
+
+def update_group_entities(group_id: int, entity_codes: list[str]) -> dict:
+    """替换某个权限组持有的权限点。"""
+
+    requested = {str(code).strip() for code in entity_codes if str(code).strip()}
+    valid_codes = {code for code, _ in AUTH_ENTITIES}
+    unknown = sorted(requested - valid_codes)
+    if unknown:
+        raise ValueError(f"unknown_auth_entities:{','.join(unknown)}")
+
+    entity_order = {code: index for index, (code, _) in enumerate(AUTH_ENTITIES)}
+    with session_scope() as session:
+        group = auth_repo.get_group_by_id(group_id, session=session)
+        if group is None:
+            raise ValueError("group_not_found")
+        if group.name == "operator":
+            requested.update(_OPERATOR_LOCKED_ENTITIES)
+        auth_repo.replace_group_entities(group.id, requested, session=session)
+        session.flush()
+        group_entities = auth_repo.list_group_entity_codes(session=session).get(group.id, set())
+
+    return {
+        "id": group_id,
+        "name": group.name,
+        "description": group.description,
+        "entity_codes": sorted(group_entities, key=lambda code: (entity_order.get(code, 9999), code)),
+        "locked_entity_codes": sorted(_OPERATOR_LOCKED_ENTITIES) if group.name == "operator" else [],
+    }
+
+
+def create_group(name: str, description: str | None, entity_codes: list[str]) -> dict:
+    """创建权限组，并写入初始权限点集合。"""
+
+    group_name = str(name or "").strip()
+    if not _GROUP_NAME_RE.match(group_name):
+        raise ValueError("invalid_group_name")
+
+    requested = {str(code).strip() for code in entity_codes if str(code).strip()}
+    valid_codes = {code for code, _ in AUTH_ENTITIES}
+    unknown = sorted(requested - valid_codes)
+    if unknown:
+        raise ValueError(f"unknown_auth_entities:{','.join(unknown)}")
+
+    entity_order = {code: index for index, (code, _) in enumerate(AUTH_ENTITIES)}
+    with session_scope() as session:
+        if auth_repo.get_group(group_name, session=session) is not None:
+            raise ValueError("group_exists")
+        group = auth_repo.create_group(group_name, str(description or "").strip(), session=session)
+        auth_repo.replace_group_entities(group.id, requested, session=session)
+        group_entities = auth_repo.list_group_entity_codes(session=session).get(group.id, set())
+        result = {
+            "id": group.id,
+            "name": group.name,
+            "description": group.description,
+            "entity_codes": sorted(group_entities, key=lambda code: (entity_order.get(code, 9999), code)),
+            "locked_entity_codes": [],
+        }
+    return result
 
 
 def user_has_entity(user_id: int, entity_code: str) -> bool:
@@ -118,19 +227,28 @@ def user_has_entity(user_id: int, entity_code: str) -> bool:
     显式加入组后以显式组为准）。db 访问收敛在 auth_repo。
     """
     try:
-        # 0) 实体通配：持有 bypass_auth_entity → 对所有权限点放行（不依赖任何组存在）
-        if _has_entity_direct(user_id, "bypass_auth_entity"):
+        normalized_code = str(entity_code or "").strip()
+        # 0) 实体通配：持有 bypass_auth_entity → 对非资源通配权限点放行（不依赖任何组存在）
+        if normalized_code != "bypass_resource" and _has_entity_direct(user_id, "bypass_auth_entity"):
             return True
         with session_scope(commit=False) as session:
             # 1) 显式组
-            if auth_repo.user_has_entity(user_id, entity_code, session=session):
+            if auth_repo.user_has_entity(user_id, normalized_code, session=session):
                 return True
 
-            # 2) 默认 user 组兜底：无任何组映射的用户
+            # 2) 同域 manage 高阶拥有：{type}:manage → {type}:*
+            manage_code = _manage_entity_for(normalized_code)
+            if manage_code and auth_repo.user_has_entity(user_id, manage_code, session=session):
+                return True
+
+            # 3) 默认 user 组兜底：无任何组映射的用户
             if not auth_repo.user_has_any_group(user_id, session=session):
                 default = auth_repo.get_group("user", session=session)
                 if default is not None:
-                    return auth_repo.group_has_entity(default.id, entity_code, session=session)
+                    if auth_repo.group_has_entity(default.id, normalized_code, session=session):
+                        return True
+                    if manage_code and auth_repo.group_has_entity(default.id, manage_code, session=session):
+                        return True
             return False
     except Exception as e:
         logger.warning("user_has_entity check failed: %s", e)
