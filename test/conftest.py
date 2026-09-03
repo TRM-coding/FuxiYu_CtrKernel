@@ -1,3 +1,4 @@
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -26,7 +27,6 @@ def _assert_sqlite_database_uri(app):
     if not uri.startswith("sqlite://"):
         raise RuntimeError(f"Refusing to run tests against non-SQLite database URI: {uri}")
 
-
 @pytest.fixture(scope="session", autouse=True)
 def _safe_test_environment():
     with tempfile.TemporaryDirectory(prefix="fuxiyu-ctrl-test-") as tmpdir:
@@ -40,6 +40,9 @@ def _safe_test_environment():
             old_env[key] = os.environ.get(key)
             os.environ[key] = value
         yield
+        # Windows：app 的 FileHandler 会一直持有 ctrl.log，先关掉全部日志
+        # 句柄再删临时目录，否则清理阶段报 PermissionError。
+        logging.shutdown()
         for key, old_value in old_env.items():
             if old_value is None:
                 os.environ.pop(key, None)
@@ -126,3 +129,13 @@ def mock_external_services(monkeypatch, request):
     monkeypatch.setattr("FuxiYu_CtrKernel.services.container_tasks.container_stopping_status_heartbeat", _fake_thread)
     monkeypatch.setattr("FuxiYu_CtrKernel.services.container_tasks.container_restart_status_heartbeat", _fake_thread)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _clear_reachability_cache():
+    """机器可达性 TTL 缓存是模块级全局：每个测试前后清空，防止跨测试污染。"""
+    from FuxiYu_CtrKernel.services import machine_tasks
+    machine_tasks._reach_cache.clear()
+    yield
+    machine_tasks._reach_cache.clear()
+

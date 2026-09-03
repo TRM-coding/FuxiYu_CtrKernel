@@ -79,7 +79,7 @@ def create_machine(machinename:str,
     )
     db.session.add(machine)
     db.session.commit()
-    return True
+    return machine
 
 def delete_machine(machine_id:int)->bool:
     machine=get_by_id(machine_id)

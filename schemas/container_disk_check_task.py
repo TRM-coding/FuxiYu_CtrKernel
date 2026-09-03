@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from flask import Flask, current_app
 
 from ..repositories import containers_repo
+from ..constant import OperationType
 from ..services import container_tasks
 from ..utils.parallel import parallel_node_calls
 
@@ -295,8 +296,8 @@ def _handle_hard_limit(container, usage: dict, app) -> None:
         if isinstance(res, dict) and res.get("success") == 1:
             containers_repo.update_container(container.id, commit=True,
                 container_status=ContainerStatus.PAUSED)
-        from ..repositories.operation_log_repo import write as write_op_log
-        write_op_log(operation="pause_container", target_type="container",
+        from ..services.operation_log_tasks import write_operation_log as write_op_log
+        write_op_log(success=True, operation=OperationType.PAUSE_CONTAINER, target_type="container",
                      target_id=container.id,
                      detail={"reason": "disk_hard_limit", "usage": f"{total_gb:.1f}GB/{limit_gb:.1f}GB"})
     except Exception as e:
@@ -412,9 +413,9 @@ def _handle_freeze_escalation(container, usage: dict, app, days_frozen: int) -> 
             f"[disk-check] escalation: removed container {container.id} "
             f"({getattr(container, 'name', '?')}) after {days_frozen}d frozen"
         )
-        from ..repositories.operation_log_repo import write as write_op_log
-        write_op_log(
-            operation="remove_container",
+        from ..services.operation_log_tasks import write_operation_log as write_op_log
+        write_op_log(success=True,
+            operation=OperationType.REMOVE_CONTAINER,
             target_type="container",
             target_id=container.id,
             detail={

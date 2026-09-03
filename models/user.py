@@ -1,12 +1,11 @@
 from datetime import datetime
 
 from ..constant import PERMISSION
-from ..extensions import db, login_manager
-from flask_login import UserMixin
+from ..extensions import db
 
 
 
-class User(db.Model, UserMixin):
+class User(db.Model):
     __tablename__ = "users"
 
     id = db.Column(db.Integer, primary_key=True)
@@ -39,7 +38,3 @@ class User(db.Model, UserMixin):
     def __repr__(self) -> str:
         return f"<User {self.username}>"
 
-
-@login_manager.user_loader
-def load_user(user_id: str):
-    return User.query.get(int(user_id))

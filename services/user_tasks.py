@@ -6,8 +6,9 @@ from ..repositories.user_repo import *
 from ..repositories import authentications_repo
 from ..repositories import registration_code_repo
 from ..repositories import usercontainer_repo, containers_repo, long_term_container_repo
+from .operation_log_tasks import write_operation_log as write_op_log
 from ..utils.mail import send as send_mail
-from ..constant import ROLE, ContainerStatus
+from ..constant import ROLE, ContainerStatus, OperationType
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 import secrets
@@ -42,12 +43,13 @@ class user_detail_information(BaseModel):
 
 #####################################
 #登录验证
-def Login(username: str, password: str):
+def Login(username: str, password: str, *, remember: bool = False):
     """用户登录验证并生成认证 token
     
     Args:
         username: 用户名
         password: 密码
+        remember: 是否长期 - 默认False，控制cookeis生命周期
         
     Returns:
         tuple: (是否成功, User对象或错误原因, token或None)
@@ -55,8 +57,10 @@ def Login(username: str, password: str):
                - 密码错误: (False, "password_incorrect", None)
                - 登录成功: (True, User对象, token)
     """
-    # 检查用户是否存在
+    # 检查用户是否存在：用户名优先；用户名规则不含 @，可无歧义地回退按邮箱查
     user = User.query.filter_by(username=username).first()
+    if not user:
+        user = User.query.filter_by(email=username).first()
     if not user:
         return False, "user_not_found", None
     
@@ -67,6 +71,8 @@ def Login(username: str, password: str):
     # 登录成功，生成 token
     token = secrets.token_urlsafe(32)
     expires_at = datetime.utcnow() + timedelta(hours=24)
+    if remember: 
+        expires_at = datetime.utcnow() + timedelta(days=30)
     auth = authentications_repo.create_auth(token, user.id, expires_at)
     
     return True, user, auth.token
@@ -132,14 +138,18 @@ def Register(username: str, email: str, password: str, graduation_year):
         return False, "email_exists", None
     
     # 创建新用户
-    new_user = create_user( # 改用repository层的create_user函数
-        username=username,
-        email=email,
-        password_hash=generate_password_hash(password),
-        graduation_year=graduation_year
-    )
-    from ..repositories.operation_log_repo import write as write_op_log
-    write_op_log(operation="register_user", target_type="user", target_id=new_user.id,
+    try:
+        new_user = create_user( # 改用repository层的create_user函数
+            username=username,
+            email=email,
+            password_hash=generate_password_hash(password),
+            graduation_year=graduation_year
+        )
+    except Exception as e:
+        write_op_log(success=False, operation=OperationType.REGISTER_USER, target_type="user", target_id=0,
+                     detail={"username": username, "email": email}, error_reason=str(e))
+        raise
+    write_op_log(success=True, operation=OperationType.REGISTER_USER, target_type="user", target_id=new_user.id,
                  detail={"username": username, "email": email})
     return True, new_user, None
 #####################################
@@ -163,19 +173,24 @@ def Change_password(user: User, old_password: str, new_password: str) -> bool:
     try:
         if not check_password_hash(user.password_hash, old_password):
             print("Old password does not match.")
+            write_op_log(success=False, operator_user_id=user.id, operation=OperationType.CHANGE_PASSWORD,
+                         target_type="user", target_id=user.id, detail={}, error_reason="old_password_incorrect")
             return False
     except Exception as e:
         print(f"Error checking old password hash: {e}")
+        write_op_log(success=False, operator_user_id=user.id, operation=OperationType.CHANGE_PASSWORD,
+                     target_type="user", target_id=user.id, detail={}, error_reason=str(e))
         return False
     try:
         update_user(user.id, password_hash=generate_password_hash(new_password))
     except Exception as e:
         print(f"Error updating password in database: {e}")
+        write_op_log(success=False, operator_user_id=user.id, operation=OperationType.CHANGE_PASSWORD,
+                     target_type="user", target_id=user.id, detail={}, error_reason=str(e))
         return False
     print("Password changed successfully.")
-    from ..repositories.operation_log_repo import write as write_op_log
-    write_op_log(operator_user_id=user.id, operation="change_password",
-                 target_type="user", target_id=user.id)
+    write_op_log(success=True, operator_user_id=user.id, operation=OperationType.CHANGE_PASSWORD,
+                 target_type="user", target_id=user.id, detail={})
     return True
 
 #####################################
@@ -195,11 +210,14 @@ def Delete_user(user_id: int) -> bool:
         return False
 
     # 最终删除用户
+    user = get_by_id(user_id)
     if delete_user(user_id=user_id):
-        from ..repositories.operation_log_repo import write as write_op_log
-        write_op_log(operation="delete_user", target_type="user", target_id=user_id)
+        write_op_log(success=True, operation=OperationType.DELETE_USER, target_type="user", target_id=user_id,
+                     detail={"username": getattr(user, 'username', None)})
         return True
 
+    write_op_log(success=False, operation=OperationType.DELETE_USER, target_type="user", target_id=user_id,
+                 detail={"username": getattr(user, 'username', None)}, error_reason="delete_failed")
     return False
     
 #####################################
@@ -330,9 +348,14 @@ def Reset_password(user_id:int)->str|None:
     if not user:
         return None
     new_password=f"{user.graduation_year}{user.username}"
-    update_user(user_id,password_hash=generate_password_hash(new_password))
-    from ..repositories.operation_log_repo import write as write_op_log
-    write_op_log(operation="reset_password", target_type="user", target_id=user_id)
+    try:
+        update_user(user_id,password_hash=generate_password_hash(new_password))
+    except Exception as e:
+        write_op_log(success=False, operation=OperationType.RESET_PASSWORD, target_type="user", target_id=user_id,
+                     detail={"username": user.username}, error_reason=str(e))
+        raise
+    write_op_log(success=True, operation=OperationType.RESET_PASSWORD, target_type="user", target_id=user_id,
+                 detail={"username": user.username})
     return new_password
 #####################################
 

@@ -6,11 +6,6 @@ from ..schemas.user_schema import user_schema, users_schema
 from ..constant import PERMISSION
 
 
-def _resolve_auth_token():
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        auth = auth[7:]
-    return request.cookies.get("auth_token", "") or request.headers.get("token", "") or auth.strip()
 from sqlalchemy.exc import IntegrityError
 
 
@@ -20,7 +15,7 @@ def add_machine_api():
     通信数据格式：
 	发送格式：
 	{
-		"token",
+
         "machine_name",
         "machine_ip",
         "machine_type",
@@ -42,9 +37,9 @@ def add_machine_api():
         ["error_reason": "xxxx"]
 	}
     '''
-    if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+    if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
-    if (not user_repo.check_permission(request.headers.get("token", ""), required_permission=PERMISSION.OPERATOR)):
+    if (not user_repo.check_permission(request.cookies.get("auth_token", ""), required_permission=PERMISSION.OPERATOR)):
         return jsonify({"success": 0, "message": "insufficient permissions", "error_reason": "insufficient_permission"}), 403
     data = request.get_json() or {}
     machine_name = data.get("machine_name", "")
@@ -73,7 +68,8 @@ def add_machine_api():
                                             disk_size=disk_size,
                                             max_memory_gb=max_memory_gb,
                                             max_gpu_number=max_gpu_number,
-                                            max_cpu_core_number=max_cpu_core_number)
+                                            max_cpu_core_number=max_cpu_core_number,
+                                            operator_user_id=authentications_repo.get_user_id_by_token(request.cookies.get("auth_token", "")))
     except IntegrityError as ie:
         # likely duplicate unique constraint (e.g. machine_name)
         return jsonify({"success": 0, "message": f"Duplicate entry: {str(ie.orig) if hasattr(ie, 'orig') else str(ie)}", "error_reason": "duplicate_entry"}), 409
@@ -93,7 +89,6 @@ def remove_machine_api():
     '''
     发送格式：
     {
-        "token",
         "machine_ids",
     }
     返回格式：
@@ -103,14 +98,15 @@ def remove_machine_api():
         ["error_reason": "xxxx"]
     }
     '''
-    if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+    if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
-    if (not user_repo.check_permission(request.headers.get("token", ""), required_permission=PERMISSION.OPERATOR)):
+    if (not user_repo.check_permission(request.cookies.get("auth_token", ""), required_permission=PERMISSION.OPERATOR)):
         return jsonify({"success": 0, "message": "insufficient permissions", "error_reason": "insufficient_permission"}), 403
     data = request.get_json() or {}
     data = request.get_json() or {}
     machine_ids = data.get("machine_ids", [])
-    success = machine_service.Remove_machine(machine_id=machine_ids)
+    success = machine_service.Remove_machine(machine_id=machine_ids,
+                                             operator_user_id=authentications_repo.get_user_id_by_token(request.cookies.get("auth_token", "")))
     if success:
         return jsonify({"success": 1, "message": "Machine(s) removed successfully"}), 200
     else:
@@ -125,7 +121,6 @@ def update_machine_api():
     通信数据格式：
 	发送格式：
 	{
-		"token",
         "machine_id",
         "machine_name",
         "machine_ip",
@@ -149,15 +144,17 @@ def update_machine_api():
         ["error_reason": "xxxx"]
 	}
     '''
-    if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+    if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
-    if (not user_repo.check_permission(request.headers.get("token", ""), required_permission=PERMISSION.OPERATOR)):
+    if (not user_repo.check_permission(request.cookies.get("auth_token", ""), required_permission=PERMISSION.OPERATOR)):
         return jsonify({"success": 0, "message": "insufficient permissions", "error_reason": "insufficient_permission"}), 403
     data = request.get_json() or {}
     machine_id = data.get("machine_id", 0)
     fields = data.get("fields", {})
     try:
-        success = machine_service.Update_machine(machine_id=machine_id, **fields)
+        success = machine_service.Update_machine(machine_id=machine_id,
+                                                 operator_user_id=authentications_repo.get_user_id_by_token(request.cookies.get("auth_token", "")),
+                                                 **fields)
     except Exception as e:
         err_reason = getattr(e, 'error_reason', None)
         if err_reason:
@@ -176,7 +173,6 @@ def get_detail_information_api():
     通信数据格式：
 	发送格式：
 	{
-		"token",
         "machine_id",
     }
     返回格式：
@@ -186,7 +182,7 @@ def get_detail_information_api():
         ["error_reason": "xxxx"]
 	}
     '''
-    if (not authentications_repo.is_token_valid(request.headers.get("token", ""))):
+    if (not authentications_repo.is_token_valid(request.cookies.get("auth_token", ""))):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json() or {}
     machine_id = data.get("machine_id", 0)
@@ -217,7 +213,6 @@ def list_all_machine_bref_information_api():
     通信数据格式：
     发送格式：
     {
-        "token",
         "page_number",
         "page_size"
     }
@@ -228,7 +223,7 @@ def list_all_machine_bref_information_api():
         ["error_reason": "xxxx"]
     }
     '''
-    token = _resolve_auth_token()
+    token = request.cookies.get("auth_token", "")
     if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     data = request.get_json(silent=True) or {}
@@ -249,7 +244,7 @@ def list_all_machine_bref_information_api():
 
 @api_bp.post("/machines/add_machine_permission")
 def add_machine_permission_api():
-    token = _resolve_auth_token()
+    token = request.cookies.get("auth_token", "")
     if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     if (not user_repo.check_permission(token, required_permission=PERMISSION.OPERATOR)):
@@ -260,7 +255,8 @@ def add_machine_permission_api():
     if not machine_id or not user_id:
         return jsonify({"success": 0, "message": "machine_id and user_id required", "error_reason": "missing_fields"}), 400
     try:
-        machine_service.Add_machine_permission(machine_id, user_id)
+        machine_service.Add_machine_permission(machine_id, user_id,
+                                               operator_user_id=authentications_repo.get_user_id_by_token(token))
     except ValueError as e:
         reason = str(e)
         status = 404 if reason in ("machine_not_found", "user_not_found") else 400
@@ -270,7 +266,7 @@ def add_machine_permission_api():
 
 @api_bp.get("/machines/list_machine_permissions")
 def list_machine_permissions_api():
-    token = _resolve_auth_token()
+    token = request.cookies.get("auth_token", "")
     if (not authentications_repo.is_token_valid(token)):
         return jsonify({"success": 0, "message": "invalid or missing token", "error_reason": "invalid_token"}), 401
     machine_id = request.args.get("machine_id", type=int) or 0

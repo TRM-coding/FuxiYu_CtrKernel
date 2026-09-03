@@ -1,5 +1,8 @@
 from flask import current_app
 
+import threading
+import time
+
 from ..repositories.machine_repo import *
 from pydantic import BaseModel
 from typing import Optional
@@ -7,7 +10,8 @@ from ..utils.heartbeat import send, start_machine_maintenance_transition_heartbe
 from ..utils.parallel import parallel_node_calls
 from ..repositories.containers_repo import update_container, list_containers as repo_list_containers
 from ..repositories import machine_permission_repo, user_repo
-from ..constant import ContainerStatus, MachineStatus
+from .operation_log_tasks import write_operation_log as write_op_log
+from ..constant import ContainerStatus, MachineStatus, OperationType
 #######################################
 #API Definition
 class machine_bref_information(BaseModel):
@@ -38,26 +42,30 @@ class machine_detail_information(BaseModel):
 #######################################
 # 机器权限管理
 
-def Add_machine_permission(machine_id: int, user_id: int) -> bool:
-    machine = get_by_id(machine_id)
-    if not machine:
-        raise ValueError('machine_not_found')
-    user = user_repo.get_by_id(user_id)
-    if not user:
-        raise ValueError('user_not_found')
-    machine_permission_repo.add_permission(machine_id, user_id)
-    from ..repositories.operation_log_repo import write as write_op_log
-    write_op_log(operation="add_machine_permission", target_type="machine",
-                 target_id=machine_id, detail={"user_id": user_id})
+def Add_machine_permission(machine_id: int, user_id: int, operator_user_id: int | None = None) -> bool:
+    try:
+        machine = get_by_id(machine_id)
+        if not machine:
+            raise ValueError('machine_not_found')
+        user = user_repo.get_by_id(user_id)
+        if not user:
+            raise ValueError('user_not_found')
+        machine_permission_repo.add_permission(machine_id, user_id)
+    except Exception as e:
+        write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE_PERMISSION, target_type="machine",
+                     target_id=machine_id, detail={"user_id": user_id},
+                     error_reason=getattr(e, 'reason', None) or str(e))
+        raise
+    write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE_PERMISSION, target_type="machine",
+                 target_id=machine_id, detail={"user_id": user_id, "username": user.username})
     return True
 
 
-def Remove_machine_permission(machine_id: int, user_id: int) -> bool:
+def Remove_machine_permission(machine_id: int, user_id: int, operator_user_id: int | None = None) -> bool:
     result = machine_permission_repo.remove_permission(machine_id, user_id)
-    if result:
-        from ..repositories.operation_log_repo import write as write_op_log
-        write_op_log(operation="remove_machine_permission", target_type="machine",
-                     target_id=machine_id, detail={"user_id": user_id})
+    write_op_log(success=bool(result), operator_user_id=operator_user_id, operation=OperationType.REMOVE_MACHINE_PERMISSION, target_type="machine",
+                 target_id=machine_id, detail={"user_id": user_id},
+                 error_reason=None if result else "remove_permission_failed")
     return result
 
 
@@ -102,6 +110,39 @@ def is_machine_online_remote(machine_id: int, timeout: float = 2.0) -> bool:
         return ms == 'online'
     return False
 
+
+# ── 机器可达性统一入口（TTL 缓存） ──────────────────────────
+# 所有需要"机器现在通不通"的地方都走这里（容器展示态派生、操作前置检查等）。
+# 唯一做 HTTP 探测的地方；WSS 落地后此入口改读连接状态，调用方无感。
+_reach_cache: dict[int, tuple[float, bool]] = {}
+_reach_cache_lock = threading.Lock()
+REACH_CACHE_TTL_SEC = 20.0
+
+
+def _peek_machine_reachable(machine_id: int) -> bool | None:
+    """缓存未过期返回结果，否则 None。"""
+    now = time.time()
+    with _reach_cache_lock:
+        hit = _reach_cache.get(machine_id)
+    if hit and (now - hit[0]) < REACH_CACHE_TTL_SEC:
+        return hit[1]
+    return None
+
+
+def _set_machine_reachable(machine_id: int, ok: bool) -> None:
+    with _reach_cache_lock:
+        _reach_cache[machine_id] = (time.time(), bool(ok))
+
+
+def get_machine_reachable(machine_id: int, timeout: float = 2.0) -> bool:
+    """机器可达性统一入口：命中 TTL 缓存零 HTTP，未命中探测一次并写缓存。"""
+    cached = _peek_machine_reachable(machine_id)
+    if cached is not None:
+        return cached
+    ok = is_machine_online_remote(machine_id, timeout=timeout)
+    _set_machine_reachable(machine_id, ok)
+    return ok
+
 #######################################
 #######################################
 # 添加一个新的机器到集群
@@ -117,7 +158,8 @@ def Add_machine(machine_name:str,
                    disk_size:int,
                    max_memory_gb:int,
                    max_gpu_number:int,
-                   max_cpu_core_number:int)->bool:
+                   max_cpu_core_number:int,
+                   operator_user_id: int | None = None)->bool:
     # 防御性检查：限制字段长度，防止过长输入导致数据库异常
     if machine_name and len(machine_name) > 115:
         raise ValueError(f"machine_name too long (max 115): length={len(machine_name)}")
@@ -151,23 +193,28 @@ def Add_machine(machine_name:str,
             setattr(e, 'error_reason', 'create_failed')
             raise e
 
-        create_machine(
-         machinename=machine_name,
-         machine_ip=machine_ip,
-         machine_type=machine_type,
-         machine_description=machine_description,
-         cpu_core_number=cpu_core_number,
-         gpu_number=gpu_number,
-         gpu_type=gpu_type,
-         memory_size=memory_size,
+    try:
+        machine = create_machine(
+            machinename=machine_name,
+            machine_ip=machine_ip,
+            machine_type=machine_type,
+            machine_description=machine_description,
+            cpu_core_number=cpu_core_number,
+            gpu_number=gpu_number,
+            gpu_type=gpu_type,
+            memory_size=memory_size,
             max_shared_gb=max_shared_gb,
-         disk_size=disk_size,
-         max_memory_gb=max_memory_gb,
-         max_gpu_number=max_gpu_number,
-         max_cpu_core_number=max_cpu_core_number
-    )
-    from ..repositories.operation_log_repo import write as write_op_log
-    write_op_log(operation="add_machine", target_type="machine", target_id=0,
+            disk_size=disk_size,
+            max_memory_gb=max_memory_gb,
+            max_gpu_number=max_gpu_number,
+            max_cpu_core_number=max_cpu_core_number,
+        )
+    except Exception as e:
+        write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE, target_type="machine", target_id=0,
+                     detail={"name": machine_name, "ip": machine_ip},
+                     error_reason=getattr(e, 'error_reason', None) or str(e))
+        raise
+    write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE, target_type="machine", target_id=machine.id,
                  detail={"name": machine_name, "ip": machine_ip})
     return True
 
@@ -176,19 +223,28 @@ def Add_machine(machine_name:str,
 
 #######################################
 # 删除集群中的一个（一组）机器
-def Remove_machine(machine_id:list[int])->bool:
+def Remove_machine(machine_id:list[int], operator_user_id: int | None = None)->bool:
     for id in machine_id:
-        delete_machine(id)
-    from ..repositories.operation_log_repo import write as write_op_log
-    write_op_log(operation="remove_machine", target_type="machine", target_id=machine_id[0] if len(machine_id)==1 else 0,
-                 detail={"ids": machine_id})
+        machine = get_by_id(id)
+        try:
+            ok = delete_machine(id)
+            err = None if ok else "delete_failed"
+        except Exception as e:
+            ok = False
+            err = getattr(e, 'reason', None) or str(e)
+        write_op_log(success=bool(ok), operator_user_id=operator_user_id, operation=OperationType.REMOVE_MACHINE, target_type="machine", target_id=id,
+                     detail={
+                         "name": getattr(machine, 'machine_name', None),
+                         "ip": getattr(machine, 'machine_ip', None),
+                     },
+                     error_reason=err)
     return True
 #######################################
 
 
 #######################################
 # 更新机器的信息
-def Update_machine(machine_id: int, **fields) -> bool:
+def Update_machine(machine_id: int, operator_user_id: int | None = None, **fields) -> bool:
     machine = get_by_id(machine_id)
     if not machine:
         return False
@@ -240,7 +296,11 @@ def Update_machine(machine_id: int, **fields) -> bool:
         if 'disk_size' in passthrough_fields:
             passthrough_fields['disk_size_gb'] = passthrough_fields.pop('disk_size')
         if passthrough_fields:
+            before = {k: str(getattr(machine, k, None)) for k in passthrough_fields.keys()}
             update_machine(machine_id, **passthrough_fields)
+            write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.UPDATE_MACHINE, target_type="machine", target_id=machine_id,
+                         detail={"before": before, "after": {k: str(v) for k, v in passthrough_fields.items()}})
+        # 状态迁移本身由过渡心跳完成后记（before/after 见 heartbeat 侧）
         start_machine_maintenance_transition_heartbeat(machine_id)
         return True
 
@@ -248,10 +308,17 @@ def Update_machine(machine_id: int, **fields) -> bool:
     if 'disk_size' in fields:
         fields['disk_size_gb'] = fields.pop('disk_size')
 
-    update_machine(machine_id, **fields)
-    from ..repositories.operation_log_repo import write as write_op_log
-    write_op_log(operation="update_machine", target_type="machine", target_id=machine_id,
-                 detail={k: str(v) for k, v in fields.items()})
+    # 记录前值：repo 已原子化，update 前从 machine 对象取旧值即可
+    before = {k: str(getattr(machine, k, None)) for k in fields.keys()}
+    try:
+        update_machine(machine_id, **fields)
+    except Exception as e:
+        write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.UPDATE_MACHINE, target_type="machine", target_id=machine_id,
+                     detail={"before": before, "after": {k: str(v) for k, v in fields.items()}},
+                     error_reason=getattr(e, 'error_reason', None) or str(e))
+        raise
+    write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.UPDATE_MACHINE, target_type="machine", target_id=machine_id,
+                 detail={"before": before, "after": {k: str(v) for k, v in fields.items()}})
     return True
 #######################################
 
@@ -371,8 +438,13 @@ def List_all_machine_bref_information(
     _probe_results: dict[int, bool] = {}
     if machines:
         if use_parallel and _app is not None:
+            # 缓存新鲜则零探测，否则并发探活
             _callables = [
-                lambda mid=m.id, a=_app: _node_probe_machine(mid, _app=a)
+                lambda mid=m.id, a=_app: (
+                    _peek_machine_reachable(mid)
+                    if _peek_machine_reachable(mid) is not None
+                    else _node_probe_machine(mid, _app=a)
+                )
                 for m in machines
             ]
             _raw = parallel_node_calls(_callables, timeout_per_call=3.0)
@@ -380,7 +452,11 @@ def List_all_machine_bref_information(
                 _probe_results[m.id] = r if isinstance(r, bool) else False
         else:
             for m in machines:
-                _probe_results[m.id] = _node_probe_machine(m.id)
+                cached = _peek_machine_reachable(m.id)
+                _probe_results[m.id] = cached if cached is not None else _node_probe_machine(m.id)
+    # 写透可达性缓存：容器 getter 的派生展示态读它
+    for m in machines:
+        _set_machine_reachable(m.id, bool(_probe_results.get(m.id, False)))
 
     # --- Phase B: 逐条同步（串行，避免 DB session 竞争） ---
     for machine in machines:
@@ -405,14 +481,24 @@ def List_all_machine_bref_information(
                 except Exception:
                     pass
 
+            def _log_status_transition(mid, before, after):
+                """状态真正变化时记一条系统日志（前→后），未变化不记。"""
+                if before is not None and str(before).lower() == str(after).lower():
+                    return
+                write_op_log(success=True, operator_user_id=None, operation=OperationType.MACHINE_STATUS_TRANSITION,
+                             target_type="machine", target_id=mid,
+                             detail={"before": {"machine_status": before}, "after": {"machine_status": after}})
+
             if current_status_val == 'maintenance':
                 if online:
                     try:
+                        _log_status_transition(machine.id, current_status_val, MachineStatus.MAINTENANCE.value)
                         update_machine(machine.id, machine_status=MachineStatus.MAINTENANCE)
                     except Exception:
                         pass
                 else:
                     try:
+                        _log_status_transition(machine.id, current_status_val, MachineStatus.OFFLINE.value)
                         update_machine(machine.id, machine_status=MachineStatus.OFFLINE)
                     except Exception:
                         pass
@@ -420,11 +506,13 @@ def List_all_machine_bref_information(
             else:
                 if online:
                     try:
+                        _log_status_transition(machine.id, current_status_val, MachineStatus.ONLINE.value)
                         update_machine(machine.id, machine_status=MachineStatus.ONLINE)
                     except Exception:
                         pass
                 else:
                     try:
+                        _log_status_transition(machine.id, current_status_val, MachineStatus.OFFLINE.value)
                         update_machine(machine.id, machine_status=MachineStatus.OFFLINE)
                     except Exception:
                         pass

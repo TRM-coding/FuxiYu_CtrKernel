@@ -34,6 +34,19 @@ def test_add_machine_success_creates_machine(db_session):
     assert machine.machine_ip == "10.0.0.1"
 
 
+def test_add_machine_with_null_max_shared_creates_machine(db_session):
+    """回归：max_shared_gb=None（前端表单未填）时也必须真实入库。
+
+    历史 bug：create_machine 调用曾被误缩进到 max_shared_gb 验证块内，
+    None 时整段创建被跳过，Add_machine 返回 True 但库为空。
+    """
+    assert machine_tasks.Add_machine(**_machine_kwargs(max_shared_gb=None)) is True
+
+    machine = Machine.query.filter_by(machine_name="task_machine").first()
+    assert machine is not None
+    assert machine.machine_ip == "10.0.0.1"
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

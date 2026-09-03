@@ -889,7 +889,7 @@ preview_template_service(template_id: int, variables: dict[str, str]) -> dict
 全部端点要求 Operator 权限。认证模式沿用现有：
 ```python
 def _require_operator():
-    token = request.headers.get("token", "")
+    token = request.cookies.get("auth_token", "")
     if not authentications_repo.is_token_valid(token):
         return jsonify({"success":0, "message":"invalid token", "error_reason":"invalid_token"}), 401
     if not user_repo.check_permission(token, PERMISSION.OPERATOR):

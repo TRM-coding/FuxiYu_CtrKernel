@@ -97,17 +97,18 @@ def test_request_register_code_domain_not_allowed(client, monkeypatch):
 
 
 def test_login_success_sets_cookie(client, monkeypatch):
-    monkeypatch.setattr(user_api.user_tasks, "Login", lambda username, password: (True, _fake_user(), "token-1"))
+    monkeypatch.setattr(user_api.user_tasks, "Login", lambda username, password, remember: (True, _fake_user(), "token-1"))
 
     resp = client.post("/api/login", json={"username": "api_user", "password": "Password_123"})
 
     assert resp.status_code == 200
-    assert resp.get_json()["token"] == "token-1"
+    # token 已不再出现在 JSON body，只走 httpOnly cookie
+    assert "token" not in resp.get_json()
     assert "auth_token=token-1" in resp.headers.get("Set-Cookie", "")
 
 
 def test_login_user_not_found(client, monkeypatch):
-    monkeypatch.setattr(user_api.user_tasks, "Login", lambda username, password: (False, "user_not_found", None))
+    monkeypatch.setattr(user_api.user_tasks, "Login", lambda username, password, remember: (False, "user_not_found", None))
 
     resp = client.post("/api/login", json={"username": "missing", "password": "Password_123"})
 
@@ -116,7 +117,7 @@ def test_login_user_not_found(client, monkeypatch):
 
 
 def test_login_wrong_password(client, monkeypatch):
-    monkeypatch.setattr(user_api.user_tasks, "Login", lambda username, password: (False, "password_incorrect", None))
+    monkeypatch.setattr(user_api.user_tasks, "Login", lambda username, password, remember: (False, "password_incorrect", None))
 
     resp = client.post("/api/login", json={"username": "api_user", "password": "bad"})
 

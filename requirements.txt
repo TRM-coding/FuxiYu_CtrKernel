@@ -1,8 +1,6 @@
 Flask>=2.3.0
 Flask-SQLAlchemy>=3.0.0
-Flask-Migrate>=4.0.0
-Flask-Caching>=2.0.0
-Flask-Login>=0.6.3
+SQLAlchemy>=2.0.0
 marshmallow>=3.19.0
 pymysql
 pydantic
@@ -12,3 +10,4 @@ dotenv
 cryptography
 pytest>=8.0.0
 pytest-cov>=5.0.0
+alembic>=1.13.0

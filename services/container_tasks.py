@@ -14,9 +14,10 @@ from ..constant import *
 from ..utils.parallel import parallel_node_calls
 from sqlalchemy.exc import IntegrityError
 from ..repositories import containers_repo, machine_repo, machine_permission_repo, user_repo, long_term_container_repo
+from .operation_log_tasks import write_operation_log as write_op_log
 from ..repositories import containers_repo as container_repo
 from ..repositories import container_ssh_login_repo
-from .machine_tasks import is_machine_online_remote
+from .machine_tasks import is_machine_online_remote, get_machine_reachable
 from ..repositories.machine_repo import *
 from ..repositories.user_repo import *
 from ..utils.CheckKeys import *
@@ -258,6 +259,25 @@ def get_container_status(machine_ip: str, container_name: str, timeout: float = 
     return {"error": str(last_exc) if last_exc is not None else "unknown error"}
 
 
+# 容器展示态派生：宿主机不可达时覆盖为 host_offline（仅展示，DB 状态不动）
+DISPLAY_STATUS_HOST_OFFLINE = "host_offline"
+
+
+def _derive_display_status(container_status, machine_id: int | None) -> str:
+    """由"容器 DB 状态 + 机器可达性"派生展示态。
+
+    规则：failed 是终态诊断不覆盖；机器不可达则一律 host_offline。
+    """
+    status_str = container_status.value if hasattr(container_status, 'value') else str(container_status)
+    if str(status_str).lower() == ContainerStatus.FAILED.value:
+        return status_str
+    if machine_id is None:
+        return status_str
+    if not get_machine_reachable(machine_id):
+        return DISPLAY_STATUS_HOST_OFFLINE
+    return status_str
+
+
 def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -> str | None:
     """
     通过中心端向集群客户端请求容器上次 SSH 登录时间。
@@ -382,6 +402,10 @@ def unpause_container(container_id: int, operator_user_id: int | None = None) ->
         res = send(enc, sig, url, timeout=10.0)
     except Exception as e:
         print(f"unpause_container send error: {e}")
+        write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.UNPAUSE_CONTAINER,
+                     target_type="container", target_id=container.id,
+                     detail={"name": container.name, "machine_id": machine_id},
+                     error_reason=getattr(e, 'reason', None) or str(e))
         return False
 
     _raise_on_node_error(res, 'unpause')
@@ -391,8 +415,7 @@ def unpause_container(container_id: int, operator_user_id: int | None = None) ->
             update_container(container.id, container_status=ContainerStatus.ONLINE)
         except Exception:
             pass
-        from ..repositories.operation_log_repo import write as write_op_log
-        write_op_log(operator_user_id=operator_user_id, operation="unpause_container",
+        write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.UNPAUSE_CONTAINER,
                      target_type="container", target_id=container.id,
                      detail={"name": container.name, "machine_id": machine_id})
 
@@ -482,6 +505,7 @@ class container_bref_information(BaseModel):
     machine_ip:str
     port:int
     container_status:str
+    display_status: str | None = None  # 派生展示态（如 host_offline），DB 不落库
     accounts: list[dict] = Field(default_factory=list)
     is_long_term: bool = False
     long_term_container_can_enable: bool = True
@@ -680,10 +704,9 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
         return False
 
     if Key:
-        from ..repositories.operation_log_repo import write as write_op_log
-        write_op_log(
+        write_op_log(success=True,
             operator_user_id=operator_user_id,
-            operation="create_container",
+            operation=OperationType.CREATE_CONTAINER,
             target_type="container",
             target_id=container_id,
             detail={
@@ -761,10 +784,9 @@ def remove_container(container_id:int, debug=False, operator_user_id:int|None=No
         container = containers_repo.get_by_id(container_id)
     except Exception:
         container = None
-    from ..repositories.operation_log_repo import write as write_op_log
-    write_op_log(
+    write_op_log(success=True,
         operator_user_id=operator_user_id,
-        operation="delete_container",
+        operation=OperationType.DELETE_CONTAINER,
         target_type="container",
         target_id=container_id,
         detail={
@@ -958,11 +980,11 @@ def set_long_term_container(container_id: int, is_long_term: bool, operator_user
         long_term_container_repo.remove(container_id)
 
     long_term_state = _build_long_term_container_state(container_id, bindings)
-    from ..repositories.operation_log_repo import write as write_op_log
-    write_op_log(operator_user_id=operator_user_id,
-                 operation="set_long_term",
+    write_op_log(success=True, operator_user_id=operator_user_id,
+                 operation=OperationType.SET_LONG_TERM,
                  target_type="container", target_id=container_id,
-                 detail={"is_long_term": is_long_term})
+                 detail={"name": getattr(get_by_id(container_id), 'name', None),
+                         "is_long_term": is_long_term})
     return {
         "container_id": container_id,
         **long_term_state,
@@ -1040,11 +1062,17 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False, operat
                 role=role)
     
     if Key:
-        from ..repositories.operation_log_repo import write as write_op_log
-        write_op_log(operator_user_id=operator_user_id, operation="add_collaborator",
+        write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.ADD_COLLABORATOR,
                      target_type="container", target_id=container_id,
-                     detail={"user_id": user_id, "role": role.value if hasattr(role, 'value') else str(role)})
+                     detail={"user_id": user_id, "username": user_name,
+                             "role": role.value if hasattr(role, 'value') else str(role),
+                             "container_name": container_name})
         return True
+    write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.ADD_COLLABORATOR,
+                 target_type="container", target_id=container_id,
+                 detail={"user_id": user_id, "username": user_name,
+                         "container_name": container_name},
+                 error_reason="add_collaborator_failed")
     return False
 #从container_id中移除user_id对应的用户访问权
 
@@ -1120,11 +1148,16 @@ def remove_collaborator(container_id:int,user_id:int,debug=False, operator_user_
     remove_binding(user_id,container_id)
 
     if Key:
-        from ..repositories.operation_log_repo import write as write_op_log
-        write_op_log(operator_user_id=operator_user_id, operation="remove_collaborator",
+        write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.REMOVE_COLLABORATOR,
                      target_type="container", target_id=container_id,
-                     detail={"user_id": user_id})
+                     detail={"user_id": user_id, "username": user_name,
+                             "container_name": container_name})
         return True
+    write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.REMOVE_COLLABORATOR,
+                 target_type="container", target_id=container_id,
+                 detail={"user_id": user_id, "username": user_name,
+                         "container_name": container_name},
+                 error_reason="remove_collaborator_failed")
     return False
 
 #修改user_id对container_id的访问权
@@ -1195,15 +1228,31 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False, oper
     else:
         username = user_name
 
+    # 记录旧角色，便于审计"从什么改到什么"
+    try:
+        old_binding = get_binding(user_id, container_id)
+        old_role = _binding_role_value(old_binding) if old_binding else None
+    except Exception:
+        old_role = None
+
     # 更新绑定时同时传入 username 和 role，确保数据库中的 username 在变更为 ROOT 时被设置为 'root'
     update_binding(user_id, container_id, username=username, role=updated_role)
 
     if Key:
-        from ..repositories.operation_log_repo import write as write_op_log
-        write_op_log(operator_user_id=operator_user_id, operation="update_collaborator_role",
+        write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.UPDATE_COLLABORATOR_ROLE,
                      target_type="container", target_id=container_id,
-                     detail={"user_id": user_id, "new_role": updated_role.value if hasattr(updated_role, 'value') else str(updated_role)})
+                     detail={"user_id": user_id, "username": user_name,
+                             "old_role": old_role,
+                             "new_role": updated_role.value if hasattr(updated_role, 'value') else str(updated_role),
+                             "container_name": container_name})
         return True
+    write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.UPDATE_COLLABORATOR_ROLE,
+                 target_type="container", target_id=container_id,
+                 detail={"user_id": user_id, "username": user_name,
+                         "old_role": old_role,
+                         "new_role": updated_role.value if hasattr(updated_role, 'value') else str(updated_role),
+                         "container_name": container_name},
+                 error_reason="update_role_failed")
     return False
 
 
@@ -1236,8 +1285,7 @@ def start_container(container_id:int, debug=False, operator_user_id:int|None=Non
             container_starting_status_heartbeat(machine_ip, container_name, container_id=container_id)
         except Exception as e:
             print(f"Failed to start start-heartbeat: {e}")
-        from ..repositories.operation_log_repo import write as write_op_log
-        write_op_log(operator_user_id=operator_user_id, operation="start_container",
+        write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.START_CONTAINER,
                      target_type="container", target_id=container_id,
                      detail={"name": container_name})
         return True
@@ -1272,8 +1320,7 @@ def stop_container(container_id:int, debug=False, operator_user_id:int|None=None
             container_stopping_status_heartbeat(machine_ip, container_name, container_id=container_id)
         except Exception as e:
             print(f"Failed to start stop-heartbeat: {e}")
-        from ..repositories.operation_log_repo import write as write_op_log
-        write_op_log(operator_user_id=operator_user_id, operation="stop_container",
+        write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.STOP_CONTAINER,
                      target_type="container", target_id=container_id,
                      detail={"name": container_name})
         return True
@@ -1312,8 +1359,7 @@ def restart_container(container_id:int, debug=False, operator_user_id:int|None=N
             container_restart_status_heartbeat(machine_ip, container_name, container_id=container_id)
         except Exception as e:
             print(f"Failed to start restart-heartbeat: {e}")
-        from ..repositories.operation_log_repo import write as write_op_log
-        write_op_log(operator_user_id=operator_user_id, operation="restart_container",
+        write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.RESTART_CONTAINER,
                      target_type="container", target_id=container_id,
                      detail={"name": container_name})
         return True
@@ -1430,6 +1476,7 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         "machine_id": container.machine_id,
         "machine_ip": get_machine_ip_by_id(container.machine_id),
         "container_status": container.container_status.value,
+        "display_status": _derive_display_status(container.container_status, container.machine_id),
         "memory_gb": container.memory_gb,
         "shared_gb": container.shared_gb,
         "gpu_number": container.gpu_number,
@@ -1632,6 +1679,7 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
             machine_ip=machine_ip,
             port=container.port,
             container_status=container.container_status.value,
+            display_status=_derive_display_status(container.container_status, container.machine_id),
             accounts=[
                 {"user_id": binding.get('user_id'), "username": binding.get("username"), "role": (ROLE(binding.get('role')).value if binding.get('role') is not None else None)}
                 for binding in bindings

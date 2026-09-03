@@ -73,9 +73,8 @@ def test_create_container_success(client, monkeypatch, token):
         captured.update(kwargs)
         return True
     monkeypatch.setattr(container_api_module.container_service, "Create_container", fake_create_container)
-    headers = {"token": token or "dummy"}
     body = {"user_name": "u", "machine_id": 1, "GPU_LIST": [], "CPU_NUMBER": 1, "MEMORY": 128, "NAME": "c1", "image": "img", "public_key": "key"}
-    resp = client.post("/api/containers/create_container", json=body, headers=headers)
+    resp = client.post("/api/containers/create_container", json=body)
     assert resp.status_code == 200
     data = resp.get_json()
     assert data.get("success") == 1
@@ -93,8 +92,7 @@ def test_delete_container_success(client, monkeypatch, token):
     
     monkeypatch.setattr(container_api_module.authentications_repo, "is_token_valid", lambda t: True)
     monkeypatch.setattr(container_api_module.container_service, "remove_container", lambda container_id=0: True)
-    headers = {"token": token or "dummy"}
-    resp = client.post("/api/containers/delete_container", json={"container_id": 1}, headers=headers)
+    resp = client.post("/api/containers/delete_container", json={"container_id": 1})
     assert resp.status_code == 200
     data = resp.get_json()
     assert data.get("success") == 1
@@ -116,8 +114,7 @@ def test_add_collaborator_success(client, monkeypatch, token):
         captured.update(kwargs)
         return True
     monkeypatch.setattr(container_api_module.container_service, "add_collaborator", fake_add_collaborator)
-    headers = {"token": token or "dummy"}
-    resp = client.post("/api/containers/add_collaborator", json={"user_id": 1, "container_id": 1, "role": "COLLABORATOR"}, headers=headers)
+    resp = client.post("/api/containers/add_collaborator", json={"user_id": 1, "container_id": 1, "role": "COLLABORATOR"})
     assert resp.status_code == 201
     data = resp.get_json()
     assert data.get("success") == 1
@@ -135,8 +132,7 @@ def test_remove_collaborator_success(client, monkeypatch, token):
     
     monkeypatch.setattr(container_api_module.authentications_repo, "is_token_valid", lambda t: True)
     monkeypatch.setattr(container_api_module.container_service, "remove_collaborator", lambda **kwargs: True)
-    headers = {"token": token or "dummy"}
-    resp = client.post("/api/containers/remove_collaborator", json={"container_id": 1, "user_id": 1}, headers=headers)
+    resp = client.post("/api/containers/remove_collaborator", json={"container_id": 1, "user_id": 1})
     assert resp.status_code == 200
     data = resp.get_json()
     assert data.get("success") == 1
@@ -153,8 +149,7 @@ def test_update_role_success(client, monkeypatch, token):
     
     monkeypatch.setattr(container_api_module.authentications_repo, "is_token_valid", lambda t: True)
     monkeypatch.setattr(container_api_module.container_service, "update_role", lambda **kwargs: True)
-    headers = {"token": token or "dummy"}
-    resp = client.post("/api/containers/update_role", json={"container_id": 1, "user_id": 1, "updated_role": "ADMIN"}, headers=headers)
+    resp = client.post("/api/containers/update_role", json={"container_id": 1, "user_id": 1, "updated_role": "ADMIN"})
     assert resp.status_code == 200
     data = resp.get_json()
     assert data.get("success") == 1
@@ -172,8 +167,7 @@ def test_get_container_detail_information_success(client, monkeypatch, token):
     monkeypatch.setattr(container_api_module.authentications_repo, "is_token_valid", lambda t: True)
     fake_info = {"id": 1, "name": "c1", "image": "img"}
     monkeypatch.setattr(container_api_module.container_service, "get_container_detail_information", lambda container_id=0: fake_info)
-    headers = {"token": token or "dummy"}
-    resp = client.get("/api/containers/get_container_detail_information", json={"container_id": 1}, headers=headers)
+    resp = client.get("/api/containers/get_container_detail_information", json={"container_id": 1})
     assert resp.status_code == 200
     data = resp.get_json()
     assert data.get("success") == 1
@@ -197,8 +191,7 @@ def test_list_all_containers_bref_information_success(client, monkeypatch, token
         captured.update(kwargs)
         return {"containers": [fake_item], "total_page": 1}
     monkeypatch.setattr(container_api_module.container_service, "list_all_container_bref_information", fake_list_all_container_bref_information)
-    headers = {"token": token or "dummy"}
-    resp = client.post("/api/containers/list_all_container_bref_information", json={"machine_id": 1}, headers=headers)
+    resp = client.post("/api/containers/list_all_container_bref_information", json={"machine_id": 1})
     assert resp.status_code == 200
     data = resp.get_json()
     assert data.get("success") == 1

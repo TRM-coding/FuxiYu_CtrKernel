@@ -18,7 +18,6 @@ def test_add_collaborator_api_container_offline_returns_400(client, monkeypatch)
     resp = client.post(
         "/api/containers/add_collaborator",
         json={"container_id": 1, "user_id": 2, "role": "COLLABORATOR"},
-        headers={"token": "t"},
     )
 
     assert resp.status_code == 400
@@ -31,7 +30,6 @@ def test_add_collaborator_api_success_returns_201(client, monkeypatch):
     resp = client.post(
         "/api/containers/add_collaborator",
         json={"container_id": 1, "user_id": 2, "role": "COLLABORATOR"},
-        headers={"token": "t"},
     )
 
     assert resp.status_code == 201
@@ -44,7 +42,6 @@ def test_remove_collaborator_api_success(client, monkeypatch):
     resp = client.post(
         "/api/containers/remove_collaborator",
         json={"container_id": 1, "user_id": 2},
-        headers={"token": "t"},
     )
 
     assert resp.status_code == 200
@@ -57,7 +54,6 @@ def test_update_role_api_success(client, monkeypatch):
     resp = client.post(
         "/api/containers/update_role",
         json={"container_id": 1, "user_id": 2, "updated_role": "ADMIN"},
-        headers={"token": "t"},
     )
 
     assert resp.status_code == 200
