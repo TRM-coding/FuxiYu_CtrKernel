@@ -126,6 +126,37 @@ def test_login_success_sets_cookie(client, monkeypatch):
     assert "auth_token=token-1" in resp.headers.get("Set-Cookie", "")
 
 
+def test_logout_clears_cookie_and_auth_record(client, monkeypatch):
+    deleted = {}
+
+    class _Session:
+        pass
+
+    class _Scope:
+        def __enter__(self):
+            return _Session()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(user_api, "session_scope", lambda: _Scope())
+
+    def _delete_auth(token, *, session):
+        deleted["token"] = token
+        deleted["session"] = session
+        return True
+
+    monkeypatch.setattr(user_api.authentications_repo, "delete_auth", _delete_auth)
+
+    client.cookies.set("auth_token", "token-1")
+    resp = client.post("/api/logout")
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] == 1
+    assert deleted["token"] == "token-1"
+    assert "auth_token=" in resp.headers.get("Set-Cookie", "")
+
+
 def test_login_user_not_found(client, monkeypatch):
     monkeypatch.setattr(user_api.user_tasks, "Login", lambda username, password, remember: (False, "user_not_found", None))
 

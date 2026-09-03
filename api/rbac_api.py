@@ -10,6 +10,8 @@ from ..schemas.rbac import (
     CreateRbacGroupRequest,
     CreateRbacGroupResponse,
     RbacMatrixResponse,
+    RbacUserGroupsRequest,
+    RbacUserGroupsResponse,
     UpdateRbacGroupEntitiesRequest,
     UpdateRbacGroupEntitiesResponse,
 )
@@ -22,7 +24,7 @@ router = APIRouter(prefix="/rbac", tags=["rbac"])
 logger = logging.getLogger("FuxiYu_CtrKernel.api.rbac_api")
 
 
-def _log_failure(*, operation, target_id, operator_user_id, error_reason, exc=None, detail=None):
+def _log_failure(*, operation, target_id, operator_user_id, error_reason, exc=None, detail=None, target_type="rbac_group"):
     """失败双写：op-log（审计）+ ctrl 日志（调试，带层级归因与"差在哪"的 why）。
 
     层归因约定：service ValueError = 业务校验层（layer=service）；
@@ -36,7 +38,7 @@ def _log_failure(*, operation, target_id, operator_user_id, error_reason, exc=No
         success=False,
         operator_user_id=operator_user_id,
         operation=operation,
-        target_type="rbac_group",
+        target_type=target_type,
         target_id=target_id,
         detail=merged_detail,
         error_reason=error_reason,
@@ -151,3 +153,61 @@ def create_rbac_group_api(
         },
     )
     return {"success": 1, "message": "rbac group created", "group": group}
+
+
+#####################
+# 用户 ↔ 权限组
+
+
+@router.get("/users/{user_id}/groups", response_model=RbacUserGroupsResponse)
+def get_user_groups_api(
+    user_id: int,
+    operator_user_id: int = Depends(require_permission("rbac:manage")),
+):
+    """查询用户当前绑定的权限组 id 列表（生效权限 = 各组 entities 并集）。"""
+
+    return {"success": 1, "user_id": user_id, "group_ids": rbac_service.get_user_group_ids(user_id)}
+
+
+@router.post("/users/{user_id}/groups", response_model=RbacUserGroupsResponse)
+def set_user_groups_api(
+    user_id: int,
+    message: RbacUserGroupsRequest,
+    operator_user_id: int = Depends(require_permission("rbac:manage")),
+):
+    """整组替换用户绑定的权限组（管理动作，敏感审计）。
+
+    护栏：operator 不能把自己移出所有持有 rbac:manage 的组（自锁死）。
+    """
+
+    group_ids = [int(g) for g in (message.group_ids or [])]
+    try:
+        final_ids = rbac_service.set_user_groups(user_id, group_ids, operator_user_id=operator_user_id)
+    except ValueError as e:
+        reason = str(e)
+        _log_failure(
+            operation=OperationType.UPDATE_USER_GROUPS,
+            target_type="user",
+            target_id=user_id,
+            operator_user_id=operator_user_id,
+            error_reason=reason,
+            exc=e,
+            detail={"user_id": user_id, "group_ids": group_ids},
+        )
+        if reason == "user_not_found":
+            return _error(404, "user not found", reason)
+        if reason == "cannot_remove_own_manage":
+            return _error(400, "cannot remove yourself from rbac:manage groups", reason)
+        if reason.startswith("unknown_group:"):
+            return _error(400, "unknown rbac group", reason)
+        return _error(400, "invalid rbac user groups", reason)
+
+    write_op_log(
+        success=True,
+        operator_user_id=operator_user_id,
+        operation=OperationType.UPDATE_USER_GROUPS,
+        target_type="user",
+        target_id=user_id,
+        detail={"user_id": user_id, "group_ids": final_ids},
+    )
+    return {"success": 1, "user_id": user_id, "group_ids": final_ids}

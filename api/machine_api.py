@@ -15,6 +15,8 @@ from ..schemas.machine import (
     ListMachineBriefRequest,
     ListMachineBriefResponse,
     ListMachinePermissionsResponse,
+    RemoveMachinePermissionRequest,
+    RemoveMachinePermissionResponse,
     MachineDetailResponse,
     MachineIdRequest,
     MachineStatusRequest,
@@ -335,6 +337,27 @@ def add_machine_permission_api(
         status = 404 if reason in ("machine_not_found", "user_not_found") else 400
         return _error(status, reason, reason)
     return {"success": 1, "message": "machine permission added"}
+
+
+#####################
+# 移除机器权限
+
+
+@router.post("/remove_machine_permission", response_model=RemoveMachinePermissionResponse)
+def remove_machine_permission_api(
+    message: RemoveMachinePermissionRequest,
+    operator_user_id: int = Depends(require_permission("machine:manage")),
+):
+    """收回用户的机器权限（机器权限可分配也可收回）。"""
+
+    ok = machine_service.Remove_machine_permission(
+        message.machine_id,
+        message.user_id,
+        operator_user_id=operator_user_id,
+    )
+    if not ok:
+        return _error(404, "machine or permission not found", "permission_not_found")
+    return {"success": 1, "message": "machine permission removed"}
 
 
 #####################

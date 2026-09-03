@@ -226,6 +226,15 @@ class AddMachinePermissionResponse(SuccessMessageResponse):
     pass
 
 
+class RemoveMachinePermissionRequest(BaseModel):
+    machine_id: int = Field(..., ge=1)
+    user_id: int = Field(..., ge=1)
+
+
+class RemoveMachinePermissionResponse(SuccessMessageResponse):
+    pass
+
+
 class ListMachinePermissionsResponse(BaseModel):
     success: int | bool = 1
     machine_id: int

@@ -186,3 +186,89 @@ def test_two_bypass_entities_are_reported_when_both_granted():
     entities = set(list_user_entities(7))
     assert "bypass_auth_entity" in entities
     assert "bypass_resource" in entities
+
+
+def _bind_user_group(user_id, group_id):
+    with session_scope() as session:
+        auth_repo.ensure_user_group(user_id, group_id, session=session)
+
+
+def test_user_groups_endpoints_require_rbac_manage(client, monkeypatch):
+    _valid_token(monkeypatch, user_id=1)  # 无 rbac:manage
+
+    assert client.get("/api/rbac/users/7/groups").status_code == 403
+    assert client.post("/api/rbac/users/7/groups", json={"group_ids": []}).status_code == 403
+
+
+def test_get_user_groups_returns_bound_ids(client, monkeypatch):
+    _valid_token(monkeypatch, user_id=1)
+    _grant_rbac_manage(user_id=1)
+    with session_scope() as session:
+        ugroup = auth_repo.get_group("user", session=session)
+    _bind_user_group(7, ugroup.id)
+
+    resp = client.get("/api/rbac/users/7/groups")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["user_id"] == 7
+    assert ugroup.id in body["group_ids"]
+
+
+def test_set_user_groups_replaces_and_union_semantics(client, monkeypatch):
+    """整组替换；生效权限 = 新绑各组并集；撤组后其权限即刻消失。"""
+    _valid_token(monkeypatch, user_id=1)
+    _grant_rbac_manage(user_id=1)  # 操作者 user 1 带 rbac:manage；目标 user 7 非本人
+    with session_scope(commit=False) as session:
+        ugroup = auth_repo.get_group("user", session=session)
+        ogroup = auth_repo.get_group("operator", session=session)
+    _bind_user_group(7, ugroup.id)
+
+    # 建号默认（user 组）：不含 bypass_auth_entity
+    assert "bypass_auth_entity" not in set(list_user_entities(7))
+
+    # 换成 operator 组 → bypass_auth_entity 出现（operator 组持此实体）
+    resp = client.post("/api/rbac/users/7/groups", json={"group_ids": [ogroup.id]})
+    assert resp.status_code == 200
+    assert resp.json()["group_ids"] == [ogroup.id]
+    assert "bypass_auth_entity" in set(list_user_entities(7))
+
+    # 双组并存（user + operator）→ 并集；再只留 user 组 → operator 影响移除
+    resp2 = client.post("/api/rbac/users/7/groups", json={"group_ids": [ugroup.id, ogroup.id]})
+    assert resp2.status_code == 200
+    assert resp2.json()["group_ids"] == sorted([ugroup.id, ogroup.id])
+    assert "bypass_auth_entity" in set(list_user_entities(7))
+
+    resp3 = client.post("/api/rbac/users/7/groups", json={"group_ids": [ugroup.id]})
+    assert resp3.status_code == 200
+    assert resp3.json()["group_ids"] == [ugroup.id]
+    assert "bypass_auth_entity" not in set(list_user_entities(7))
+    with session_scope(commit=False) as session:
+        assert auth_repo.list_user_group_ids(7, session=session) == [ugroup.id]
+
+
+def test_set_user_groups_unknown_group_400(client, monkeypatch):
+    _valid_token(monkeypatch, user_id=1)
+    _grant_rbac_manage(user_id=1)
+
+    resp = client.post("/api/rbac/users/7/groups", json={"group_ids": [999999]})
+
+    assert resp.status_code == 400
+    assert resp.json()["error_reason"].startswith("unknown_group:")
+
+
+def test_set_user_groups_cannot_remove_own_rbac_manage(client, monkeypatch):
+    """自锁护栏：operator 只有 manage 组时，把自己替换成不含 rbac:manage 的组 → 拒绝。"""
+    _valid_token(monkeypatch, user_id=1)
+    _grant_rbac_manage(user_id=1)
+    with session_scope() as session:
+        ugroup = auth_repo.get_group("user", session=session)
+    with session_scope(commit=False) as session:
+        before = auth_repo.list_user_group_ids(1, session=session)
+
+    resp = client.post("/api/rbac/users/1/groups", json={"group_ids": [ugroup.id]})
+
+    assert resp.status_code == 400
+    assert resp.json()["error_reason"] == "cannot_remove_own_manage"
+    with session_scope(commit=False) as session:
+        assert auth_repo.list_user_group_ids(1, session=session) == before

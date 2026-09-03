@@ -62,6 +62,7 @@ def create_image_api(
             description=data.get("description"),
             base_image=data["base_image"],
             dockerfile_body=data.get("dockerfile_body") or "",
+            status=data.get("status") or None,
             operator_user_id=operator_user_id,
         )
     except IntegrityError as exc:
@@ -143,6 +144,7 @@ def list_image_bref_information_api(
     page_number: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1),
     image_search: str | None = Query(default=None),
+    mine_only: bool = Query(default=False),
     viewer_user_id: int = Depends(require_current_user),
     _: int = Depends(require_permission("image:view")),
 ):
@@ -153,5 +155,6 @@ def list_image_bref_information_api(
         page_size=page_size,
         image_search=(image_search or "").strip() or None,
         viewer_user_id=viewer_user_id,
+        mine_only=mine_only,
     )
     return {"success": 1, **result}

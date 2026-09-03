@@ -3,6 +3,9 @@ import pytest
 from ...api import deps
 from ... import _ensure_image_template_schema
 from ... import extensions
+from ...extensions import session_scope
+from ...repositories import userimage_repo
+from ..factories import create_user
 from sqlalchemy import inspect, text
 
 pytestmark = pytest.mark.usefixtures("ensure_auth_users")
@@ -164,3 +167,84 @@ def test_system_image_visible_to_normal_user(client, monkeypatch):
     names = [img["name"] for img in body["images"]]
     assert "Ubuntu 22.04 · 基础" in names
     assert "private-img" not in names
+
+
+def test_normal_user_cannot_detail_system_image_without_resource_row(client, monkeypatch):
+    """内置镜像可用于列表选择，但 Dockerfile 详情仍需要 image 资源权利。"""
+    _auth(monkeypatch, user_id=3)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service._has_resource_manage_direct", lambda uid, kind: False)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_resource", lambda uid, kind, rid: False)
+
+    listed = client.get("/api/images/list_image_bref_information?image_search=Ubuntu").json()
+    assert listed["total_number"] >= 1
+    image_id = listed["images"][0]["image_id"]
+
+    resp = client.get(f"/api/images/get_image_detail_information?image_id={image_id}")
+    assert resp.status_code == 403
+    body = resp.json()
+    detail = body.get("detail") if isinstance(body.get("detail"), dict) else body
+    assert detail["error_reason"] == "resource_access_denied"
+
+
+def test_mine_only_list_uses_user_image_binding_not_created_by(client, monkeypatch):
+    """编辑页“只看我的”按 user_images 资源绑定，不按 created_by_user_id 派生。"""
+    editor = create_user()
+    _auth(monkeypatch, user_id=7)
+    image_id = client.post(
+        "/api/images/create_image",
+        json={"name": "shared-to-editor", "base_image": "ubuntu:24.04", "dockerfile_body": ""},
+    ).json()["image_id"]
+
+    with session_scope() as session:
+        userimage_repo.grant_image(editor.id, image_id, session=session)
+
+    _auth(monkeypatch, user_id=editor.id)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service._has_resource_manage_direct", lambda uid, kind: False)
+
+    body = client.get("/api/images/list_image_bref_information?mine_only=true&page_size=50").json()
+    images = {item["name"]: item for item in body["images"]}
+    assert "shared-to-editor" in images
+    assert images["shared-to-editor"]["created_by_user_id"] == 7
+    assert "Ubuntu 22.04 · 基础" not in images
+
+
+def test_update_other_private_image_still_denied_without_resource(client, monkeypatch):
+    """写路径归属闸保留：普通用户（无授权行/无 manage）改他人私有镜像仍 403。"""
+    _auth(monkeypatch, user_id=7)
+    image_id = client.post(
+        "/api/images/create_image",
+        json={"name": "owner-private", "base_image": "ubuntu:24.04", "dockerfile_body": ""},
+    ).json()["image_id"]
+
+    # 另一用户：有 image:edit（entity=True），但无 user_images 授权行、无 image:manage 通配
+    _auth(monkeypatch, user_id=3)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service._has_resource_manage_direct", lambda uid, kind: False)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_resource", lambda uid, kind, rid: False)
+
+    resp = client.post(
+        "/api/images/update_image",
+        json={"image_id": image_id, "name": "hacked", "base_image": "ubuntu:24.04"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["error_reason"] == "resource_access_denied"
+
+
+def test_create_image_status_roundtrip(client, monkeypatch):
+    """创建即带状态：不传 status → 草稿；显式传 ready → 一步到位（无需二次编辑）。"""
+    _auth(monkeypatch, user_id=7)
+
+    draft_id = client.post(
+        "/api/images/create_image",
+        json={"name": "draft-on-create", "base_image": "ubuntu:24.04"},
+    ).json()["image_id"]
+    resp = client.get(f"/api/images/get_image_detail_information?image_id={draft_id}")
+    assert resp.status_code == 200
+    assert resp.json()["image"]["status"] == "draft"
+
+    ready_id = client.post(
+        "/api/images/create_image",
+        json={"name": "ready-on-create", "base_image": "ubuntu:24.04", "status": "ready"},
+    ).json()["image_id"]
+    resp2 = client.get(f"/api/images/get_image_detail_information?image_id={ready_id}")
+    assert resp2.status_code == 200
+    assert resp2.json()["image"]["status"] == "ready"

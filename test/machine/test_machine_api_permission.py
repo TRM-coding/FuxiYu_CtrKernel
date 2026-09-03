@@ -61,6 +61,52 @@ def test_add_machine_permission_success(client, monkeypatch):
     assert resp.status_code == 200
 
 
+def test_remove_machine_permission_requires_token(client, monkeypatch):
+    _auth(monkeypatch, valid=False)
+
+    resp = client.post("/api/machines/remove_machine_permission", json={"machine_id": 1, "user_id": 2})
+
+    assert resp.status_code == 401
+
+
+def test_remove_machine_permission_requires_operator(client, monkeypatch):
+    _auth(monkeypatch, operator=False)
+
+    resp = client.post("/api/machines/remove_machine_permission", json={"machine_id": 1, "user_id": 2})
+
+    assert resp.status_code == 403
+
+
+def test_remove_machine_permission_missing_fields(client, monkeypatch):
+    _auth(monkeypatch)
+
+    resp = client.post("/api/machines/remove_machine_permission", json={"machine_id": 1})
+
+    assert resp.status_code == 400
+    assert resp.json()["error_reason"] == "missing_fields"
+
+
+def test_remove_machine_permission_not_granted_404(client, monkeypatch):
+    """目标没有该机器权限（或机器不存在）→ 404，不假装成功。"""
+    _auth(monkeypatch)
+    monkeypatch.setattr(machine_api.machine_service, "Remove_machine_permission", lambda machine_id, user_id, operator_user_id=None: False)
+
+    resp = client.post("/api/machines/remove_machine_permission", json={"machine_id": 1, "user_id": 2})
+
+    assert resp.status_code == 404
+    assert resp.json()["error_reason"] == "permission_not_found"
+
+
+def test_remove_machine_permission_success(client, monkeypatch):
+    _auth(monkeypatch)
+    monkeypatch.setattr(machine_api.machine_service, "Remove_machine_permission", lambda machine_id, user_id, operator_user_id=None: True)
+
+    resp = client.post("/api/machines/remove_machine_permission", json={"machine_id": 1, "user_id": 2})
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] == 1
+
+
 def test_list_machine_permissions_requires_token(client, monkeypatch):
     monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: False)
 
