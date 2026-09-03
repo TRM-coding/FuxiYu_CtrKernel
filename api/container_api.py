@@ -213,9 +213,11 @@ def create_container_api(
     try:
         if image_id is not None:
             from ..services import image_tasks as image_service
-            from ..services.rbac_service import user_has_resource
 
-            if not user_has_resource(operator_user_id, "image", image_id):
+            image_allowed = image_service.Can_use_image_for_container(operator_user_id, image_id)
+            if image_allowed is None:
+                return _error(404, f"image {image_id} not found", "image_not_found")
+            if not image_allowed:
                 return _error(403, "image access denied", "image_access_denied")
             image_build = image_service.build_image_payload(image_id)
             if image_build is None:

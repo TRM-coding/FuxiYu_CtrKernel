@@ -132,6 +132,20 @@ def ensure_user_group(user_id: int, group_id: int, *, session: Session) -> None:
         session.flush()
 
 
+def list_user_group_ids(user_id: int, *, session: Session) -> list[int]:
+    return list(session.scalars(
+        select(UserGroup.group_id).where(UserGroup.user_id == user_id).order_by(UserGroup.group_id)
+    ))
+
+
+def replace_user_groups(user_id: int, group_ids: list[int], *, session: Session) -> None:
+    """整组替换用户的权限组绑定（set 语义；组 id 合法性由 service 校验）。"""
+    session.execute(delete(UserGroup).where(UserGroup.user_id == user_id))
+    for gid in sorted({int(g) for g in group_ids}):
+        session.add(UserGroup(user_id=user_id, group_id=gid))
+    session.flush()
+
+
 def replace_group_entities(group_id: int, entity_codes: set[str], *, session: Session) -> None:
     session.execute(delete(AuthGroupEntity).where(AuthGroupEntity.group_id == group_id))
     for code in sorted(entity_codes):

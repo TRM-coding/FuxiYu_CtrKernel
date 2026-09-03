@@ -1,5 +1,8 @@
 from sqlalchemy.exc import IntegrityError
+from ...constant import ImageStatus
+from ...extensions import SessionRegistry
 from ...api import container_api, deps
+from ...models.image import Image
 from ...services import container_tasks
 
 
@@ -166,6 +169,10 @@ def test_create_container_with_image_id_builds_payload(client, monkeypatch):
         lambda image_id: build_payload if image_id == 7 else None,
     )
     monkeypatch.setattr(
+        "FuxiYu_CtrKernel.services.image_tasks.Can_use_image_for_container",
+        lambda uid, image_id: True,
+    )
+    monkeypatch.setattr(
         "FuxiYu_CtrKernel.services.rbac_service.user_has_resource",
         lambda uid, rtype, rid: True,
     )
@@ -182,6 +189,50 @@ def test_create_container_with_image_id_builds_payload(client, monkeypatch):
             "owner_user_id": 2,
             "machine_id": 1,
             "image_id": 7,
+            "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "ignored"},
+        },
+    )
+
+    assert resp.status_code == 200
+    assert captured["image_build"] == build_payload
+    assert captured["container"].image == build_payload["image_tag"]
+
+
+def test_create_container_with_system_image_does_not_require_user_image_binding(client, monkeypatch):
+    _auth(monkeypatch)
+    image = Image(
+        name="system-image-for-container",
+        description="system image",
+        base_image="ubuntu:22.04",
+        dockerfile_body="",
+        status=ImageStatus.READY,
+        created_by_user_id=None,
+    )
+    SessionRegistry.add(image)
+    SessionRegistry.commit()
+
+    build_payload = {
+        "image_id": image.id,
+        "image_tag": f"fuxi/image-{image.id}:20260903T000000Z",
+        "dockerfile_text": "FROM ubuntu:22.04\n",
+    }
+    captured = {}
+
+    def _resource_check(uid, rtype, rid):
+        return rtype == "machine"
+
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_resource", _resource_check)
+    monkeypatch.setattr(
+        "FuxiYu_CtrKernel.services.image_tasks.build_image_payload",
+        lambda image_id: build_payload if image_id == image.id else None,
+    )
+    monkeypatch.setattr(container_api.container_service, "Create_container", lambda **kwargs: captured.update(kwargs) or True)
+
+    resp = client.post(
+        "/api/containers/create_container",
+        json={
+            "machine_id": 1,
+            "image_id": image.id,
             "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "ignored"},
         },
     )

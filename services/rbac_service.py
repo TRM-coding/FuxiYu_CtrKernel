@@ -82,6 +82,42 @@ def bind_user_default_group(user_id: int) -> None:
         logger.warning("bind_user_default_group failed: %s", e)
 
 
+def get_user_group_ids(user_id: int) -> list[int]:
+    """用户当前绑定的权限组 id 列表。"""
+    with session_scope(commit=False) as session:
+        return auth_repo.list_user_group_ids(user_id, session=session)
+
+
+def set_user_groups(user_id: int, group_ids: list[int], operator_user_id: int | None = None) -> list[int]:
+    """整组替换用户绑定的权限组（set 语义）；生效权限 = 所绑各组 entities 并集。
+
+    ValueError: user_not_found / unknown_group:<ids> / cannot_remove_own_manage
+    （护栏：operator 不能把自己移出所有持有 rbac:manage 的组，防止自锁死。）
+    """
+    user_id = int(user_id)
+    wanted = sorted({int(g) for g in (group_ids or [])})
+
+    with session_scope(commit=False) as session:
+        from ..repositories import user_repo
+
+        if user_repo.get_by_id(user_id, session=session) is None:
+            raise ValueError("user_not_found")
+        known_ids = {g.id for g in auth_repo.list_groups(session=session)}
+        unknown = [gid for gid in wanted if gid not in known_ids]
+        if unknown:
+            raise ValueError(f"unknown_group:{','.join(map(str, unknown))}")
+        group_entity_codes = auth_repo.list_group_entity_codes(session=session)
+
+    if operator_user_id is not None and int(operator_user_id) == user_id:
+        holds_manage = any("rbac:manage" in group_entity_codes.get(gid, set()) for gid in wanted)
+        if not holds_manage:
+            raise ValueError("cannot_remove_own_manage")
+
+    with session_scope() as session:
+        auth_repo.replace_user_groups(user_id, wanted, session=session)
+    return wanted
+
+
 def seed_rbac_defaults() -> None:
     """幂等 seed：auth_entity 全量 + 预设组（user/operator）+ 存量用户过渡映射。
 

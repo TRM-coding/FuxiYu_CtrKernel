@@ -92,6 +92,7 @@ class OperationType(str, Enum):
     # RBAC 权限组（管理动作，敏感审计）
     CREATE_RBAC_GROUP = "create_group"
     UPDATE_RBAC_GROUP_ENTITIES = "update_group_entities"
+    UPDATE_USER_GROUPS = "update_user_groups"
     # 镜像
     CREATE_IMAGE = "create_image"
     UPDATE_IMAGE = "update_image"

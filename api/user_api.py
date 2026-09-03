@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 
 from ..config import AppConfig
 from ..extensions import session_scope
-from ..repositories import user_repo
+from ..repositories import authentications_repo, user_repo
 from ..schemas.common import SuccessMessageResponse
 from ..schemas.user import (
     ChangePasswordRequest,
@@ -23,7 +23,7 @@ from ..schemas.user import (
     UserIdRequest,
 )
 from ..services import user_tasks
-from .deps import require_current_user, require_permission, require_resource
+from .deps import auth_token_from_cookie, require_current_user, require_permission, require_resource
 
 router = APIRouter(tags=["users"])
 
@@ -146,6 +146,24 @@ def login(message: LoginRequest, response: Response, request: Request):
     }
     status_code = 404 if error_reason == "user_not_found" else 400
     return _error(status_code, error_messages.get(error_reason, "Login failed"), error_reason)
+
+
+@router.post("/logout", response_model=SuccessMessageResponse)
+def logout(response: Response, auth_token: str = Depends(auth_token_from_cookie)):
+    """用户登出：删除认证记录并清理浏览器 cookie。"""
+
+    if auth_token:
+        with session_scope() as session:
+            authentications_repo.delete_auth(auth_token, session=session)
+
+    ssl_enabled = getattr(AppConfig, "SSL_ENABLED", True)
+    response.delete_cookie(
+        "auth_token",
+        path="/",
+        secure=ssl_enabled,
+        samesite="Lax",
+    )
+    return {"success": 1, "message": "logout successful"}
 
 
 #####################

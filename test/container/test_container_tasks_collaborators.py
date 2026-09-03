@@ -136,3 +136,26 @@ def test_update_role_to_root_sets_container_username_root(
     binding = usercontainer_repo.get_binding(collaborator.id, container.id, session=db_session)
     assert getattr(binding["role"], "value", binding["role"]) == ROLE.ROOT.value
     assert binding["username"] == "root"
+
+
+def test_remove_collaborator_keeps_binding_when_node_returns_failure(
+    db_session,
+    container_graph_with_collaborator,
+    mock_node_send,
+):
+    """Node 侧移除失败（容器内 userdel 失败）→ 任务抛 NodeServiceError，
+    不得删除 DB 绑定 —— 否则容器内账号还在、Ctrl 却已放行，产生权限漂移。"""
+    root, collaborator, _machine, container = container_graph_with_collaborator
+    mock_node_send(
+        {"success": 0, "error": "failed to remove collaborator inside container", "error_reason": "remove_failed"}
+    )
+
+    with pytest.raises(container_tasks.NodeServiceError) as excinfo:
+        container_tasks.remove_collaborator(
+            container_id=container.id,
+            user_id=collaborator.id,
+            operator_user_id=root.id,
+        )
+
+    assert excinfo.value.reason == "remove_failed"
+    assert usercontainer_repo.get_binding(collaborator.id, container.id, session=db_session) is not None

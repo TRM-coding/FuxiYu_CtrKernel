@@ -40,3 +40,13 @@ class CreateRbacGroupRequest(BaseModel):
 
 class CreateRbacGroupResponse(SuccessMessageResponse):
     group: RbacGroupItem | dict
+
+
+class RbacUserGroupsRequest(BaseModel):
+    group_ids: list[int] = Field(default_factory=list)
+
+
+class RbacUserGroupsResponse(BaseModel):
+    success: int | bool = 1
+    user_id: int
+    group_ids: list[int]

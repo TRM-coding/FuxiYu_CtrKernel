@@ -28,6 +28,8 @@ class ImageFileContent(BaseModel):
 class CreateImageRequest(ImageFileContent):
     name: str = Field(..., min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=500)
+    # 2026-09 决策：创建即带状态（不传默认草稿；此前恒 DRAFT 导致新建后需二次编辑才能置可用）
+    status: ImageStatus | None = Field(default=None)
 
 
 class CreateImageResponse(SuccessMessageResponse):

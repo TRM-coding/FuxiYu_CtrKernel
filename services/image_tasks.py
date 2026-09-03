@@ -99,6 +99,26 @@ def build_image_payload(image_id: int) -> dict | None:
         }
 
 
+def Can_use_image_for_container(user_id: int | None, image_id: int) -> bool | None:
+    """创建容器时的镜像可用性判断，口径与镜像列表可见性一致。
+
+    返回 None 表示镜像不存在；True/False 表示当前用户是否可用该镜像创建容器。
+    """
+
+    visible_ids, include_public = _visible_scope(user_id)
+    with session_scope(commit=False) as session:
+        image = image_repo.get_by_id(image_id, session=session)
+        if image is None:
+            return None
+        if visible_ids is None and not include_public:
+            return True
+        if visible_ids and image.id in visible_ids:
+            return True
+        if include_public and image.created_by_user_id is None:
+            return True
+        return False
+
+
 def _visible_scope(viewer_user_id: int | None) -> tuple[set[int] | None, bool]:
     """返回 (visible_image_ids, include_public)。
 
@@ -115,24 +135,39 @@ def _visible_scope(viewer_user_id: int | None) -> tuple[set[int] | None, bool]:
         return set(userimage_repo.list_image_ids_by_user(viewer_user_id, session=session)), True
 
 
+def _resource_scope(viewer_user_id: int | None) -> tuple[set[int], bool]:
+    """只返回当前用户持有 user_images 资源绑定的镜像集合。"""
+
+    if viewer_user_id is None:
+        return set(), False
+    with session_scope(commit=False) as session:
+        return set(userimage_repo.list_image_ids_by_user(viewer_user_id, session=session)), False
+
+
 def Create_image(
     *,
     name: str,
     base_image: str,
     dockerfile_body: str = "",
     description: str | None = None,
+    status: str | ImageStatus | None = None,
     operator_user_id: int | None = None,
 ) -> int:
-    """创建镜像模板，并把创建者绑定到 user-i。"""
+    """创建镜像模板，并把创建者绑定到 user-i。
+
+    2026-09 决策：创建即带状态——status 缺省为草稿，显式传 ready/disabled 一步到位
+    （此前恒 DRAFT，新建后必须二次编辑才能置可用）。
+    """
 
     try:
+        status_enum = _coerce_status(status)
         with session_scope() as session:
             image = image_repo.create_image(
                 name=name,
                 description=description,
                 base_image=base_image,
                 dockerfile_body=dockerfile_body,
-                status=ImageStatus.DRAFT,
+                status=status_enum or ImageStatus.DRAFT,
                 created_by_user_id=operator_user_id,
                 session=session,
             )
@@ -241,10 +276,11 @@ def List_image_bref_information(
     page_size: int = 20,
     image_search: str | None = None,
     viewer_user_id: int | None = None,
+    mine_only: bool = False,
 ) -> dict:
     page_number = max(1, int(page_number or 1))
     page_size = max(1, int(page_size or 20))
-    visible_ids, include_public = _visible_scope(viewer_user_id)
+    visible_ids, include_public = _resource_scope(viewer_user_id) if mine_only else _visible_scope(viewer_user_id)
     with session_scope(commit=False) as session:
         total = image_repo.count_images(
             image_search=image_search,

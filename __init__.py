@@ -276,7 +276,10 @@ def create_app(config: str | None = None, overrides: dict | None = None) -> Fast
             reason = "missing_user_id"
         elif request.url.path.endswith("/request_register_code") and "email" in fields:
             reason = "missing_email"
-        elif request.url.path.endswith("/machines/add_machine_permission") and {"machine_id", "user_id"} & fields:
+        elif (
+            request.url.path.endswith("/machines/add_machine_permission")
+            or request.url.path.endswith("/machines/remove_machine_permission")
+        ) and {"machine_id", "user_id"} & fields:
             reason = "missing_fields"
         return JSONResponse(
             status_code=400,
