@@ -116,7 +116,6 @@ def ensure_auth_users(db_session):
     相关测试文件用 pytestmark usefixtures 挂载本 fixture。
     """
 
-    from ..constant import PERMISSION
     from ..models.user import User
 
     for uid, uname in ((1, "auth_user_1"), (7, "auth_user_7")):
@@ -127,7 +126,6 @@ def ensure_auth_users(db_session):
                 email=f"{uname}@bjtu.edu.cn",
                 password_hash="unused",
                 graduation_year="2026",
-                permission=PERMISSION.USER,
             ))
     db_session.commit()
 

@@ -14,9 +14,11 @@ TEST_MACHINE_IP = "127.0.0.1"
 VALID_PUBLIC_KEY = "ssh-rsa AAAATEST"
 NODE_SUCCESS_TRUE = {"success": 1}
 NODE_SUCCESS_BOOL = {"success": True}
-NODE_REMOVE_SUCCESS = {"success": 0}
-NODE_REMOVE_NOT_FOUND = {"success": 1}
-NODE_REMOVE_FAILED = {"success": 2, "error_reason": "remove_failed"}
+# remove_container 的真实 wire（Node network/api.py）：docker 已删除 → 200 {"success": 1}；
+# docker 中不存在 → HTTP 404 {"success": 0, error_reason: not_found}；删除失败 → HTTP 500 remove_failed
+NODE_REMOVE_SUCCESS = {"success": 1}
+NODE_REMOVE_NOT_FOUND = {"success": 0, "error": "container not found", "error_reason": "not_found", "status_code": 404}
+NODE_REMOVE_FAILED = {"success": 0, "error": "failed to remove container", "error_reason": "remove_failed", "status_code": 500}
 NODE_STATUS_ONLINE = {"success": 1, "container_status": "online"}
 NODE_STATUS_OFFLINE = {"success": 1, "container_status": "offline"}
 NODE_STATUS_404 = {"status_code": 404, "error": "not found", "text": "not found"}

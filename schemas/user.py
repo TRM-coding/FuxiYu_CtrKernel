@@ -10,9 +10,6 @@ except ImportError:  # pragma: no cover
 from .common import PageRequest, SuccessMessageResponse
 
 
-PermissionValue = Literal["user", "operator"]
-
-
 def _blank_to_none(value):
     """将可选档案字段里的空字符串视为未填写。"""
 
@@ -52,7 +49,6 @@ class LoginResponse(SuccessMessageResponse):
     user_id: int
     username: str
     email: str
-    permission: PermissionValue | str
 
 
 class UserIdRequest(BaseModel):
@@ -72,7 +68,7 @@ class UserBriefItem(BaseModel):
 
 
 class UserDetailInfo(UserBriefItem):
-    permission: PermissionValue | str | None = None
+    """用户详情（权限归属由组/RBAC 管理，出参不带单字段）。"""
 
 
 class UserDetailResponse(BaseModel):

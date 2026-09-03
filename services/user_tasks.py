@@ -33,7 +33,6 @@ class user_detail_information(BaseModel):
     email:str
     graduation_year:int
     containers:list[int]  # 容器id列表
-    permission: str = None
     amount_of_container: int = 0
     amount_of_functional_container: int = 0
     amount_of_managed_container: int = 0
@@ -149,7 +148,7 @@ def Register(username: str, email: str, password: str, graduation_year):
             write_op_log(success=False, operation=OperationType.REGISTER_USER, target_type="user", target_id=0,
                          detail={"username": username, "email": email}, error_reason=str(e))
             raise
-    # RBAC 建号组绑定：新用户默认 user 组（operator 建号场景由调用方传 permission）
+    # RBAC 建号组绑定：新用户默认 user 组（operator 建号由 seed 显式绑 operator 组）
     from .rbac_service import bind_user_default_group
     bind_user_default_group(new_user.id)
     write_op_log(success=True, operation=OperationType.REGISTER_USER, target_type="user", target_id=new_user.id,
@@ -274,7 +273,6 @@ def Get_user_detail_information(user_id: int)->user_detail_information:
         username=user.username,
         email=user.email,
         graduation_year=user.graduation_year,
-        permission=user.permission.value, #这里用.value获取字符串形式
         containers=container_ids,
         amount_of_container=counts.get('total', 0),
         amount_of_functional_container=counts.get('functional', 0),
@@ -337,10 +335,8 @@ def List_all_user_bref_information(page_number:int, page_size:int, user_search: 
 
 #####################################
 def Update_user(user_id:int,**fields)->User|None:
-    # 此方法不能修改 permission、password_hash
+    # 此方法不能修改 password_hash、email（RBAC 归属走组绑定管理，不走用户字段）
 
-    if 'permission' in fields:
-        del fields['permission']
     if 'password_hash' in fields:
         del fields['password_hash']
     if 'email' in fields:

@@ -41,9 +41,8 @@ def test_container_role_resource_points(db_session):
     from ...repositories import auth_repo
     from ...extensions import session_scope as _ss
     with _ss() as session:
-        ent = auth_repo.ensure_entity("container:manage", "t", session=session)
         group = auth_repo.ensure_group("container_manager_test", "t", session=session)
-        auth_repo.ensure_group_entity(group.id, ent.id, session=session)
+        auth_repo.ensure_group_entity(group.id, "container:manage", session=session)
         auth_repo.ensure_user_group(manager.id, group.id, session=session)
     assert rbac_service.user_has_resource(manager.id, "container:admin", container.id)
     assert rbac_service.user_has_resource(manager.id, "container", container.id)

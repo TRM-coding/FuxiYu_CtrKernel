@@ -58,3 +58,12 @@ def list_records(
 
 def count_records(*, session: Session) -> int:
     return int(session.scalar(select(func.count()).select_from(DeletedContainerRestoreSnapshot)) or 0)
+
+
+def delete(record_id: int, *, session: Session) -> bool:
+    row = get_by_id(record_id, session=session)
+    if row is None:
+        return False
+    session.delete(row)
+    session.flush()
+    return True

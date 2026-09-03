@@ -1,6 +1,5 @@
 import pytest
 
-from ...constant import PERMISSION
 from ...models.long_term_container import LongTermContainer
 from ...repositories import long_term_container_repo
 from ...services import container_tasks
@@ -18,7 +17,7 @@ def test_set_long_term_success_for_root_owner(db_session, container_graph):
 
 
 def test_set_long_term_success_for_operator_on_owned_container(db_session, container_graph):
-    operator = create_user(permission=PERMISSION.OPERATOR)
+    operator = create_user(operator=True)
     _root, _machine, container = container_graph
 
     result = container_tasks.set_long_term_container(container.id, True, operator_user_id=operator.id)

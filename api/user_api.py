@@ -137,7 +137,6 @@ def login(message: LoginRequest, response: Response, request: Request):
             "user_id": user_or_reason.id,
             "username": user_or_reason.username,
             "email": user_or_reason.email,
-            "permission": user_or_reason.permission.value,
         }
 
     error_reason = user_or_reason

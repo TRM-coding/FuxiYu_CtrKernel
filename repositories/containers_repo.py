@@ -147,6 +147,8 @@ def create_container(
     port: int,
     status=None,
     gpu_chosen_list: list | None = None,
+    bind_mount_path: str | None = None,
+    port_mappings: list | None = None,
     *,
     session: Session,
 ) -> Container:
@@ -160,6 +162,8 @@ def create_container(
         cpu_number=cpu_number,
         port=port,
         gpu_chosen_list=gpu_chosen_list,
+        bind_mount_path=bind_mount_path,
+        port_mappings=port_mappings,
         created_at=datetime.utcnow(),
     )
     if status is not None:
@@ -181,6 +185,8 @@ def update_container(container_id: int, *, session: Session, **fields) -> Contai
         "container_status",
         "failed_reason",
         "failed_detail",
+        "status_unknown_since",
+        "status_source",
         "disk_overlay_rw_bytes",
         "disk_bind_mount_bytes",
         "disk_total_bytes",
@@ -190,7 +196,7 @@ def update_container(container_id: int, *, session: Session, **fields) -> Contai
         "port_mappings",
     }
     dirty = False
-    nullable_clear_fields = {"failed_reason", "failed_detail"}
+    nullable_clear_fields = {"failed_reason", "failed_detail", "status_unknown_since", "status_source"}
     for key, value in fields.items():
         if key not in allowed or (value is None and key not in nullable_clear_fields):
             continue
@@ -360,8 +366,12 @@ def validate_memory_request(machine: Machine, container: Container_info, *, sess
 
 
 def validate_names_and_lengths(container: Container_info, public_key: str | None = None) -> None:
-    if getattr(container, "NAME", None) and len(container.NAME) > 115:
-        raise ValueError(f"container name too long (max 115): length={len(container.NAME)}")
+    name = getattr(container, "NAME", "") or ""
+    # 最小长度 2 与 docker 对齐（单字符名字 docker create 会 400），最大长度沿用平台上限
+    if len(name) > 115:
+        raise ValueError(f"container name too long (max 115): length={len(name)}")
+    if len(name) < 2:
+        raise ValueError(f"container name too short (min 2): length={len(name)}")
     if getattr(container, "image", None) and len(container.image) > 195:
         raise ValueError(f"container image name too long (max 195): length={len(container.image)}")
     if public_key and len(public_key) > 495:
@@ -369,8 +379,8 @@ def validate_names_and_lengths(container: Container_info, public_key: str | None
 
     import re
 
-    if not re.fullmatch(r"[A-Za-z0-9_]+", getattr(container, "NAME", "") or ""):
-        raise ValueError(f"invalid container name: '{getattr(container, 'NAME', '')}'. Allowed characters: A-Z a-z 0-9 _")
+    if not re.fullmatch(r"[A-Za-z0-9_]{2,}", name):
+        raise ValueError(f"invalid container name: '{name}'. Allowed: 2-115 chars of A-Z a-z 0-9 _")
 
 
 def check_duplicate_container_name(container_name: str, machine_id: int, *, session: Session) -> None:

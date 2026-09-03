@@ -79,7 +79,7 @@ def test_container_status_api_success(client, monkeypatch, db_session):
     )
 
     assert resp.status_code == 200
-    assert resp.json()["container_status"] == container.container_status.value
+    assert resp.json()["effective_status"] == container.container_status.value
     assert resp.json()["runtime_metrics"] == runtime
 
 
@@ -95,7 +95,7 @@ def test_container_status_api_query_key_is_container_id_not_name_machine(client,
     )
 
     assert resp.status_code == 200
-    assert resp.json()["container_status"] == "online"
+    assert resp.json()["effective_status"] == "online"
 
 
 def test_container_status_api_without_container_id_rejected(client, monkeypatch, db_session):

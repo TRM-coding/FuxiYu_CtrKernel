@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from ...constant import ContainerStatus, MachineStatus, PERMISSION, ROLE
+from ...constant import ContainerStatus, MachineStatus, ROLE
 from ...extensions import session_scope
 from ...repositories import usercontainer_repo, container_ssh_login_repo, long_term_container_repo, machine_permission_repo
 from ...models.containers import Container
@@ -13,7 +13,7 @@ from .conftest import NODE_STATUS_404, NODE_STATUS_OFFLINE, NODE_STATUS_ONLINE
 
 
 def test_get_container_detail_reads_status_from_db(db_session, container_graph):
-    # getter 只查库：状态读 WSS 推送落库的 container_status 字段
+    # getter 对外返回 effective_status；基础事实仍来自 WSS 落库的 container_status 字段
     _root, machine, container = container_graph
     container.container_status = ContainerStatus.OFFLINE
     db_session.commit()
@@ -21,7 +21,7 @@ def test_get_container_detail_reads_status_from_db(db_session, container_graph):
     info = container_tasks.get_container_detail_information(container.id)
 
     assert info["container_id"] == container.id
-    assert info["container_status"] == ContainerStatus.OFFLINE.value
+    assert info["effective_status"] == ContainerStatus.OFFLINE.value
 
 
 def test_get_container_detail_keeps_default_status_from_db(db_session, container_graph):
@@ -31,7 +31,7 @@ def test_get_container_detail_keeps_default_status_from_db(db_session, container
     info = container_tasks.get_container_detail_information(container.id)
 
     assert info["container_id"] == container.id
-    assert info["container_status"] == ContainerStatus.ONLINE.value
+    assert info["effective_status"] == ContainerStatus.ONLINE.value
 
 
 def test_get_container_detail_includes_cached_runtime_metrics(monkeypatch, db_session, container_graph):
@@ -81,7 +81,7 @@ def test_get_container_detail_derives_ssh_port_mapping_from_port(db_session, con
 
 
 def test_list_container_bref_operator_can_filter_by_user(monkeypatch, db_session):
-    operator = create_user(permission=PERMISSION.OPERATOR)
+    operator = create_user(operator=True)
     target = create_user()
     _root, machine, container = container_tasks_test_graph_for_user(target, db_session)
 
@@ -101,7 +101,7 @@ def test_list_container_bref_operator_can_filter_by_user(monkeypatch, db_session
 def test_list_container_bref_includes_cached_runtime_metrics(monkeypatch, db_session):
     from ...services.container_module import node_comms
 
-    operator = create_user(permission=PERMISSION.OPERATOR)
+    operator = create_user(operator=True)
     machine = create_machine()
     container = create_container(machine=machine, name="metrics_bref")
     runtime = {"memory_usage_percent": 33.3, "gpu": {"device_ids": ["0"]}}
@@ -123,7 +123,7 @@ def test_list_container_bref_includes_cached_runtime_metrics(monkeypatch, db_ses
 
 
 def test_list_container_bref_filters_by_container_search_name(monkeypatch, db_session):
-    operator = create_user(permission=PERMISSION.OPERATOR)
+    operator = create_user(operator=True)
     machine = create_machine()
     target = create_container(machine=machine, name="alpha_target")
     create_container(machine=machine, name="beta_other")
@@ -143,7 +143,7 @@ def test_list_container_bref_filters_by_container_search_name(monkeypatch, db_se
 
 
 def test_list_container_bref_container_search_matches_port_and_machine_ip(monkeypatch, db_session):
-    operator = create_user(permission=PERMISSION.OPERATOR)
+    operator = create_user(operator=True)
     target_machine = create_machine(machine_ip="10.10.10.8")
     other_machine = create_machine(machine_ip="10.10.10.9")
     target = create_container(machine=target_machine, name="alpha", port=2208)
@@ -329,7 +329,7 @@ def test_list_container_bref_disk_limit_derives_from_machine_max(monkeypatch, db
     from ...services.container_module import node_comms
 
     monkeypatch.setattr(node_comms, "get_cached_container_runtime_metrics", lambda machine_id, name: None)
-    operator = create_user(permission=PERMISSION.OPERATOR)
+    operator = create_user(operator=True)
     machine = create_machine(max_disk_size_gb=80)
     container = create_container(machine=machine, name="disk_limit_bref", image="ubuntu:24.04")
     container.disk_total_bytes = int(40 * 1024**3)
@@ -353,7 +353,7 @@ def test_list_container_bref_derives_ssh_port_mapping_from_port(monkeypatch, db_
     from ...services.container_module import node_comms
 
     monkeypatch.setattr(node_comms, "get_cached_container_runtime_metrics", lambda machine_id, name: None)
-    operator = create_user(permission=PERMISSION.OPERATOR)
+    operator = create_user(operator=True)
     machine = create_machine()
     container = create_container(machine=machine, name="port_mapping_bref", port=22123)
     container.port_mappings = None

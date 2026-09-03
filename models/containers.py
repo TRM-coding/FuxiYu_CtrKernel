@@ -24,6 +24,11 @@ class Container(db.Model):
     )
     failed_reason: str = db.Column(db.String(255), nullable=True)
     failed_detail: str = db.Column(db.Text, nullable=True)
+    # ── 容器轴 unknown 标记（2026-09-03 决策，仿机器轴 collect_error） ──
+    # 容器自身状态不可知（node 冷启动复核中/对账异常等）时置位，不改 container_status
+    # （保持最后已知为真）；展示派生 status_unknown。恢复由正常快照清除。
+    status_unknown_since = db.Column(db.DateTime, nullable=True)
+    status_source: str = db.Column(db.String(40), nullable=True)
     port: int = db.Column(db.Integer, nullable=False, index=True)
 
     memory_gb: int = db.Column(db.Integer, nullable=False)

@@ -8,7 +8,6 @@ from sqlalchemy import String, cast, or_, select
 from sqlalchemy.orm import Session
 
 from ..models.user import User
-from ..constant import PERMISSION
 from .authentications_repo import get_user_id_by_token
 
 
@@ -65,7 +64,6 @@ def create_user(
 		email=email,
 		password_hash=password_hash,
 		graduation_year=graduation_year,
-		# permission 会使用默认值 PERMISSION.USER
 	)
 	session.add(user)
 	session.flush()

@@ -26,6 +26,26 @@ from .utils import _parse_last_ssh_time
 
 logger = logging.getLogger(__name__)
 
+# ── 心跳日志降噪（2026-09）────────────────────────────
+# 稳态心跳 5s 一条只留 DEBUG；异常/变化才 INFO，且连续异常只记首次 + 每 60s 复述，
+# 保证异常期间日志新鲜可查但不刷屏。
+_ANOMALY_REPEAT_SECONDS = 60.0
+_last_anomaly_log_at: dict[str, float] = {}
+# 容器快照摘要突变检测：summary 与上一拍不一致才 INFO（容器增删/批量状态翻动）
+_last_container_summary: dict[str, tuple] = {}
+
+
+def _log_heartbeat(key: str, level: int, message: str, *args, anomaly: bool = False) -> None:
+    """按需降噪记录心跳摘要。*anomaly* 为真时受 60s 复述节流（稳态不加节流）。"""
+    if not anomaly:
+        logger.log(level, message, *args)
+        return
+    now = time.time()
+    last = _last_anomaly_log_at.get(key, 0.0)
+    if now - last >= _ANOMALY_REPEAT_SECONDS:
+        logger.log(level, message, *args)
+        _last_anomaly_log_at[key] = now
+
 _RUNTIME_BUFFER_LOCK = threading.RLock()
 _CONTAINER_RUNTIME_BUFFER: dict[str, dict[str, dict]] = {}
 _MACHINE_RUNTIME_BUFFER: dict[str, dict] = {}
@@ -558,8 +578,8 @@ _NODE_STATUS_TO_CTRL = {
 }
 
 # 显式跳过集：动作转换态（pausing/unpausing——终态由下一帧收敛，DB 保持最后已知值，
-# 与 C6 单写入者一致）与 unknown（契约 C2 后理论不可达的兜底）。跳过时 debug 级日志，
-# 不属于静默漏配；不在本集的未映射状态 → warning（契约 C8 枚举对齐测试兜底）。
+# 与 C6 单写入者一致）。unknown 保留在跳过集仅为满足 C8 枚举对齐契约——实际在
+# apply 循环里先于映射被特判处理（容器轴 unknown 标记，见下），不会走到这里。
 _NODE_STATUS_SKIP = {"pausing", "unpausing", "unknown"}
 
 
@@ -641,10 +661,49 @@ def apply_container_status_snapshot(data: dict, machine_id: int | None = None) -
                 missing_names = sorted(set(containers_by_name) - snapshot_names)
             for name, entry in data.items():
                 raw_status = str((entry or {}).get("status", ""))
+                # 容器轴 unknown（2026-09-03 决策，仿机器轴 collect_error）：
+                # 容器自身状态不可知（node 冷启动复核 cold_start_verify 等）→ 只落标记列
+                # status_unknown_since/status_source，不写 container_status（保持最后已知为真）；
+                # 展示层据此派生 status_unknown。恢复 = 下一帧具体状态 → 清除标记。
+                if raw_status == "unknown":
+                    if machine_id is not None:
+                        container = containers_by_name.get(name)
+                    else:
+                        container = None
+                    if container is None:
+                        skipped += 1
+                        continue
+                    source = str((entry or {}).get("status_source") or "unknown")
+                    since = None
+                    raw_since = (entry or {}).get("unknown_since")
+                    if raw_since:
+                        try:
+                            since = datetime.datetime.fromisoformat(str(raw_since))
+                        except ValueError:
+                            since = None
+                    since = since or datetime.datetime.utcnow()
+                    # 与上一拍一致则不重复写（心跳每 5s 一帧）
+                    changed = (getattr(container, "status_source", None) != source) \
+                        or (getattr(container, "status_unknown_since", None) != since)
+                    if not changed:
+                        skipped += 1
+                        continue
+                    containers_repo.update_container(
+                        container.id,
+                        status_unknown_since=since,
+                        status_source=source,
+                        session=session,
+                    )
+                    logger.warning(
+                        "apply status snapshot: container %s status_unknown source=%s since=%s",
+                        name, source, since,
+                    )
+                    updated += 1
+                    continue
                 ctrl_status = _NODE_STATUS_TO_CTRL.get(raw_status)
                 if ctrl_status is None:
                     if raw_status in _NODE_STATUS_SKIP:
-                        # 动作转换态/unknown：显式跳过，DB 保持最后已知值（契约 C8）
+                        # 动作转换态：显式跳过，DB 保持最后已知值（契约 C8）
                         logger.debug(
                             "apply status snapshot: transition state %r skipped (name=%s)",
                             raw_status,
@@ -675,6 +734,9 @@ def apply_container_status_snapshot(data: dict, machine_id: int | None = None) -
                     container_status=ctrl_status,
                     failed_reason=failed_reason if ctrl_status == ContainerStatus.FAILED else None,
                     failed_detail=failed_detail if ctrl_status == ContainerStatus.FAILED else None,
+                    # 具体状态帧 = unknown 标记恢复信号 → 清除（update 的 None 即清语义）
+                    status_unknown_since=None,
+                    status_source=None,
                     port=(entry or {}).get("port"),
                     port_mappings=(entry or {}).get("port_mappings"),
                     session=session,
@@ -700,13 +762,18 @@ def apply_container_status_snapshot(data: dict, machine_id: int | None = None) -
         _handle_container_deleted(name, machine_id)
         vanished += 1
 
-    logger.info(
+    summary = (updated, skipped, vanished, len(data))
+    prev = _last_container_summary.get(str(machine_id))
+    _last_container_summary[str(machine_id)] = summary
+    # vanished>0 恒重要（删除帧）；skipped 恒有基线（如野容器每拍跳过）不单独刷屏，
+    # 只要不静默掩盖 skipped 的增减——增减即落入 summary 突变 → INFO
+    noteworthy = bool(vanished) or summary != prev
+    _log_heartbeat(
+        f"cont-{machine_id}",
+        logging.INFO if noteworthy else logging.DEBUG,
         "apply_container_status_snapshot: machine=%s updated=%s skipped=%s vanished=%s snapshot=%s",
-        machine_id,
-        updated,
-        skipped,
-        vanished,
-        len(data),
+        machine_id, updated, skipped, vanished, len(data),
+        anomaly=False,
     )
     return {"updated": updated, "skipped": skipped, "vanished": vanished, "failed": failed}
 
@@ -881,11 +948,25 @@ def apply_sys_snapshot(data: dict, machine_id: int | None = None) -> dict:
         logger.warning("apply_sys_snapshot: HARDWARE DRIFT on machine %s (%s): %s -> db updated, max_* trimmed",
                        machine.id, data.get("hostname"), drift)
 
-    logger.info("apply_sys_snapshot: machine %s (%s) cpu=%s%% mem=%s%% disk=%s%%",
-                machine.id, data.get("hostname"),
-                (data.get("cpu") or {}).get("usage_percent"),
-                (data.get("memory") or {}).get("usage_percent"),
-                (data.get("disk") or {}).get("percent"))
+    cpu_usage = (data.get("cpu") or {}).get("usage_percent")
+    mem_usage = (data.get("memory") or {}).get("usage_percent")
+    disk_percent = (data.get("disk") or {}).get("percent")
+    collect_error = bool(data.get("collect_error"))
+    machine_status = getattr(machine, "machine_status", None)
+    status_value = machine_status.value if hasattr(machine_status, "value") else str(machine_status or "")
+    anomalous = (
+        cpu_usage is None or mem_usage is None or disk_percent is None
+        or collect_error
+        or status_value.lower() != "online"
+    )
+    _log_heartbeat(
+        f"sys-{machine.id}",
+        logging.INFO if anomalous else logging.DEBUG,
+        "apply_sys_snapshot: machine %s (%s) cpu=%s%% mem=%s%% disk=%s%% (collect_error=%s, machine_status=%s)",
+        machine.id, data.get("hostname"), cpu_usage, mem_usage, disk_percent,
+        collect_error, status_value,
+        anomaly=anomalous,
+    )
     return {"checked": checked, "drifted": drifted}
 
 

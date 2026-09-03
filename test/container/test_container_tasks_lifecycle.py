@@ -2,7 +2,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from ...constant import ContainerStatus, MachineStatus, PERMISSION, ROLE
+from ...constant import ContainerStatus, MachineStatus, ROLE
 from ...extensions import session_scope
 from ...models.containers import Container
 from ...repositories import containers_repo, machine_permission_repo, machine_repo, usercontainer_repo
@@ -73,6 +73,27 @@ def test_create_container_with_image_build_records_building_and_forwards_payload
     assert created is not None
     assert created.container_status == ContainerStatus.BUILDING
     assert calls[0]["payload"]["image_build"] == image_build
+
+
+def test_create_container_rejects_single_char_name(db_session, container_info, mock_node_send):
+    """docker 拒绝单字符容器名（如 "2"）→ Ctrl 参数校验须先拦下，不发 node。"""
+    owner = create_user(username="owner_single_char")
+    machine = create_machine(max_shared_gb=8, max_memory_gb=64)
+    machine_permission_repo.add_permission(machine.id, owner.id, session=db_session)
+    db_session.commit()
+    container_info.NAME = "2"
+    calls = mock_node_send(NODE_SUCCESS_TRUE)
+
+    with pytest.raises(container_tasks.NodeServiceError, match="too short") as excinfo:
+        container_tasks.Create_container(
+            owner_user_id=owner.id,
+            machine_id=machine.id,
+            container=container_info,
+            public_key=VALID_PUBLIC_KEY,
+            operator_user_id=owner.id,
+        )
+    assert excinfo.value.reason == "invalid_payload"
+    assert calls == []
 
 
 def test_create_container_rejects_machine_not_found(db_session, container_info):
@@ -212,6 +233,34 @@ def test_remove_container_node_failed_raises_and_keeps_local_record(
     assert db_session.get(Container, container.id) is not None
 
 
+@pytest.mark.parametrize(
+    ("operation", "call"),
+    [
+        ("start", lambda cid, uid: container_tasks.start_container(cid, operator_user_id=uid)),
+        ("stop", lambda cid, uid: container_tasks.stop_container(cid, operator_user_id=uid)),
+        ("restart", lambda cid, uid: container_tasks.restart_container(cid, operator_user_id=uid)),
+        ("remove", lambda cid, uid: container_tasks.remove_container(cid, operator_user_id=uid)),
+    ],
+)
+def test_container_lifecycle_operations_reject_unstable_status_before_node_call(
+    db_session,
+    container_graph,
+    mock_node_send,
+    operation,
+    call,
+):
+    root, _machine, container = container_graph
+    container.container_status = ContainerStatus.CREATING
+    db_session.commit()
+    calls = mock_node_send(NODE_SUCCESS_TRUE)
+
+    with pytest.raises(container_tasks.NodeServiceError) as excinfo:
+        call(container.id, root.id)
+
+    assert excinfo.value.reason == "container_busy"
+    assert calls == []
+
+
 def test_start_container_success(
     db_session,
     container_graph,
@@ -219,6 +268,8 @@ def test_start_container_success(
 ):
     # 心跳三件套已退役：状态推进由 WSS 推送接管，动作成功即返回
     root, _machine, container = container_graph
+    container.container_status = ContainerStatus.OFFLINE
+    db_session.commit()
     mock_node_send(NODE_SUCCESS_TRUE)
 
     assert container_tasks.start_container(container.id, operator_user_id=root.id) is True

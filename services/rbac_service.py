@@ -1,11 +1,10 @@
 # services/rbac_service.py
 """RBAC 两层模型 · service 层（判断逻辑与框架无关，FastAPI Depends 只做挂载）。
 
-第一层 权限组判别（方法级）：user ─ auth_group ─ auth_entity
+第一层 权限组判别（方法级）：user ─ auth_group ─ auth_entity(code)
 第二层 资源组判别（资源级）：user-m（machine_permissions）/ user-c（user_container）/ user-i（user_images）
 
-过渡兼容：user.permission == OPERATOR 视为拥有全部权限（单字段映射到 operator 组，
-正式组挂载后由 seed 的 user_group 替代，判断函数对两者都放行）。
+权限判定只认组绑定（auth_group_entities），历史 user.permission 单字段已清退（2026-09）。
 """
 import logging
 import re
@@ -72,12 +71,11 @@ def _manage_entity_for(entity_code: str) -> str | None:
 
 # ── seed（幂等；create_app 建表后调用一次） ─────────────────────────
 
-def bind_user_default_group(user_id: int, permission=None) -> None:
-    """建号时按 permission 绑定默认组：operator → operator 组；其余 → user 组。"""
+def bind_user_default_group(user_id: int) -> None:
+    """建号默认组绑定：普通注册用户一律进 user 组（operator 建号由 seed 显式绑 operator 组）。"""
     try:
         with session_scope() as session:
-            is_op = (getattr(permission, "value", None) if hasattr(permission, "value") else permission) == "operator"
-            group = auth_repo.get_group("operator" if is_op else "user", session=session)
+            group = auth_repo.get_group("user", session=session)
             if group is not None:
                 auth_repo.ensure_user_group(user_id, group.id, session=session)
     except Exception as e:
@@ -87,28 +85,21 @@ def bind_user_default_group(user_id: int, permission=None) -> None:
 def seed_rbac_defaults() -> None:
     """幂等 seed：auth_entity 全量 + 预设组（user/operator）+ 存量用户过渡映射。
 
-    新 entity/组通过新增常量后再调本函数补录（不覆盖已有行）。
-    db 访问收敛在 auth_repo。
+    新 entity/组通过新增常量后再调本函数补录（不覆盖已有行）；
+    常量是权威：代码已从 AUTH_ENTITIES 移除的历史实体在此清退（DB 与常量收敛，
+    避免 matrix 读 DB / 建组校验读常量两套分叉）。db 访问收敛在 auth_repo。
     """
     with session_scope() as session:
-        created_entities = {}
-        for code, name in AUTH_ENTITIES:
-            ent = auth_repo.ensure_entity(code, name, session=session)
-            created_entities[code] = ent
-
         groups = {}
         for gname, (desc, codes) in _GROUP_DEFS.items():
             g = auth_repo.ensure_group(gname, desc, session=session)
             groups[gname] = g
             for code in codes:
-                auth_repo.ensure_group_entity(g.id, created_entities[code].id, session=session)
-
-        # 存量用户过渡映射：permission=OPERATOR → operator 组；其余 → user 组
-        from ..repositories.user_repo import list_all_users
-        for u in list_all_users(session=session):
-            is_op = (getattr(u.permission, "value", None) if hasattr(u.permission, "value") else u.permission) == "operator"
-            auth_repo.ensure_user_group(u.id, groups["operator" if is_op else "user"].id, session=session)
-    logger.info("rbac seed done: %d entities, %d groups", len(created_entities), len(groups))
+                auth_repo.ensure_group_entity(g.id, code, session=session)
+        pruned = auth_repo.prune_group_entity_codes({code for code, _ in AUTH_ENTITIES}, session=session)
+    if pruned:
+        logger.warning("rbac seed pruned stale group bindings: %s", pruned)
+    logger.info("rbac seed done: %d entities, %d groups", len(AUTH_ENTITIES), len(groups))
 
 
 # ── 第一层：方法级判别 ─────────────────────────────────────────
@@ -129,22 +120,25 @@ def list_user_entities(user_id: int) -> list[str]:
 
 
 def list_rbac_matrix() -> dict:
-    """返回权限组 × 权限点矩阵，供管理页面展示。"""
+    """返回权限组 × 权限点矩阵，供管理页面展示。
+
+    权限点枚举直接来自 AUTH_ENTITIES 常量（不再落库）；id 用序数占位
+    （稳定顺序 = 常量声明顺序），前端以 code 为键。
+    """
 
     entity_order = {code: index for index, (code, _) in enumerate(AUTH_ENTITIES)}
     with session_scope(commit=False) as session:
-        entities = auth_repo.list_entities(session=session)
         groups = auth_repo.list_groups(session=session)
         group_entities = auth_repo.list_group_entity_codes(session=session)
 
     entities_data = [
         {
-            "id": ent.id,
-            "code": ent.code,
-            "name": ent.name,
-            "description": ent.description,
+            "id": index + 1,
+            "code": code,
+            "name": name,
+            "description": None,
         }
-        for ent in sorted(entities, key=lambda ent: (entity_order.get(ent.code, 9999), ent.code))
+        for index, (code, name) in enumerate(AUTH_ENTITIES)
     ]
     groups_data = []
     for group in groups:
@@ -161,6 +155,13 @@ def list_rbac_matrix() -> dict:
     return {"entities": entities_data, "groups": groups_data}
 
 
+def _invalid(reason: str, why: str) -> ValueError:
+    """带诊断上下文的校验错误：reason 保持稳定（api 映射用），why 解释差在哪。"""
+    err = ValueError(reason)
+    err.detail = why
+    return err
+
+
 def update_group_entities(group_id: int, entity_codes: list[str]) -> dict:
     """替换某个权限组持有的权限点。"""
 
@@ -168,13 +169,16 @@ def update_group_entities(group_id: int, entity_codes: list[str]) -> dict:
     valid_codes = {code for code, _ in AUTH_ENTITIES}
     unknown = sorted(requested - valid_codes)
     if unknown:
-        raise ValueError(f"unknown_auth_entities:{','.join(unknown)}")
+        raise _invalid(
+            f"unknown_auth_entities:{','.join(unknown)}",
+            f"unknown entity codes: {unknown} (valid={len(valid_codes)})",
+        )
 
     entity_order = {code: index for index, (code, _) in enumerate(AUTH_ENTITIES)}
     with session_scope() as session:
         group = auth_repo.get_group_by_id(group_id, session=session)
         if group is None:
-            raise ValueError("group_not_found")
+            raise _invalid("group_not_found", f"rbac group id={group_id} not found")
         if group.name == "operator":
             requested.update(_OPERATOR_LOCKED_ENTITIES)
         auth_repo.replace_group_entities(group.id, requested, session=session)
@@ -195,18 +199,24 @@ def create_group(name: str, description: str | None, entity_codes: list[str]) ->
 
     group_name = str(name or "").strip()
     if not _GROUP_NAME_RE.match(group_name):
-        raise ValueError("invalid_group_name")
+        raise _invalid(
+            "invalid_group_name",
+            f"name={group_name!r} 不满足组名规则：英文字母开头，2-64 位 [A-Za-z0-9_-]（长度 {len(group_name)}）",
+        )
 
     requested = {str(code).strip() for code in entity_codes if str(code).strip()}
     valid_codes = {code for code, _ in AUTH_ENTITIES}
     unknown = sorted(requested - valid_codes)
     if unknown:
-        raise ValueError(f"unknown_auth_entities:{','.join(unknown)}")
+        raise _invalid(
+            f"unknown_auth_entities:{','.join(unknown)}",
+            f"unknown entity codes: {unknown} (valid={len(valid_codes)})",
+        )
 
     entity_order = {code: index for index, (code, _) in enumerate(AUTH_ENTITIES)}
     with session_scope() as session:
         if auth_repo.get_group(group_name, session=session) is not None:
-            raise ValueError("group_exists")
+            raise _invalid("group_exists", f"name={group_name!r} already exists")
         group = auth_repo.create_group(group_name, str(description or "").strip(), session=session)
         auth_repo.replace_group_entities(group.id, requested, session=session)
         group_entities = auth_repo.list_group_entity_codes(session=session).get(group.id, set())

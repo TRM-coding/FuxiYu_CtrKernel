@@ -3,14 +3,14 @@ from itertools import count
 
 from werkzeug.security import generate_password_hash
 
-from ..constant import ContainerStatus, MachineStatus, MachineTypes, PERMISSION, ROLE
-from ..extensions import SessionRegistry
+from ..constant import ContainerStatus, MachineStatus, MachineTypes, ROLE
+from ..extensions import SessionRegistry, session_scope
 from ..models.authentications import Authentication
 from ..models.containers import Container
 from ..models.machine import Machine
 from ..models.user import User
 from ..models.usercontainer import UserContainer
-from ..repositories import machine_permission_repo
+from ..repositories import auth_repo, machine_permission_repo
 
 DEFAULT_TEST_USERNAME = "test_user"
 DEFAULT_TEST_OPERATOR = "test_operator"
@@ -31,7 +31,7 @@ def create_user(
     email: str | None = None,
     password: str = "Password_123",
     graduation_year: str = "2026",
-    permission: PERMISSION = PERMISSION.USER,
+    operator: bool = False,
 ) -> User:
     username = username or _next("user")
     email = email or f"{username}@bjtu.edu.cn"
@@ -40,10 +40,16 @@ def create_user(
         email=email,
         password_hash=generate_password_hash(password),
         graduation_year=str(graduation_year),
-        permission=permission,
     )
     SessionRegistry.add(user)
     SessionRegistry.commit()
+    if operator:
+        # 取代旧 permission 单字段：operator 语义 = 绑定 operator 组（通配权限点）
+        with session_scope() as session:
+            group = auth_repo.ensure_group("operator", "运维组：通配权限", session=session)
+            auth_repo.ensure_group_entity(group.id, "bypass_resource", session=session)
+            auth_repo.ensure_group_entity(group.id, "bypass_auth_entity", session=session)
+            auth_repo.ensure_user_group(user.id, group.id, session=session)
     return user
 
 

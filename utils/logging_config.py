@@ -31,6 +31,18 @@ class _StreamToLogger:
         return False
 
 
+class _HeartbeatAccessFilter(logging.Filter):
+    """过滤 Node 心跳的 uvicorn access 行（每 5s ×2 端点刷屏，值接近零）。"""
+
+    _HEARTBEAT_RE = re.compile(r'"(?:GET|POST|PUT|DELETE|PATCH) /api/internal/runtime/')
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            return not self._HEARTBEAT_RE.search(record.getMessage())
+        except Exception:
+            return True
+
+
 class _UvicornStreamToLogger(_StreamToLogger):
     """Map uvicorn stderr lines back to their textual log level."""
 
@@ -111,6 +123,7 @@ def configure_daily_logging(app) -> None:
 
     sys.stdout = _StreamToLogger(logging.getLogger("stdout"), logging.INFO)
     sys.stderr = _UvicornStreamToLogger(logging.getLogger("stderr"), logging.ERROR)
+    logging.getLogger("stdout").addFilter(_HeartbeatAccessFilter())
 
     _CONFIGURED = True
     try:

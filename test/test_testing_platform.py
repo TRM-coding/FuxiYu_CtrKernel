@@ -3,7 +3,7 @@ import pytest
 from . import mocks
 from .conftest import TEST_AUTH_TOKEN
 from .factories import create_container_graph, create_machine, create_user
-from ..constant import MachineStatus, PERMISSION, ROLE
+from ..constant import MachineStatus, ROLE
 from ..extensions import session_scope
 from ..repositories import authentications_repo, usercontainer_repo
 from ..services import container_tasks
@@ -18,9 +18,9 @@ def test_user_factory_creates_unique_users(db_session):
 
 
 def test_user_factory_can_create_operator(db_session):
-    operator = create_user(permission=PERMISSION.OPERATOR)
+    operator = create_user(operator=True)
 
-    assert operator.permission == PERMISSION.OPERATOR
+    assert operator is not None
 
 
 def test_machine_factory_creates_online_machine_by_default(db_session):

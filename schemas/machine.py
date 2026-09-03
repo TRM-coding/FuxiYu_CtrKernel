@@ -7,7 +7,6 @@ from .common import PageRequest, SuccessMessageResponse
 
 MachineType = Literal["GPU", "CPU"]
 MachineStatus = Literal["online", "offline"]
-MachineDisplayStatus = Literal["online", "offline", "maintenance"]
 
 
 #####################
@@ -174,7 +173,6 @@ class MachineStatusRequest(BaseModel):
 class MachineStatusResponse(BaseModel):
     machine_status: MachineStatus | None = None
     is_maintenance: bool = False
-    display_status: MachineDisplayStatus | None = None
     runtime_snapshot: dict[str, Any] | None = None
 
 
@@ -184,7 +182,6 @@ class MachineDetailResponse(NodeHardwareProfile, MachineAllocationLimit):
     machine_type: MachineType = "CPU"
     machine_status: MachineStatus = "offline"
     is_maintenance: bool = False
-    display_status: MachineDisplayStatus = "offline"
     machine_description: str | None = None
     containers: list[int] = Field(default_factory=list)
     runtime_snapshot: dict[str, Any] | None = None
@@ -208,7 +205,6 @@ class MachineBriefItem(BaseModel):
     machine_type: MachineType
     machine_status: MachineStatus
     is_maintenance: bool = False
-    display_status: MachineDisplayStatus = "offline"
 
 
 class ListMachineBriefResponse(BaseModel):

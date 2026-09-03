@@ -158,7 +158,6 @@ def test_update_user_filters_forbidden_fields(db_session):
         username="updated_user",
         email="changed@bjtu.edu.cn",
         password_hash="plain",
-        permission="operator",
         graduation_year="2027",
     )
 

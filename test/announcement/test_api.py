@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from ...constant import AnnouncementStatus, AnnouncementTemplateCategory, PERMISSION
+from ...constant import AnnouncementStatus, AnnouncementTemplateCategory
 
 pytestmark = pytest.mark.usefixtures("ensure_auth_users")
 from ...extensions import session_scope
@@ -26,7 +26,7 @@ def _operator_headers():
 
 
 def _make_operator():
-    return create_user(permission=PERMISSION.OPERATOR)
+    return create_user(operator=True)
 
 
 def _make_announcement(user, **kw):

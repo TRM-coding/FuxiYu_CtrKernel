@@ -1,7 +1,6 @@
-# 容器展示态派生：宿主机不可达时覆盖为 host_offline（仅展示，DB 状态不动）
 
 from pydantic import BaseModel, Field
-from ...constant import ROLE, ContainerStatus
+from ...constant import ROLE, ContainerStatus, ContainerEffectiveStatus
 from ..machine_tasks import get_machine_reachable, is_machine_in_maintenance, is_machine_collect_error
 
 #API Definition
@@ -15,8 +14,7 @@ class container_bref_information(BaseModel):
     machine_ip:str
     port:int
     port_mappings: list[dict] | None = None
-    container_status:str
-    display_status: str | None = None  # 派生展示态（如 host_offline），DB 不落库
+    effective_status: str
     failed_reason: str | None = None
     failed_detail: str | None = None
     accounts: list[dict] = Field(default_factory=list)
@@ -37,6 +35,13 @@ class container_bref_information(BaseModel):
     freeze_grace_until: str | None = None
     freeze_days_frozen: int | None = None
     freeze_escalation_days: int | None = None
+    # alloc 派生（机器上限 trim/许可交集后现算，出参补充；缺字段会被 pydantic extra=ignore
+    # 静默丢弃 → 响应 null。曾漏在模型上（2026-09 双层 model 失配修复）
+    gpu_chosen_list: list[int] | None = None
+    alloc_cpu_number: int | None = None
+    alloc_memory_gb: int | None = None
+    alloc_gpu_number: int | None = None
+    alloc_degraded: bool = False
 
 class container_detail_information(BaseModel):
     container_id: int # 与上方结构对称
@@ -45,7 +50,7 @@ class container_detail_information(BaseModel):
     created_at: str | None = None
     machine_id:int
     machine_ip:str
-    container_status:str
+    effective_status: str
     failed_reason: str | None = None
     failed_detail: str | None = None
     memory_gb:int
@@ -63,20 +68,22 @@ class container_detail_information(BaseModel):
     disk_usage: dict | None = None
     runtime_metrics: dict | None = None
     freeze_state: dict | None = None
+    # alloc/选择卡 派生字段（曾缺失被 extra=ignore 静默丢弃 → 响应 null，2026-09 修复）
+    gpu_chosen_list: list[int] | None = None
+    alloc_cpu_number: int | None = None
+    alloc_memory_gb: int | None = None
+    alloc_gpu_number: int | None = None
+    alloc_degraded: bool = False
 ####################################################
 # 派生状态定义
 
-DISPLAY_STATUS_HOST_OFFLINE = "host_offline"
-DISPLAY_STATUS_HOST_MAINTENANCE = "host_maintenance"
-DISPLAY_STATUS_UNKNOWN = "status_unknown"
 
 # 派生状态辅助函数
-def _derive_display_status(container_status, machine_id: int | None) -> str:
-    """由"容器 DB 状态 + 机器轴条件"派生展示态。
+def _derive_effective_status(container_status, machine_id: int | None, *, container=None) -> str:
+    """Return API/guard status from DB container state plus host conditions.
 
-    规则（优先级降序）：failed 是终态诊断不覆盖；宿主机不可达 → host_offline；
-    维护 → host_maintenance；采集异常（collect_error_at，契约 C1）→ status_unknown
-    （Node 无法采集容器状态，DB 保持最后已知值，不写容器诊断）；否则原状态。
+    优先级：容器 FAILED > 机器维护/离线/采集异常 > 容器轴 unknown 标记
+    （status_unknown_since，仿机器 collect_error，2026-09-03）> 最后已知状态。
     """
     status_str = container_status.value if hasattr(container_status, 'value') else str(container_status)
     if str(status_str).lower() == ContainerStatus.FAILED.value:
@@ -84,9 +91,11 @@ def _derive_display_status(container_status, machine_id: int | None) -> str:
     if machine_id is None:
         return status_str
     if is_machine_in_maintenance(machine_id):
-        return DISPLAY_STATUS_HOST_MAINTENANCE
+        return ContainerEffectiveStatus.HOST_MAINTENANCE.value
     if not get_machine_reachable(machine_id):
-        return DISPLAY_STATUS_HOST_OFFLINE
+        return ContainerEffectiveStatus.HOST_OFFLINE.value
     if is_machine_collect_error(machine_id):
-        return DISPLAY_STATUS_UNKNOWN
+        return ContainerEffectiveStatus.STATUS_UNKNOWN.value
+    if container is not None and getattr(container, "status_unknown_since", None) is not None:
+        return ContainerEffectiveStatus.STATUS_UNKNOWN.value
     return status_str

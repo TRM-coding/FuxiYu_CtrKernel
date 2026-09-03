@@ -15,9 +15,8 @@ def _valid_token(monkeypatch, user_id=1):
 
 def _grant_rbac_manage(user_id=1):
     with session_scope() as session:
-        ent = auth_repo.ensure_entity("rbac:manage", "权限矩阵管理", session=session)
         group = auth_repo.ensure_group("rbac_manager_test", "test", session=session)
-        auth_repo.ensure_group_entity(group.id, ent.id, session=session)
+        auth_repo.ensure_group_entity(group.id, "rbac:manage", session=session)
         auth_repo.ensure_user_group(user_id, group.id, session=session)
 
 
@@ -43,6 +42,28 @@ def test_rbac_matrix_returns_groups_and_entities(client, monkeypatch):
     assert "settings:manage" in entity_codes
     assert "user" in group_names
     assert "operator" in group_names
+
+
+def test_seed_prunes_stale_entity_bindings(client, monkeypatch):
+    """seed 收敛：常量里已不存在的 code 残留绑定在 seed 时被清退。"""
+    from ...services.rbac_service import seed_rbac_defaults
+
+    _valid_token(monkeypatch)
+    _grant_rbac_manage()
+    # 模拟旧版本残留：user 组直接绑一个常量中不存在的 code
+    with session_scope() as session:
+        user_group = auth_repo.get_group("user", session=session)
+        auth_repo.ensure_group_entity(user_group.id, "user:view", session=session)
+
+    seed_rbac_defaults()
+
+    resp = client.get("/api/rbac/matrix")
+    assert resp.status_code == 200
+    codes = [item["code"] for item in resp.json()["entities"]]
+    assert "user:view" not in codes
+    with session_scope(commit=False) as session:
+        bound = auth_repo.list_group_entity_codes(session=session).get(user_group.id, set())
+    assert "user:view" not in bound
 
 
 def test_update_rbac_group_entities_replaces_user_group_permissions(client, monkeypatch):
@@ -133,9 +154,8 @@ def test_create_rbac_group_rejects_duplicate_name(client, monkeypatch):
 
 def test_manage_entity_implies_same_domain_entities():
     with session_scope() as session:
-        ent = auth_repo.ensure_entity("container:manage", "容器管理", session=session)
         group = auth_repo.ensure_group("container_manager_test", "test", session=session)
-        auth_repo.ensure_group_entity(group.id, ent.id, session=session)
+        auth_repo.ensure_group_entity(group.id, "container:manage", session=session)
         auth_repo.ensure_user_group(7, group.id, session=session)
 
     assert user_has_entity(7, "container:manage") is True
@@ -146,9 +166,8 @@ def test_manage_entity_implies_same_domain_entities():
 
 def test_bypass_auth_entity_does_not_imply_bypass_resource():
     with session_scope() as session:
-        ent = auth_repo.ensure_entity("bypass_auth_entity", "权限通配", session=session)
         group = auth_repo.ensure_group("auth_bypass_only_test", "test", session=session)
-        auth_repo.ensure_group_entity(group.id, ent.id, session=session)
+        auth_repo.ensure_group_entity(group.id, "bypass_auth_entity", session=session)
         auth_repo.ensure_user_group(7, group.id, session=session)
 
     assert user_has_entity(7, "container:create") is True
@@ -159,11 +178,9 @@ def test_bypass_auth_entity_does_not_imply_bypass_resource():
 
 def test_two_bypass_entities_are_reported_when_both_granted():
     with session_scope() as session:
-        auth_ent = auth_repo.ensure_entity("bypass_auth_entity", "权限通配", session=session)
-        resource_ent = auth_repo.ensure_entity("bypass_resource", "资源通配", session=session)
         group = auth_repo.ensure_group("both_bypass_test", "test", session=session)
-        auth_repo.ensure_group_entity(group.id, auth_ent.id, session=session)
-        auth_repo.ensure_group_entity(group.id, resource_ent.id, session=session)
+        auth_repo.ensure_group_entity(group.id, "bypass_auth_entity", session=session)
+        auth_repo.ensure_group_entity(group.id, "bypass_resource", session=session)
         auth_repo.ensure_user_group(7, group.id, session=session)
 
     entities = set(list_user_entities(7))

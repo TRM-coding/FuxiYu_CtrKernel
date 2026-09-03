@@ -1,6 +1,5 @@
 from datetime import datetime
 
-from ..constant import PERMISSION
 from ..extensions import db
 
 
@@ -14,11 +13,6 @@ class User(db.Model):
     password_hash = db.Column(db.String(255), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     graduation_year=db.Column(db.String(120),unique=False,nullable=False)
-    permission=db.Column(
-        db.Enum(PERMISSION, values_callable=lambda obj: [e.value for e in obj]),
-        default=PERMISSION.USER,
-        nullable=False
-    )
 
     containers = db.relationship(
         "Container",

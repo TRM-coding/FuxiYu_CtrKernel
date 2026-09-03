@@ -34,13 +34,11 @@ from .container_module.node_comms import (
     _ensure_machine_online_for_operation,
 )
 from .container_module.exceptions import NodeServiceError, _raise_on_node_error
+from .container_module.operation_guard import ensure_container_operation_allowed
 from .container_module.pydantic_models import (
     container_bref_information,
     container_detail_information,
-    _derive_display_status,
-    DISPLAY_STATUS_HOST_OFFLINE,
-    DISPLAY_STATUS_HOST_MAINTENANCE,
-    DISPLAY_STATUS_UNKNOWN,
+    _derive_effective_status,
 )
 from .container_module.utils import (
     _parse_last_ssh_time,
@@ -50,9 +48,21 @@ from .container_module.utils import (
     derive_allocated_limits,
     select_gpu_allowance,
 )
+from .container_module.deleted_containers import (
+    build_container_restore_snapshot,
+    build_deleted_container_page,
+    delete_restore_artifacts,
+    record_deleted_container_artifacts,
+    restore_accounts_from_snapshot,
+    restore_role_api_value,
+)
 from ..repositories.containers_repo import _binding_role_value, _root_user_ids_from_bindings, derive_port_mappings
 
 logger = logging.getLogger(__name__)
+
+
+def _container_effective_status(container: Container) -> str:
+    return _derive_effective_status(container.container_status, container.machine_id, container=container)
 
 
 def get_long_term_container_limit() -> int:
@@ -82,7 +92,6 @@ def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -
     return record.last_ssh_login_time if record else None
 
 
-
 #Function Implementation
 ####################################################
 
@@ -94,6 +103,8 @@ def Create_container(
     public_key=None,
     operator_user_id: int | None = None,
     image_build: dict | None = None,
+    restore_mount_path: str | None = None,
+    restore_accounts: list[dict] | None = None,
 ) -> bool:
     # ensure machine is online before attempting creation
     _ensure_machine_online_for_operation(machine_id, 'create')
@@ -128,7 +139,7 @@ def Create_container(
         raise NodeServiceError(str(e), reason='invalid_config')
 
     # GPU 三集合（决策）：申请数量 → allow_list 内轮转选卡，系统决定具体卡（替换前端占位 id）
-    if getattr(container, 'GPU_LIST', None):
+    if getattr(container, 'GPU_LIST', None) and not restore_mount_path:
         try:
             with session_scope(commit=False) as session:
                 machine = machine_repo.get_by_id(machine_id, session=session)
@@ -146,6 +157,17 @@ def Create_container(
         container_info['public_key']=public_key
     if image_build:
         container_info["image_build"] = image_build
+    if restore_mount_path:
+        container_info["restore_mount_path"] = restore_mount_path
+    if restore_accounts:
+        container_info["restore_accounts"] = [
+            {
+                "user_name": account.get("container_username") or account.get("system_username"),
+                "role": restore_role_api_value(account.get("role")),
+            }
+            for account in restore_accounts
+            if account.get("container_username") or account.get("system_username")
+        ]
     # 名称/长度/格式等校验已在参数检查阶段由 container_repo.validate_create_params 完成
 
     # check duplicate container name on this machine before sending to Node
@@ -182,10 +204,11 @@ def Create_container(
                                          shared_gb=int(getattr(container, 'SHARED_MEMORY', getattr(container, 'shared_memory', 0)) or 0),
                                          gpu_number=gpu_count,
                                          cpu_number=container.CPU_NUMBER,
-                                         port=0,
-                                         status=ContainerStatus.BUILDING if image_build else ContainerStatus.CREATING,
-                                         gpu_chosen_list=list(gpu_list) if gpu_list else None,
-                                         session=session)
+                                          port=0,
+                                          status=ContainerStatus.BUILDING if image_build else ContainerStatus.CREATING,
+                                          gpu_chosen_list=list(gpu_list) if gpu_list else None,
+                                          bind_mount_path=restore_mount_path,
+                                          session=session)
 
     # 建立用户绑定（包含必须的 role/username/public_key）
     with session_scope(commit=False) as session:
@@ -197,6 +220,22 @@ def Create_container(
                                        username='root', # 强制使用 root 作为用户名
                                        role=ROLE.ROOT, # 这里在创建时，自动变成 ROOT
                                        session=session)
+        for account in restore_accounts or []:
+            user_id = account.get("user_id")
+            if user_id is None or int(user_id) == int(owner_user_id):
+                continue
+            role_value = account.get("role") or ROLE.COLLABORATOR.value
+            role = ROLE(role_value) if not isinstance(role_value, ROLE) else role_value
+            if role == ROLE.ROOT:
+                continue
+            usercontainer_repo.add_binding(
+                user_id=int(user_id),
+                container_id=container_id,
+                public_key=account.get("public_key"),
+                username=account.get("container_username") or account.get("system_username"),
+                role=role,
+                session=session,
+            )
 
     # 写入初始 SSH 登录记录，以创建时间作为 last_ssh_login_time，防止无法清退
     with session_scope() as session:
@@ -231,14 +270,17 @@ def remove_container(container_id:int, operator_user_id:int|None=None)->bool:
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
     # 使得只在机器在线时执行
+
+    with session_scope(commit=False) as session:
+        container_obj = containers_repo.get_by_id(container_id, session=session)
+    if not container_obj:
+        raise ValueError("Container not found")
+    ensure_container_operation_allowed(_container_effective_status(container_obj), "remove")
     _ensure_machine_online_for_operation(machine_id, 'remove')
     with session_scope(commit=False) as session:
         machine_ip = machine_repo.get_machine_ip_by_id(machine_id, session=session)
     full_url = get_full_url(machine_ip, "/remove_container")
-
-    with session_scope(commit=False) as session:
-
-        container_name = containers_repo.get_by_id(container_id, session=session).name
+    container_name = container_obj.name
     data={
         "config":{
             "container_name":container_name
@@ -248,16 +290,23 @@ def remove_container(container_id:int, operator_user_id:int|None=None)->bool:
     container_info=data
     res=send(full_url, container_info)
     logger.debug("remove_container: NODE response: %s", res)
-    # 先看看远程调用层面是否有错误（网络/请求/远程处理错误等），如果有则抛出异常；如果没有则根据 Node 的返回内容来决定是否继续本地删除（Node 返回 NOTFOUND 则本地也删除，Node 返回 FAILED 则不删除并抛出异常）
+    # Node remove 实际 wire 协议：docker 侧确认删除 → HTTP 200 {"success": 1}；
+    # docker 中不存在该容器（创建失败未入 docker / 外部已清理等）→ HTTP 404
+    # {"error": ..., "error_reason": "not_found"}；其余失败 → HTTP 500。
+    # NOT_FOUND 是"docker 已无残留"的权威证明：视同成功继续本地删库，
+    # 否则创建失败等从未入 docker 的容器行将永远删不掉（库残留）。
+    if isinstance(res, dict) and (res.get('error_reason') == 'not_found' or res.get('status_code') == 404):
+        logger.warning("remove_container: NODE reports container absent (not_found), proceeding with local cleanup")
+        res = {"success": 1}
+    # 先看看远程调用层面是否有错误（网络/请求/远程处理错误等），如果有则抛出异常；
+    # 没有则按上述协议继续：仅 success=1（docker 已删除）或上面放行的 not_found 允许本地删除
     _raise_on_node_error(res, 'remove')
-    # Node remove_container currently returns numeric code in 'success': 0=SUCCESS,1=NOTFOUND,2=FAILED
     NODE_code = res.get('success')
     if NODE_code is None:
         raise Exception(f"NODE remove returned unexpected response: {res}")
-    if NODE_code == 2:
+    if NODE_code != 1:
         # FAILED
         raise NodeServiceError(f"NODE remove reported failure: {res}", reason=res.get('error_reason') or 'remove_failed')
-    # treat 0 (SUCCESS) and 1 (NOTFOUND) as acceptable success for local cleanup
 
     if 'error' in res:
         logger.error("远程调用失败: %s", res['error'])
@@ -312,6 +361,8 @@ def pause_container(container_id: int, operator_user_id: int | None = None, extr
         return False
 
     machine_id = container.machine_id
+    ensure_container_operation_allowed(_container_effective_status(container), "pause")
+    _ensure_machine_online_for_operation(machine_id, 'pause')
 
     with session_scope(commit=False) as session:
 
@@ -357,6 +408,8 @@ def unpause_container(container_id: int, operator_user_id: int | None = None) ->
         return False
 
     machine_id = container.machine_id
+    ensure_container_operation_allowed(_container_effective_status(container), "unpause")
+    _ensure_machine_online_for_operation(machine_id, 'unpause')
 
     with session_scope(commit=False) as session:
 
@@ -437,199 +490,127 @@ def get_container_disk_usage(container_id: int, timeout: float = 20.0) -> dict |
 ####################################################
 
 
-def build_container_restore_snapshot(container_id: int, cleanup_context: dict | None = None) -> dict:
-    """
-    Build a pre-removal snapshot with enough metadata to recreate the container and bindings.
-
-    # 注：字段集将来可能被 image 蓝图（Dockerfile / 环境模板）参考，
-    # image 域（FuxiYu_Global/fuxi平台继续开发.md「新增需求」）落地时评估是否吸收。
-    """
-    with session_scope(commit=False) as session:
-        container = containers_repo.get_by_id(container_id, session=session)
-    if not container:
-        return {
-            "container_id": container_id,
-            "snapshot_status": "container_not_found",
-            "cleanup_context": cleanup_context or {},
-        }
-
-    try:
-        with session_scope(commit=False) as session:
-            machine = machine_repo.get_by_id(container.machine_id, session=session)
-    except Exception:
-        machine = None
-
-    with session_scope(commit=False) as session:
-        bindings = usercontainer_repo.get_container_bindings(container_id, session=session) or []
-    accounts = []
-    for binding in bindings:
-        user_id = binding.get("user_id")
-        role = binding.get("role")
-        role_value = role.value if isinstance(role, ROLE) else str(role or "")
-        with session_scope(commit=False) as session:
-            system_username = user_repo.get_name_by_id(user_id, session=session) if user_id is not None else None
-        accounts.append({
-            "user_id": user_id,
-            "system_username": system_username,
-            "container_username": binding.get("username"),
-            "role": role_value,
-            "public_key": binding.get("public_key"),
-            "granted_at": str(binding.get("granted_at")) if binding.get("granted_at") is not None else None,
-        })
-
-    status = container.container_status
-    status_value = status.value if isinstance(status, ContainerStatus) else str(status or "")
-    with session_scope(commit=False) as session:
-        is_long_term = long_term_container_repo.is_long_term(container.id, session=session)
-    snapshot = {
-        "container_id": container.id,
-        "container_name": container.name,
-        "image": container.image,
-        "machine_id": container.machine_id,
-        "machine_ip": getattr(machine, "machine_ip", None),
-        "machine_name": getattr(machine, "machine_name", None),
-        "container_status": status_value,
-        "port": container.port,
-        "port_mappings": derive_port_mappings(container.port, container.port_mappings),
-        "memory_gb": container.memory_gb,
-        "shared_gb": container.shared_gb,
-        "gpu_number": container.gpu_number,
-        "gpu_chosen_list": container.gpu_chosen_list,
-        "cpu_number": container.cpu_number,
-        "bind_mount_path": getattr(container, "bind_mount_path", None),
-        "is_long_term": is_long_term,
-        "accounts": accounts,
-        "cleanup_context": cleanup_context or {},
-    }
-    return snapshot
-
-
-def _serialize_dt(value) -> str | None:
-    if value is None:
-        return None
-    if hasattr(value, "isoformat"):
-        return value.isoformat()
-    return str(value)
-
-
-def record_deleted_container_artifacts(
-    container_id: int,
-    *,
-    removed_trigger: str = "api",
-    operator_user_id: int | None = None,
-    cleanup_context: dict | None = None,
-    session,
-) -> dict:
-    container = containers_repo.get_by_id(container_id, session=session)
-    if container is None:
-        return {"snapshot": None, "mount_cleanup": None}
-
-    snapshot = build_container_restore_snapshot(container_id, cleanup_context=cleanup_context)
-    bind_mount = getattr(container, "bind_mount_path", None)
-    removed_at = datetime.utcnow()
-    cleanup_row = None
-    if bind_mount:
-        cleanup_row = container_mount_cleanup_repo.get_latest_for_container(
-            container.id,
-            bind_mount,
-            session=session,
-        )
-        if cleanup_row is None:
-            cleanup_row = container_mount_cleanup_repo.insert(
-                container_id=container.id,
-                container_name=container.name,
-                machine_id=container.machine_id,
-                mount_path=bind_mount,
-                escalation=False,
-                removed_at=removed_at,
-                session=session,
-            )
-
-    snapshot_row = deleted_container_restore_snapshot_repo.insert(
-        snapshot,
-        session=session,
-        mount_cleanup_id=getattr(cleanup_row, "id", None),
-        mount_path=bind_mount,
-        removed_trigger=removed_trigger,
-        operator_user_id=operator_user_id,
-        removed_at=removed_at,
-    )
-    return {"snapshot": snapshot_row, "mount_cleanup": cleanup_row}
-
-
-def _deleted_container_record(row, cleanup) -> dict:
-    snapshot = row.snapshot or {}
-    cleaned_at = getattr(cleanup, "cleaned_at", None) if cleanup else None
-    cleanup_escalation = bool(getattr(cleanup, "escalation", False)) if cleanup else False
-    return {
-        "deleted_id": row.id,
-        "original_container_id": row.original_container_id,
-        "container_name": row.container_name,
-        "image": snapshot.get("image"),
-        "machine_id": row.machine_id,
-        "machine_name": row.machine_name,
-        "machine_ip": row.machine_ip,
-        "mount_path": row.mount_path,
-        "mount_cleanup_id": row.mount_cleanup_id,
-        "removed_at": _serialize_dt(row.removed_at),
-        "removed_trigger": row.removed_trigger,
-        "operator_user_id": row.operator_user_id,
-        "cleaned_at": _serialize_dt(cleaned_at),
-        "cleanup_escalation": cleanup_escalation,
-        "data_recoverable": bool(row.mount_path and cleaned_at is None),
-        "snapshot": snapshot,
-    }
-
-
 def list_deleted_containers(page_number: int = 1, page_size: int = 20) -> dict:
-    page_number = max(int(page_number or 1), 1)
-    page_size = min(max(int(page_size or 20), 1), 100)
-    offset = (page_number - 1) * page_size
+    return build_deleted_container_page(page_number=page_number, page_size=page_size)
+
+
+def resurrect_container(deleted_id: int, operator_user_id: int | None = None) -> dict:
+    try:
+        deleted_id = int(deleted_id)
+    except Exception:
+        raise NodeServiceError("invalid deleted_id", reason="invalid_payload")
+
     with session_scope(commit=False) as session:
-        rows = deleted_container_restore_snapshot_repo.list_records(
-            session=session,
-            limit=1000000,
-            offset=0,
+        deleted = deleted_container_restore_snapshot_repo.get_by_id(deleted_id, session=session)
+        if deleted is None:
+            raise NodeServiceError("deleted container snapshot not found", reason="not_found")
+        cleanup = (
+            container_mount_cleanup_repo.get_by_id(deleted.mount_cleanup_id, session=session)
+            if deleted.mount_cleanup_id
+            else None
         )
-        records = []
-        seen_cleanup_ids = set()
-        for row in rows:
-            cleanup = None
-            if row.mount_cleanup_id:
-                cleanup = container_mount_cleanup_repo.get_by_id(row.mount_cleanup_id, session=session)
-                seen_cleanup_ids.add(row.mount_cleanup_id)
-            records.append(_deleted_container_record(row, cleanup))
-        cleanup_rows = container_mount_cleanup_repo.list_records(limit=1000000, offset=0, session=session)
-        for cleanup in cleanup_rows:
-            if cleanup.id in seen_cleanup_ids:
-                continue
-            machine = machine_repo.get_by_id(cleanup.machine_id, session=session)
-            records.append({
-                "deleted_id": f"mount-{cleanup.id}",
-                "original_container_id": cleanup.container_id,
-                "container_name": cleanup.container_name,
-                "image": None,
-                "machine_id": cleanup.machine_id,
-                "machine_name": getattr(machine, "machine_name", None),
-                "machine_ip": getattr(machine, "machine_ip", None),
-                "mount_path": cleanup.mount_path,
-                "mount_cleanup_id": cleanup.id,
-                "removed_at": _serialize_dt(cleanup.removed_at),
-                "removed_trigger": "mount_cleanup",
-                "operator_user_id": None,
-                "cleaned_at": _serialize_dt(cleanup.cleaned_at),
-                "cleanup_escalation": bool(cleanup.escalation),
-                "data_recoverable": bool(cleanup.mount_path and cleanup.cleaned_at is None),
-                "snapshot": {},
-            })
-        records.sort(key=lambda item: item.get("removed_at") or "", reverse=True)
-        total = len(records)
-        records = records[offset:offset + page_size]
-    return {
-        "records": records,
-        "total_number": total,
-        "total_page": max(math.ceil(total / page_size), 1) if total else 0,
-    }
+        snapshot = dict(deleted.snapshot or {})
+        mount_path = deleted.mount_path or snapshot.get("bind_mount_path")
+        if not snapshot:
+            raise NodeServiceError("deleted container snapshot is empty", reason="data_not_recoverable")
+        if not mount_path:
+            raise NodeServiceError("deleted container has no retained mount path", reason="data_not_recoverable")
+        if cleanup is not None and cleanup.cleaned_at is not None:
+            raise NodeServiceError("deleted container mount has been cleaned", reason="data_not_recoverable")
+        machine_id = int(deleted.machine_id or snapshot.get("machine_id") or 0)
+        mount_cleanup_id = deleted.mount_cleanup_id
+
+    if not machine_id:
+        raise NodeServiceError("deleted container snapshot has no machine_id", reason="invalid_payload")
+
+    root_account, restored_accounts = restore_accounts_from_snapshot(snapshot)
+    owner_user_id = root_account.get("user_id")
+    if not owner_user_id:
+        raise NodeServiceError("deleted container snapshot has no owner user", reason="invalid_payload")
+    with session_scope(commit=False) as session:
+        owner_name = user_repo.get_name_by_id(owner_user_id, session=session)
+    if not owner_name:
+        raise NodeServiceError("deleted container owner no longer exists", reason="data_not_recoverable")
+
+    existing_accounts = []
+    for account in restored_accounts:
+        user_id = account.get("user_id")
+        role_value = account.get("role") or ROLE.COLLABORATOR.value
+        try:
+            role = ROLE(role_value) if not isinstance(role_value, ROLE) else role_value
+        except Exception:
+            role = ROLE.COLLABORATOR
+        if user_id is None or role == ROLE.ROOT:
+            continue
+        with session_scope(commit=False) as session:
+            system_username = user_repo.get_name_by_id(user_id, session=session)
+        if not system_username:
+            continue
+        restored = {
+            **account,
+            "user_id": int(user_id),
+            "system_username": system_username,
+            "role": role.value,
+            "container_username": account.get("container_username") or system_username,
+        }
+        existing_accounts.append(restored)
+
+    gpu_list = snapshot.get("gpu_chosen_list") or []
+    container = Container_info(
+        gpu_list=list(gpu_list),
+        cpu_number=int(snapshot.get("cpu_number") or 0),
+        memory=int(snapshot.get("memory_gb") or 0),
+        shared_memory=int(snapshot.get("shared_gb") or 0),
+        name=str(snapshot.get("container_name") or ""),
+        image=str(snapshot.get("image") or ""),
+        port=0,
+    )
+    if not container.NAME or not container.image:
+        raise NodeServiceError("deleted container snapshot lacks name or image", reason="invalid_payload")
+
+    Create_container(
+        owner_user_id=int(owner_user_id),
+        machine_id=machine_id,
+        container=container,
+        public_key=root_account.get("public_key"),
+        operator_user_id=operator_user_id,
+        restore_mount_path=mount_path,
+        restore_accounts=existing_accounts,
+    )
+
+    with session_scope(commit=False) as session:
+        container_id = containers_repo.get_id_by_name_machine(
+            container_name=container.NAME,
+            machine_id=machine_id,
+            session=session,
+        )
+    if not container_id:
+        raise NodeServiceError("resurrected container record not found", reason="unexpected_response")
+
+    if snapshot.get("is_long_term"):
+        with session_scope() as session:
+            long_term_container_repo.add(container_id, created_by_user_id=operator_user_id, session=session)
+
+    with session_scope() as session:
+        delete_restore_artifacts(deleted_id, mount_cleanup_id, session=session)
+
+    write_op_log(
+        success=True,
+        operator_user_id=operator_user_id,
+        operation=OperationType.CREATE_CONTAINER,
+        target_type="container",
+        target_id=container_id,
+        detail={
+            "trigger": "resurrect",
+            "deleted_id": deleted_id,
+            "original_container_id": snapshot.get("container_id"),
+            "name": container.NAME,
+            "machine_id": machine_id,
+            "restore_mount_path": mount_path,
+            "restored_accounts": len(existing_accounts) + 1,
+        },
+    )
+    return {"container_id": int(container_id)}
 
 
 def clean_deleted_container_mount(mount_cleanup_id: int, operator_user_id: int | None = None) -> dict:
@@ -674,6 +655,7 @@ def set_long_term_container(container_id: int, is_long_term: bool, operator_user
         container = containers_repo.get_by_id(container_id, session=session)
     if not container:
         raise NodeServiceError("Container not found", reason="container_not_found")
+    ensure_container_operation_allowed(_container_effective_status(container), "set_long_term")
 
     with session_scope(commit=False) as session:
         bindings = usercontainer_repo.get_container_bindings(container_id, session=session) or []
@@ -725,14 +707,13 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, operator_user_id:in
 
         container_name = containers_repo.get_by_id(container_id, session=session).name
     # operation guard: machine must be online
-    _ensure_machine_online_for_operation(machine_id, 'add_collaborator')
-    # Ensure container is online before attempting collaborator changes
+    # Ensure container is online before attempting collaborator changes.
     with session_scope(commit=False) as session:
         container_obj = containers_repo.get_by_id(container_id, session=session)
     if not container_obj:
         raise ValueError("Container not found")
-    if container_obj.container_status != ContainerStatus.ONLINE:
-        raise NodeServiceError(f"Container {container_id} is not online", reason="container_offline")
+    ensure_container_operation_allowed(_container_effective_status(container_obj), "add_collaborator", require_online=True)
+    _ensure_machine_online_for_operation(machine_id, 'add_collaborator')
 
     with session_scope(commit=False) as session:
         user_name = user_repo.get_name_by_id(user_id, session=session)
@@ -789,14 +770,13 @@ def remove_collaborator(container_id:int,user_id:int,operator_user_id:int|None=N
 
         container_name = containers_repo.get_by_id(container_id, session=session).name
     # operation guard: machine must be online
-    _ensure_machine_online_for_operation(machine_id, 'remove_collaborator')
-    # Ensure container is online before attempting collaborator changes
+    # Ensure container is online before attempting collaborator changes.
     with session_scope(commit=False) as session:
         container_obj = containers_repo.get_by_id(container_id, session=session)
     if not container_obj:
         raise ValueError("Container not found")
-    if container_obj.container_status != ContainerStatus.ONLINE:
-        raise NodeServiceError(f"Container {container_id} is not online", reason="container_offline")
+    ensure_container_operation_allowed(_container_effective_status(container_obj), "remove_collaborator", require_online=True)
+    _ensure_machine_online_for_operation(machine_id, 'remove_collaborator')
     with session_scope(commit=False) as session:
         user_name = user_repo.get_name_by_id(user_id, session=session)
     try:
@@ -857,13 +837,12 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,operator_user_id:
 
     # Ensure container is online before attempting role updates
     # operation guard: machine must be online
-    _ensure_machine_online_for_operation(machine_id, 'update_role')
     with session_scope(commit=False) as session:
         container_obj = containers_repo.get_by_id(container_id, session=session)
     if not container_obj:
         raise ValueError("Container not found")
-    if container_obj.container_status != ContainerStatus.ONLINE:
-        raise NodeServiceError(f"Container {container_id} is not online", reason="container_offline")
+    ensure_container_operation_allowed(_container_effective_status(container_obj), "update_role", require_online=True)
+    _ensure_machine_online_for_operation(machine_id, 'update_role')
 
     with session_scope(commit=False) as session:
         user_name = user_repo.get_name_by_id(user_id, session=session)
@@ -919,14 +898,17 @@ def start_container(container_id:int, operator_user_id:int|None=None)->bool:
         machine_id = containers_repo.get_machine_id_by_container_id(container_id, session=session)
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
-    _ensure_machine_online_for_operation(machine_id, 'start')
     with session_scope(commit=False) as session:
         machine_ip = machine_repo.get_machine_ip_by_id(machine_id, session=session)
     full_url = get_full_url(machine_ip, "/start_container")
 
     with session_scope(commit=False) as session:
-
-        container_name = containers_repo.get_by_id(container_id, session=session).name
+        container_obj = containers_repo.get_by_id(container_id, session=session)
+    if not container_obj:
+        raise ValueError("Container not found")
+    ensure_container_operation_allowed(_container_effective_status(container_obj), "start")
+    _ensure_machine_online_for_operation(machine_id, 'start')
+    container_name = container_obj.name
     data = {"config": {"container_name": container_name}}
     container_info = data
 
@@ -952,14 +934,17 @@ def stop_container(container_id:int, operator_user_id:int|None=None)->bool:
         machine_id = containers_repo.get_machine_id_by_container_id(container_id, session=session)
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
-    _ensure_machine_online_for_operation(machine_id, 'stop')
     with session_scope(commit=False) as session:
         machine_ip = machine_repo.get_machine_ip_by_id(machine_id, session=session)
     full_url = get_full_url(machine_ip, "/stop_container")
 
     with session_scope(commit=False) as session:
-
-        container_name = containers_repo.get_by_id(container_id, session=session).name
+        container_obj = containers_repo.get_by_id(container_id, session=session)
+    if not container_obj:
+        raise ValueError("Container not found")
+    ensure_container_operation_allowed(_container_effective_status(container_obj), "stop")
+    _ensure_machine_online_for_operation(machine_id, 'stop')
+    container_name = container_obj.name
     data = {"config": {"container_name": container_name}}
     container_info = data
 
@@ -982,14 +967,17 @@ def restart_container(container_id:int, operator_user_id:int|None=None)->bool:
         machine_id = containers_repo.get_machine_id_by_container_id(container_id, session=session)
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
-    _ensure_machine_online_for_operation(machine_id, 'restart')
     with session_scope(commit=False) as session:
         machine_ip = machine_repo.get_machine_ip_by_id(machine_id, session=session)
     full_url = get_full_url(machine_ip, "/restart_container")
 
     with session_scope(commit=False) as session:
-
-        container_name = containers_repo.get_by_id(container_id, session=session).name
+        container_obj = containers_repo.get_by_id(container_id, session=session)
+    if not container_obj:
+        raise ValueError("Container not found")
+    ensure_container_operation_allowed(_container_effective_status(container_obj), "restart")
+    _ensure_machine_online_for_operation(machine_id, 'restart')
+    container_name = container_obj.name
     data = {"config": {"container_name": container_name}}
     container_info = data
 
@@ -1094,8 +1082,7 @@ def get_container_detail_information(container_id:int)->container_detail_informa
         "image_dockerfile": container_image_dockerfile(container),
         "machine_id": container.machine_id,
         "machine_ip": machine.machine_ip if machine else "",
-        "container_status": container.container_status.value,
-        "display_status": _derive_display_status(container.container_status, container.machine_id),
+        "effective_status": _container_effective_status(container),
         "failed_reason": getattr(container, "failed_reason", None),
         "failed_detail": getattr(container, "failed_detail", None),
         "memory_gb": container.memory_gb,
@@ -1240,8 +1227,7 @@ def list_all_container_bref_information(
             **derive_allocated_limits(container, machine),
             gpu_chosen_list=container.gpu_chosen_list,
             port_mappings=derive_port_mappings(container.port, container.port_mappings),
-            container_status=container.container_status.value,
-            display_status=_derive_display_status(container.container_status, container.machine_id),
+            effective_status=_container_effective_status(container),
             failed_reason=getattr(container, "failed_reason", None),
             failed_detail=getattr(container, "failed_detail", None),
             accounts=[

@@ -14,7 +14,6 @@ from .announcement import Announcement, AnnouncementTemplate, AnnouncementDraft 
 from .authentications import Authentication  # noqa: F401
 from .operation_log import OperationLog  # noqa: F401
 
-from .auth_entity import AuthEntity  # noqa: F401
 from .auth_group import AuthGroup, AuthGroupEntity  # noqa: F401
 from .user_group import UserGroup  # noqa: F401
 from .image import Image  # noqa: F401

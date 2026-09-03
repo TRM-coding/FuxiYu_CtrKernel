@@ -9,8 +9,6 @@ from ..repositories import containers_repo, machine_permission_repo, user_repo
 from .operation_log_tasks import write_operation_log as write_op_log
 from ..constant import MachineStatus, OperationType
 from ..models.machine import Machine
-MACHINE_DISPLAY_MAINTENANCE = "maintenance"
-MACHINE_DISPLAY_COLLECT_ERROR = "collect_error"
 #######################################
 #API Definition
 class machine_bref_information(BaseModel):
@@ -20,7 +18,6 @@ class machine_bref_information(BaseModel):
     machine_type:str
     machine_status:str
     is_maintenance: bool = False
-    display_status: str | None = None
 
 class machine_detail_information(BaseModel):
     machine_name:str
@@ -28,7 +25,6 @@ class machine_detail_information(BaseModel):
     machine_type:str
     machine_status:str
     is_maintenance: bool = False
-    display_status: str | None = None
     cpu_core_number:int
     gpu_number:int
     gpu_type: Optional[str]
@@ -91,16 +87,6 @@ def _machine_status_value(machine) -> str:
     """返回机器真实连接状态：online/offline。"""
     status = getattr(machine, "machine_status", None)
     return status.value if hasattr(status, "value") else str(status)
-
-
-def _display_machine_status(machine) -> str:
-    """返回对外展示状态；维护开关优先，采集异常次之（仅在线时），真实连接状态保留在 DB。"""
-    if bool(getattr(machine, "is_maintenance", False)):
-        return MACHINE_DISPLAY_MAINTENANCE
-    status = _machine_status_value(machine)
-    if status == MachineStatus.ONLINE.value and getattr(machine, "collect_error_at", None):
-        return MACHINE_DISPLAY_COLLECT_ERROR
-    return status
 
 
 def is_machine_in_maintenance(machine_id: int) -> bool:
@@ -370,7 +356,7 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
         except Exception as e:  # pragma: no cover
             print(f"[machine-ip-change] pin export failed for {new_ip}: {e}")
         fields['machine_ip'] = new_ip
-    if str(fields.get('machine_status', '')).lower() == MACHINE_DISPLAY_MAINTENANCE:
+    if str(fields.get('machine_status', '')).lower() == "maintenance":
         raise ValueError("machine_status no longer accepts maintenance; use is_maintenance")
     if 'is_maintenance' in fields:
         fields['is_maintenance'] = bool(fields['is_maintenance'])
@@ -444,7 +430,6 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
             machine_type=machine.machine_type.value,
             machine_status=_machine_status_value(machine),
             is_maintenance=bool(getattr(machine, "is_maintenance", False)),
-            display_status=_display_machine_status(machine),
             cpu_core_number=machine.cpu_core_number,
             gpu_number=machine.gpu_number,
             gpu_type=machine.gpu_type,
@@ -514,7 +499,6 @@ def List_all_machine_bref_information(
             machine_type=machine.machine_type.value,
             machine_status=_machine_status_value(machine),
             is_maintenance=bool(getattr(machine, "is_maintenance", False)),
-            display_status=_display_machine_status(machine),
         )
         res.append(info)
     

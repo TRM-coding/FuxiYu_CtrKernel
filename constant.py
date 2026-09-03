@@ -21,6 +21,17 @@ class ContainerStatus(Enum):
     PAUSED = "paused"
 
 
+class ContainerEffectiveStatus(Enum):
+    """Transport/guard status = persisted container_status plus derived host state.
+
+    container_status remains the DB fact for the container itself. effective_status
+    is used by container API responses, frontend rendering, and operation guards.
+    """
+    HOST_OFFLINE = "host_offline"
+    HOST_MAINTENANCE = "host_maintenance"
+    STATUS_UNKNOWN = "status_unknown"
+
+
 class ImageStatus(Enum):
     DRAFT = "draft"
     READY = "ready"
@@ -32,11 +43,6 @@ class ROLE(Enum):
     ADMIN="ADMIN"
     COLLABORATOR="COLLABORATOR"
     ROOT="ROOT"
-
-class PERMISSION(Enum):
-    USER="user"
-    OPERATOR="operator"
-
 
 class AnnouncementStatus(Enum):
     SENDING = "sending"
@@ -83,6 +89,9 @@ class OperationType(str, Enum):
     CHANGE_PASSWORD = "change_password"
     DELETE_USER = "delete_user"
     RESET_PASSWORD = "reset_password"
+    # RBAC 权限组（管理动作，敏感审计）
+    CREATE_RBAC_GROUP = "create_group"
+    UPDATE_RBAC_GROUP_ENTITIES = "update_group_entities"
     # 镜像
     CREATE_IMAGE = "create_image"
     UPDATE_IMAGE = "update_image"

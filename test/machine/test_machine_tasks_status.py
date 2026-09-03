@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from ...constant import ContainerStatus, MachineStatus, MachineTypes, PERMISSION
+from ...constant import ContainerStatus, MachineStatus, MachineTypes
 from ...models.containers import Container
 from ...models.machine import Machine
 from ...repositories import containers_repo, machine_repo
@@ -242,6 +242,58 @@ def test_apply_container_status_snapshot_normal_snapshot_clears_collect_error(db
     machine_row = db_session.get(Machine, machine.id)
     assert machine_row.collect_error_at is None
     assert db_session.get(Container, container.id).container_status == ContainerStatus.OFFLINE
+
+
+def test_apply_container_status_snapshot_unknown_sets_marker_keeps_last_status(db_session):
+    # 容器轴 unknown（2026-09-03，仿机器 collect_error）：unknown 帧只落标记列，
+    # 不覆盖 container_status（最后已知为真），展示派生 status_unknown
+    machine = create_machine()
+    container = create_container(machine=machine, name="unknown_c", status=ContainerStatus.ONLINE)
+    container_id = container.id
+
+    result = node_comms.apply_container_status_snapshot(
+        {"unknown_c": {"status": "unknown", "status_source": "cold_start_verify", "unknown_since": "2026-09-03T01:20:00"}},
+        machine.id,
+    )
+
+    db_session.expire_all()
+    row = db_session.get(Container, container_id)
+    assert result["updated"] == 1
+    assert row.container_status == ContainerStatus.ONLINE  # 不被覆盖
+    assert row.status_source == "cold_start_verify"
+    assert row.status_unknown_since is not None
+
+    # 同一标记重复推送（心跳）→ 不重复写
+    result2 = node_comms.apply_container_status_snapshot(
+        {"unknown_c": {"status": "unknown", "status_source": "cold_start_verify", "unknown_since": "2026-09-03T01:20:00"}},
+        machine.id,
+    )
+    assert result2["updated"] == 0
+
+
+def test_apply_container_status_snapshot_concrete_status_clears_unknown_marker(db_session):
+    # 容器轴 unknown 恢复：具体状态帧（probe 通过 online）→ 清除标记并覆盖状态
+    machine = create_machine()
+    container = create_container(machine=machine, name="unknown_recover", status=ContainerStatus.ONLINE)
+    container_id = container.id
+    with session_scope() as session:
+        containers_repo.update_container(
+            container_id,
+            status_unknown_since=datetime(2026, 9, 3, 1, 20),
+            status_source="cold_start_verify",
+            session=session,
+        )
+
+    result = node_comms.apply_container_status_snapshot(
+        {"unknown_recover": {"status": "online"}}, machine.id,
+    )
+
+    db_session.expire_all()
+    row = db_session.get(Container, container_id)
+    assert result["updated"] == 1
+    assert row.status_unknown_since is None
+    assert row.status_source is None
+    assert row.container_status == ContainerStatus.ONLINE
 
 
 def test_apply_container_status_snapshot_collect_error_without_machine_id_skipped(db_session):
@@ -683,7 +735,7 @@ def test_list_machine_bref_keeps_online_machine_and_containers_without_probe(mon
     assert db_session.get(Container, container.id).container_status == ContainerStatus.ONLINE
 
 
-def test_list_machine_bref_keeps_maintenance_display_without_probe(monkeypatch, db_session):
+def test_list_machine_bref_keeps_maintenance_flag_without_probe(monkeypatch, db_session):
     machine = create_machine(machine_status=MachineStatus.OFFLINE, is_maintenance=True)
     monkeypatch.setattr(
         machine_tasks,
@@ -695,10 +747,9 @@ def test_list_machine_bref_keeps_maintenance_display_without_probe(monkeypatch, 
 
     assert result[0].machine_status == MachineStatus.OFFLINE.value
     assert result[0].is_maintenance is True
-    assert result[0].display_status == "maintenance"
 
 
-def test_list_machine_bref_online_maintenance_display_without_probe(monkeypatch, db_session):
+def test_list_machine_bref_online_maintenance_flag_without_probe(monkeypatch, db_session):
     machine = create_machine(machine_status=MachineStatus.ONLINE, is_maintenance=True)
     monkeypatch.setattr(
         machine_tasks,
@@ -710,12 +761,9 @@ def test_list_machine_bref_online_maintenance_display_without_probe(monkeypatch,
 
     assert result[0].machine_status == MachineStatus.ONLINE.value
     assert result[0].is_maintenance is True
-    assert result[0].display_status == "maintenance"
 
 
-def test_list_machine_bref_collect_error_display_only_when_online(db_session):
-    # 数据通路对账契约 C1（机器轴）：在线 + 采集异常 → display collect_error；
-    # 离线 + 残留标志 → 显示真实连接状态 offline
+def test_list_machine_bref_keeps_machine_status_when_collect_error_exists(db_session):
     online = create_machine(machine_name="ce_online", machine_status=MachineStatus.ONLINE)
     offline = create_machine(machine_name="ce_offline", machine_status=MachineStatus.OFFLINE)
     with session_scope() as session:
@@ -725,9 +773,8 @@ def test_list_machine_bref_collect_error_display_only_when_online(db_session):
     result, _ = machine_tasks.List_all_machine_bref_information(0, 10)
 
     by_name = {m.machine_name: m for m in result}
-    assert by_name["ce_online"].display_status == "collect_error"
-    assert by_name["ce_offline"].display_status == MachineStatus.OFFLINE.value
-
+    assert by_name["ce_online"].machine_status == MachineStatus.ONLINE.value
+    assert by_name["ce_offline"].machine_status == MachineStatus.OFFLINE.value
 
 def test_is_machine_collect_error_reads_machine_flag(db_session):
     machine = create_machine()
@@ -757,13 +804,12 @@ def test_list_machine_bref_filters_by_machine_search(monkeypatch, db_session):
 
 
 def test_list_machine_bref_operator_bypasses_machine_permission(monkeypatch, db_session):
-    operator = create_user(permission=PERMISSION.OPERATOR)
+    operator = create_user(operator=True)
     # 模拟建号流程的组绑定：operator 用户加入含 bypass_resource 的组
     from ...repositories import auth_repo
     with session_scope() as session:
-        ent = auth_repo.ensure_entity("bypass_resource", "t", session=session)
         group = auth_repo.ensure_group("operator", "t", session=session)
-        auth_repo.ensure_group_entity(group.id, ent.id, session=session)
+        auth_repo.ensure_group_entity(group.id, "bypass_resource", session=session)
         auth_repo.ensure_user_group(operator.id, group.id, session=session)
     m1 = create_machine(machine_name="operator_machine_1")
     m2 = create_machine(machine_name="operator_machine_2")
@@ -814,6 +860,40 @@ def test_apply_sys_snapshot_drift_updates_db_and_trims_limits(db_session, monkey
         "gpu": [],
     }, machine.id)
     assert result2["drifted"] == 0
+
+
+def test_alloc_cascade_drift_then_container_trim(db_session, monkeypatch):
+    """规格(3) 全链路（DB 实走）：机器真值 3/上限 5 → 漂移 trim 上限 3；
+    容器申请 4 → alloc 沿新上限显示 3 + degraded。两层递进降级。"""
+    machine = create_machine(
+        machine_type=MachineTypes.GPU,
+        cpu_core_number=5, memory_size_gb=5, gpu_number=1,
+        max_cpu_core_number=5, max_memory_gb=5, max_gpu_number=1,
+    )
+    container = create_container(machine=machine, name="cascade_c", status=ContainerStatus.ONLINE)
+    monkeypatch.setattr(node_comms, "_publish_machine_runtime_snapshot", lambda *a, **k: None)
+
+    # 层 1：机器真值降级 5 → 3，drift 将 max_* trim 到 3
+    result = node_comms.apply_sys_snapshot({
+        "cpu": {"cores": 3, "usage_percent": 10},
+        "memory": {"total_gb": 3, "usage_percent": 50},
+        "disk": {"bind_mount": {"total_gb": 100, "percent": 20}},
+        "gpu": [],
+    }, machine.id)
+    assert result["drifted"] == 1
+
+    # 层 2：容器申请 4，沿已 trim 的新上限派生显示
+    from ...services.container_module.utils import derive_allocated_limits
+    container.cpu_number = 4
+    container.memory_gb = 4
+    with session_scope(commit=False) as session:
+        m = machine_repo.get_by_id(machine.id, session=session)
+    alloc = derive_allocated_limits(container, m)
+    assert m.max_cpu_core_number == 3
+    assert m.max_memory_gb == 3
+    assert alloc["alloc_cpu_number"] == 3
+    assert alloc["alloc_memory_gb"] == 3
+    assert alloc["alloc_degraded"] is True
 
 
 def test_apply_sys_snapshot_gpu_enum_updates_gpu_list_not_allow(db_session, monkeypatch):

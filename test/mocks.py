@@ -3,7 +3,6 @@ from datetime import datetime, timedelta
 
 from .conftest import TEST_AUTH_TOKEN, TEST_OPERATOR_TOKEN
 from .factories import create_auth, create_user
-from ..constant import PERMISSION
 from ..api import deps
 
 
@@ -58,4 +57,4 @@ def auth_token_factory(user=None, *, expired: bool = False, token: str = TEST_AU
 
 
 def operator_user_factory(**overrides):
-    return create_user(permission=PERMISSION.OPERATOR, **overrides)
+    return create_user(operator=True, **overrides)

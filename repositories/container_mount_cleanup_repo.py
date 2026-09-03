@@ -89,3 +89,12 @@ def mark_cleaned(record_id: int, *, session: Session, escalation: bool | None = 
     row.cleaned_at = dt.datetime.utcnow()
     session.flush()
     return True
+
+
+def delete(record_id: int, *, session: Session) -> bool:
+    row = get_by_id(record_id, session=session)
+    if row is None:
+        return False
+    session.delete(row)
+    session.flush()
+    return True

@@ -3,9 +3,9 @@ from sqlalchemy import select
 from ...api import container_api, deps
 from ...models.container_mount_cleanup import ContainerMountCleanup
 from ...models.deleted_container_restore_snapshot import DeletedContainerRestoreSnapshot
-from ...repositories import container_mount_cleanup_repo
+from ...repositories import container_mount_cleanup_repo, containers_repo, deleted_container_restore_snapshot_repo, usercontainer_repo
 from ...services import container_tasks
-from ..factories import create_container_graph, create_machine
+from ..factories import create_container_graph, create_machine, create_user
 from .conftest import NODE_REMOVE_SUCCESS
 
 
@@ -124,3 +124,82 @@ def test_clean_deleted_container_mount_api(client, monkeypatch):
 
     assert resp.status_code == 200
     assert resp.json()["mount_cleanup_id"] == 7
+
+
+def test_resurrect_container_reuses_snapshot_mount_and_restores_bindings(db_session, monkeypatch):
+    collaborator = create_user(username="restore_collab")
+    root, machine, container = create_container_graph(
+        collaborator_user=collaborator,
+        collaborator_username="restore_collab",
+    )
+    container.name = "restore_target"
+    container.bind_mount_path = f"/home/{root.username}/containers/{container.name}_data"
+    container.gpu_chosen_list = [1]
+    container.gpu_number = 1
+    db_session.commit()
+    sent = []
+
+    def _send(url, payload, timeout=5.0):
+        sent.append({"url": url, "payload": payload, "timeout": timeout})
+        if url.endswith("/remove_container"):
+            return {"success": 1}
+        if url.endswith("/create_container"):
+            return {"success": 1}
+        return {"success": 1}
+
+    monkeypatch.setattr(container_tasks, "send", _send)
+
+    assert container_tasks.remove_container(container.id, operator_user_id=root.id) is True
+    snapshot = db_session.scalars(select(DeletedContainerRestoreSnapshot)).one()
+    snapshot_id = snapshot.id
+    cleanup_id = snapshot.mount_cleanup_id
+
+    result = container_tasks.resurrect_container(snapshot_id, operator_user_id=root.id)
+
+    db_session.expire_all()
+    restored = containers_repo.get_by_id(result["container_id"], session=db_session)
+    assert restored is not None
+    assert restored.name == "restore_target"
+    assert restored.bind_mount_path.endswith("_data")
+    assert restored.gpu_chosen_list == [1]
+    create_call = next(item for item in sent if item["url"].endswith("/create_container"))
+    assert create_call["payload"]["restore_mount_path"] == restored.bind_mount_path
+    assert create_call["payload"]["config"]["gpu_list"] == [1]
+    assert create_call["payload"]["restore_accounts"] == [
+        {"user_name": "restore_collab", "role": "collaborator"}
+    ]
+    bindings = usercontainer_repo.get_container_bindings(restored.id, session=db_session)
+    assert {item["user_id"] for item in bindings} == {root.id, collaborator.id}
+    assert deleted_container_restore_snapshot_repo.get_by_id(snapshot_id, session=db_session) is None
+    assert container_mount_cleanup_repo.get_by_id(cleanup_id, session=db_session) is None
+
+
+def test_resurrect_container_rejects_cleaned_mount(db_session, monkeypatch):
+    root, _machine, container = create_container_graph()
+    container.bind_mount_path = f"/home/{root.username}/containers/{container.name}_data"
+    db_session.commit()
+    monkeypatch.setattr(container_tasks, "send", lambda url, payload, timeout=5.0: {"success": 1})
+    container_tasks.remove_container(container.id, operator_user_id=root.id)
+    snapshot = db_session.scalars(select(DeletedContainerRestoreSnapshot)).one()
+    container_mount_cleanup_repo.mark_cleaned(snapshot.mount_cleanup_id, session=db_session)
+    db_session.commit()
+
+    try:
+        container_tasks.resurrect_container(snapshot.id, operator_user_id=root.id)
+        assert False, "expected NodeServiceError"
+    except container_tasks.NodeServiceError as exc:
+        assert exc.reason == "data_not_recoverable"
+
+
+def test_resurrect_container_api(client, monkeypatch):
+    _auth(monkeypatch)
+    monkeypatch.setattr(
+        container_api.container_service,
+        "resurrect_container",
+        lambda **kwargs: {"container_id": 19},
+    )
+
+    resp = client.post("/api/containers/resurrect_container", json={"deleted_id": 7})
+
+    assert resp.status_code == 200
+    assert resp.json()["container_id"] == 19

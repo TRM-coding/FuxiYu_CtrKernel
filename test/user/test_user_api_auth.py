@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 
 from ...api import user_api, deps
-from ...constant import PERMISSION
 
 
 def _fake_user(**overrides):
@@ -9,7 +8,6 @@ def _fake_user(**overrides):
         "id": 1,
         "username": "api_user",
         "email": "api_user@bjtu.edu.cn",
-        "permission": PERMISSION.USER,
     }
     data.update(overrides)
     return SimpleNamespace(**data)

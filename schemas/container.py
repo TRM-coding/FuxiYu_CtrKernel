@@ -134,6 +134,14 @@ class CleanDeletedContainerMountResponse(SuccessMessageResponse):
     mount_cleanup_id: int | None = None
 
 
+class ResurrectContainerRequest(_CompatBaseModel):
+    deleted_id: int = Field(..., ge=1)
+
+
+class ResurrectContainerResponse(SuccessMessageResponse):
+    container_id: int | None = None
+
+
 class SetLongTermContainerRequest(_CompatBaseModel):
     container_id: int = Field(..., ge=1)
     is_long_term: bool
@@ -187,7 +195,7 @@ class ContainerStatusRequest(_CompatBaseModel):
 
 
 class ContainerStatusResponse(_CompatBaseModel):
-    container_status: str | None = None
+    effective_status: str | None = None
     failed_reason: str | None = None
     failed_detail: str | None = None
     runtime_metrics: dict[str, Any] | None = None
@@ -247,8 +255,7 @@ class ContainerBriefInformation(_CompatBaseModel):
     machine_id: int | None = None
     machine_ip: str | None = None
     port: int | None = None
-    container_status: str | None = None
-    display_status: str | None = None
+    effective_status: str | None = None
     # 展示派生：机器实际缩水 trim 后，容器申请超上限时展示砍后值（容器 DB 不动）
     alloc_cpu_number: int | None = None
     alloc_memory_gb: int | None = None
@@ -290,8 +297,7 @@ class ContainerDetailInformation(_CompatBaseModel):
     image_dockerfile: str | None = None
     machine_id: int | None = None
     machine_ip: str | None = None
-    container_status: str | None = None
-    display_status: str | None = None
+    effective_status: str | None = None
     failed_reason: str | None = None
     failed_detail: str | None = None
     memory_gb: int | None = None

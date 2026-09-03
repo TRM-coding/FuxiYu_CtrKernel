@@ -15,7 +15,6 @@ if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 _package = import_module(_pkg_dir.name)
 
-from FuxiYu_CtrKernel.constant import PERMISSION  # noqa: E402
 from FuxiYu_CtrKernel.config import AppConfig  # noqa: E402
 from FuxiYu_CtrKernel.extensions import session_scope  # noqa: E402
 from FuxiYu_CtrKernel.models.user import User  # noqa: E402
@@ -61,7 +60,6 @@ def main() -> None:
         user = session.scalars(select(User).where(User.username == DEFAULT_USERNAME)).first()
         if user:
             user.password_hash = password_hash
-            user.permission = PERMISSION.OPERATOR
             session.flush()
             created = False
         else:
@@ -70,23 +68,27 @@ def main() -> None:
                 email=DEFAULT_EMAIL,
                 password_hash=password_hash,
                 graduation_year="2026",
-                permission=PERMISSION.OPERATOR,
             )
             session.add(user)
             session.flush()
             created = True
+        # RBAC 组绑定：冒烟账号进 operator 组（通配权限点由组持有，不再有单字段）
+        from FuxiYu_CtrKernel.repositories import auth_repo
+        op_group = auth_repo.get_group("operator", session=session)
+        if op_group is not None:
+            auth_repo.ensure_user_group(user.id, op_group.id, session=session)
 
     if created:
-        _console.write("[seed] 已创建 operator 用户\n")
+        _console.write("[seed] 已创建 operator 用户（operator 组）\n")
     else:
-        _console.write(f"[seed] 已重置 {DEFAULT_USERNAME}（权限提升为 operator）\n")
+        _console.write(f"[seed] 已重置 {DEFAULT_USERNAME} 密码（operator 组绑定保持）\n")
 
     _console.write(
         f"\n冒烟测试账号：\n"
         f"  username   {DEFAULT_USERNAME}\n"
         f"  password   {password}\n"
         f"  email      {DEFAULT_EMAIL}\n"
-        f"  permission operator\n"
+        f"  所属组     operator（通配权限）\n"
     )
 
 

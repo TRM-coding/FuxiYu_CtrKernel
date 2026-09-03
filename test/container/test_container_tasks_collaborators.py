@@ -1,6 +1,6 @@
 import pytest
 
-from ...constant import ContainerStatus, PERMISSION, ROLE
+from ...constant import ContainerStatus, ROLE
 from ...repositories import usercontainer_repo
 from ...services import container_tasks
 from ..factories import create_user

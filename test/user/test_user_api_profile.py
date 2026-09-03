@@ -238,10 +238,9 @@ def test_my_permissions_operator_returns_all(client, monkeypatch):
     from ...repositories import auth_repo
     from ...extensions import session_scope as _ss
     with _ss() as session:
-        for code, _ in [("bypass_auth_entity", "t"), ("bypass_resource", "t")]:
-            ent = auth_repo.ensure_entity(code, "t", session=session)
-            group = auth_repo.ensure_group("operator", "t", session=session)
-            auth_repo.ensure_group_entity(group.id, ent.id, session=session)
+        group = auth_repo.ensure_group("operator", "t", session=session)
+        for code in ("bypass_auth_entity", "bypass_resource"):
+            auth_repo.ensure_group_entity(group.id, code, session=session)
             auth_repo.ensure_user_group(1, group.id, session=session)
     resp = client.get("/api/users/me/permissions")
     assert resp.status_code == 200

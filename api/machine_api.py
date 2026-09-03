@@ -269,11 +269,9 @@ def machine_status_api(
             if not machine:
                 return _error(404, "Machine not found", "machine_not_found")
             machine_status = machine.machine_status.value if hasattr(machine.machine_status, "value") else machine.machine_status
-            display_status = getattr(machine, "display_status", machine_status)
             return {
                 "machine_status": machine_status,
                 "is_maintenance": bool(getattr(machine, "is_maintenance", False)),
-                "display_status": display_status,
                 "runtime_snapshot": node_comms.get_cached_machine_runtime_snapshot(machine.id),
             }
     except Exception as e:
@@ -309,7 +307,6 @@ def list_all_machine_bref_information_api(
                 "machine_type": machine_type,
                 "machine_status": machine_status,
                 "is_maintenance": bool(getattr(machine, "is_maintenance", False)),
-                "display_status": getattr(machine, "display_status", machine_status),
             }
         )
     return {"machines": machines, "total_pages": total_pages}

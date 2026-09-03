@@ -37,6 +37,8 @@ from ..schemas.container import (
     ListAllContainerBrefInformationResponse,
     RefreshLastSshLoginTimeRequest,
     RefreshLastSshLoginTimeResponse,
+    ResurrectContainerRequest,
+    ResurrectContainerResponse,
     SetLongTermContainerRequest,
     SetLongTermContainerResponse,
     UpdateRoleRequest,
@@ -62,12 +64,19 @@ REASON_STATUS_MAP = {
     "stop_failed": 500,
     "restart_failed": 500,
     "container_offline": 400,
+    "container_busy": 409,
+    "container_paused": 409,
+    "container_failed": 409,
+    "container_host_offline": 503,
+    "container_host_maintenance": 503,
+    "container_status_unknown": 409,
     "node_endpoint_not_found": 502,
     "container_not_found": 404,
     "machine_permission_denied": 403,
     "container_permission_denied": 403,
     "insufficient_permission": 403,
     "long_term_limit_reached": 409,
+    "data_not_recoverable": 409,
 }
 
 
@@ -373,6 +382,31 @@ def clean_deleted_container_mount_api(
         reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
         return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
     return {"success": 1, "message": "mount cleaned", "mount_cleanup_id": result.get("mount_cleanup_id")}
+
+
+@router.post("/resurrect_container", response_model=ResurrectContainerResponse)
+def resurrect_container_api(
+    payload: ResurrectContainerRequest = Body(default_factory=ResurrectContainerRequest),
+    operator_user_id: int = Depends(require_permission("container:manage")),
+):
+    data = _payload_data(payload)
+    deleted_id = int(data.get("deleted_id", 0) or 0)
+    try:
+        result = container_service.resurrect_container(
+            deleted_id=deleted_id,
+            operator_user_id=operator_user_id,
+        )
+    except container_service.NodeServiceError as e:
+        reason = getattr(e, "reason", None)
+        return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
+    except Exception as e:
+        reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
+        return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
+    return {
+        "success": 1,
+        "message": "container resurrect requested",
+        "container_id": result.get("container_id"),
+    }
 
 
 @router.post("/set_long_term_container", response_model=SetLongTermContainerResponse)
@@ -722,15 +756,16 @@ def container_status_api(
     data = _payload_data(payload)
     container_id = _machine_id_or_none(data.get("container_id"))
     if container_id is None:
-        return {"container_status": None}
+        return {"effective_status": None}
     try:
         with session_scope(commit=False) as session:
             container = containers_repo.get_by_id(container_id, session=session)
             if not container:
-                return {"container_status": None}
+                return {"effective_status": None}
             from ..services.container_module.node_comms import get_cached_container_runtime_metrics
+            from ..services.container_module.pydantic_models import _derive_effective_status
             return {
-                "container_status": container.container_status.value,
+                "effective_status": _derive_effective_status(container.container_status, container.machine_id, container=container),
                 "failed_reason": getattr(container, "failed_reason", None),
                 "failed_detail": getattr(container, "failed_detail", None),
                 "runtime_metrics": get_cached_container_runtime_metrics(container.machine_id, container.name),
