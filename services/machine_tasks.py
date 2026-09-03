@@ -18,6 +18,7 @@ class machine_bref_information(BaseModel):
     machine_type:str
     machine_status:str
     is_maintenance: bool = False
+    runtime_snapshot: dict | None = None
 
 class machine_detail_information(BaseModel):
     machine_name:str
@@ -490,6 +491,8 @@ def List_all_machine_bref_information(
             ).all()
         )
     
+    from .container_module.node_comms import get_cached_machine_runtime_snapshot
+
     res = []
     for machine in machines:
         info = machine_bref_information(
@@ -499,6 +502,7 @@ def List_all_machine_bref_information(
             machine_type=machine.machine_type.value,
             machine_status=_machine_status_value(machine),
             is_maintenance=bool(getattr(machine, "is_maintenance", False)),
+            runtime_snapshot=get_cached_machine_runtime_snapshot(machine.id),
         )
         res.append(info)
     

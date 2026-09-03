@@ -735,6 +735,17 @@ def test_list_machine_bref_keeps_online_machine_and_containers_without_probe(mon
     assert db_session.get(Container, container.id).container_status == ContainerStatus.ONLINE
 
 
+def test_list_machine_bref_reads_runtime_snapshot_buffer(monkeypatch, db_session):
+    machine = create_machine(machine_status=MachineStatus.ONLINE)
+    runtime = {"cpu": {"usage_percent": 33.0}, "gpu": {"devices": [{"index": 0}]}}
+    monkeypatch.setattr(node_comms, "get_cached_machine_runtime_snapshot", lambda machine_id: runtime if machine_id == machine.id else None)
+
+    result, _ = machine_tasks.List_all_machine_bref_information(0, 10)
+
+    by_id = {item.id: item for item in result}
+    assert by_id[machine.id].runtime_snapshot == runtime
+
+
 def test_list_machine_bref_keeps_maintenance_flag_without_probe(monkeypatch, db_session):
     machine = create_machine(machine_status=MachineStatus.OFFLINE, is_maintenance=True)
     monkeypatch.setattr(

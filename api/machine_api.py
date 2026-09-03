@@ -307,6 +307,7 @@ def list_all_machine_bref_information_api(
                 "machine_type": machine_type,
                 "machine_status": machine_status,
                 "is_maintenance": bool(getattr(machine, "is_maintenance", False)),
+                "runtime_snapshot": getattr(machine, "runtime_snapshot", None),
             }
         )
     return {"machines": machines, "total_pages": total_pages}

@@ -44,7 +44,15 @@ def test_list_machine_bref_requires_token(client, monkeypatch):
 def test_list_machine_bref_success_passes_user_id_to_service(client, monkeypatch):
     monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
     captured = {}
-    machine = SimpleNamespace(id=1, machine_name="m", machine_ip="127.0.0.1", machine_type="GPU", machine_status="online")
+    runtime = {"cpu": {"usage_percent": 20.0}}
+    machine = SimpleNamespace(
+        id=1,
+        machine_name="m",
+        machine_ip="127.0.0.1",
+        machine_type="GPU",
+        machine_status="online",
+        runtime_snapshot=runtime,
+    )
     monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: True)
     monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token, **kwargs: 42)
 
@@ -62,6 +70,7 @@ def test_list_machine_bref_success_passes_user_id_to_service(client, monkeypatch
     assert resp.status_code == 200
     assert captured == {"page_number": 2, "page_size": 5, "user_id": 42, "machine_search": "127"}
     assert resp.json()["machines"][0]["machine_name"] == "m"
+    assert resp.json()["machines"][0]["runtime_snapshot"] == runtime
 
 
 def test_machine_status_api_reads_db_and_runtime_buffer(client, monkeypatch, db_session):

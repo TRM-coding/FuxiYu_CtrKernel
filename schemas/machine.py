@@ -205,6 +205,7 @@ class MachineBriefItem(BaseModel):
     machine_type: MachineType
     machine_status: MachineStatus
     is_maintenance: bool = False
+    runtime_snapshot: dict[str, Any] | None = None
 
 
 class ListMachineBriefResponse(BaseModel):
