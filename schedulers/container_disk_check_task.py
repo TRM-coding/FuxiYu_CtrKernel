@@ -1,4 +1,3 @@
-import threading
 import time
 import logging
 from datetime import datetime, timedelta
@@ -8,7 +7,6 @@ from ..repositories import containers_repo, machine_repo
 from ..services import container_tasks, settings_tasks
 
 logger = logging.getLogger(__name__)
-_SCHEDULER_STATE: dict[str, object] = {}
 _DISK_CHECK_CACHE: dict[str, float] = {}
 
 
@@ -437,41 +435,3 @@ def _get_limit_gb(container) -> float:
     except Exception:
         max_disk_size_gb = 0
     return float(max_disk_size_gb)
-
-
-def start_container_disk_check_scheduler(interval_seconds: int | None = None) -> threading.Thread | None:
-    """
-    启动后台定期磁盘检测任务。
-    仅在 settings: container.disk_check_enabled=true 时启动。
-    """
-    if not settings_tasks.get_container_disk_check_enabled():
-        return None
-    if interval_seconds is None:
-        interval_seconds = settings_tasks.get_container_disk_check_interval_seconds()
-
-    key = "container_disk_check_scheduler"
-    existing = _SCHEDULER_STATE.get(key)
-    if existing and isinstance(existing, dict) and existing.get("thread"):
-        t = existing["thread"]
-        if t.is_alive():
-            return t
-
-    stop_event = threading.Event()
-
-    def _worker():
-        check_all_containers_disk_usage_once()
-
-        while not stop_event.is_set():
-            time.sleep(interval_seconds)
-            if stop_event.is_set():
-                break
-            try:
-                check_all_containers_disk_usage_once()
-            except Exception as e:
-                logger.error("[disk-check] periodic run failed: %s", e)
-
-    t = threading.Thread(target=_worker, daemon=True, name="container-disk-check")
-    t.start()
-
-    _SCHEDULER_STATE[key] = {"thread": t, "stop_event": stop_event}
-    return t

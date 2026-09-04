@@ -399,40 +399,6 @@ class TestEvaluateLimitsEdgeCases:
 
         assert len(soft_calls) == 0
         assert len(hard_calls) == 0
-
-
-# ---------------------------------------------------------------------------
-# scheduler
-# ---------------------------------------------------------------------------
-
-class TestDiskCheckScheduler:
-    """start_container_disk_check_scheduler 调度器测试。"""
-
-    def test_returns_none_when_disabled(self, monkeypatch):
-        """检测关闭时调度器返回 None。"""
-        monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_check_enabled", lambda: False)
-        result = container_disk_check_task.start_container_disk_check_scheduler(
-            interval_seconds=999
-        )
-        assert result is None
-
-    def test_returns_existing_thread_when_alive(self, monkeypatch):
-        """已有存活线程时返回现有线程。"""
-        monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_check_enabled", lambda: True)
-
-        class _Thread:
-            def is_alive(self):
-                return True
-
-        existing = _Thread()
-        container_disk_check_task._SCHEDULER_STATE["container_disk_check_scheduler"] = {"thread": existing}
-
-        result = container_disk_check_task.start_container_disk_check_scheduler(
-            interval_seconds=999
-        )
-        assert result is existing
-
-
 # ============================================================================
 # Phase 5-6: 冻结升级 & 宽限期
 # ============================================================================

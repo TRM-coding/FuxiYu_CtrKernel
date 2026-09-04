@@ -77,13 +77,3 @@ def test_cleanup_expired_containers_continues_after_remove_failure(app, db_sessi
 
     assert removed == [first.id, second.id]
 
-
-def test_cleanup_scheduler_returns_existing_thread_when_alive():
-    class _Thread:
-        def is_alive(self):
-            return True
-
-    existing = _Thread()
-    container_cleanup_task._SCHEDULER_STATE["container_cleanup_scheduler"] = {"thread": existing}
-
-    assert container_cleanup_task.start_container_cleanup_scheduler(interval_seconds=999) is existing

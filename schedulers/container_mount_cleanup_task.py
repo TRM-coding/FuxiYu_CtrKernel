@@ -5,8 +5,6 @@
 - escalation=True 的记录已在删除时立刻清理，此处跳过
 """
 
-import threading
-import time
 import logging
 from datetime import datetime, timedelta
 
@@ -16,7 +14,6 @@ from ..services import settings_tasks
 from ..services.container_tasks import get_full_url, send
 
 logger = logging.getLogger(__name__)
-_SCHEDULER_STATE: dict[str, object] = {}
 
 
 def run_mount_cleanup_once() -> None:
@@ -53,38 +50,3 @@ def run_mount_cleanup_once() -> None:
                 logger.error("[mount-cleanup] node rejected row %s: %s", row.id, res)
         except Exception as e:
             logger.error("[mount-cleanup] failed row %s: %s", row.id, e)
-
-
-def start_mount_cleanup_scheduler(interval_seconds: int | None = None) -> threading.Thread | None:
-    """启动后台定期 mount 清理任务。"""
-    if not settings_tasks.get_container_mount_cleanup_enabled():
-        return None
-    if interval_seconds is None:
-        interval_seconds = settings_tasks.get_container_mount_cleanup_interval_seconds()
-
-    key = "container_mount_cleanup_scheduler"
-    existing = _SCHEDULER_STATE.get(key)
-    if existing and isinstance(existing, dict) and existing.get("thread"):
-        t = existing["thread"]
-        if t.is_alive():
-            return t
-
-    stop_event = threading.Event()
-
-    def _worker():
-        run_mount_cleanup_once()
-
-        while not stop_event.is_set():
-            time.sleep(interval_seconds)
-            if stop_event.is_set():
-                break
-            try:
-                run_mount_cleanup_once()
-            except Exception as e:
-                logger.error("[mount-cleanup] periodic run failed: %s", e)
-
-    t = threading.Thread(target=_worker, daemon=True, name="mount-cleanup")
-    t.start()
-
-    _SCHEDULER_STATE[key] = {"thread": t, "stop_event": stop_event}
-    return t

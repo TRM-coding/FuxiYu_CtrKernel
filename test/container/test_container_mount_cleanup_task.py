@@ -161,24 +161,3 @@ class TestMountCleanupTask:
 
         # should not raise
         container_mount_cleanup_task.run_mount_cleanup_once()
-
-
-class TestMountCleanupScheduler:
-    """start_mount_cleanup_scheduler 调度器。"""
-
-    def test_returns_none_when_disabled(self, monkeypatch):
-        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: False)
-        result = container_mount_cleanup_task.start_mount_cleanup_scheduler()
-        assert result is None
-
-    def test_returns_existing_thread_when_alive(self, monkeypatch):
-        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
-
-        class _Thread:
-            def is_alive(self):
-                return True
-
-        existing = _Thread()
-        container_mount_cleanup_task._SCHEDULER_STATE["container_mount_cleanup_scheduler"] = {"thread": existing}
-        result = container_mount_cleanup_task.start_mount_cleanup_scheduler()
-        assert result is existing
