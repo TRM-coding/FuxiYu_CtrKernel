@@ -69,7 +69,8 @@ def test_build_cleanup_info_clamps_invalid_cleanup_days_to_one():
 
 
 def test_get_full_url_uses_node_middle_path():
+    # TLS 方案：Node uvicorn 已挂 ssl，URL 统一 https
     assert (
         container_tasks.get_full_url("127.0.0.1", "/create_container")
-        == f"http://127.0.0.1{CommsConfig.NODE_URL_MIDDLE}/create_container"
+        == f"https://127.0.0.1{CommsConfig.NODE_URL_MIDDLE}/create_container"
     )

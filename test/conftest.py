@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from .. import create_app
-from ..extensions import db
+from ..extensions import SessionRegistry, db
 
 
 TEST_CONFIG_OVERRIDES = {
@@ -23,7 +23,11 @@ TEST_OPERATOR_TOKEN = "test-operator-token"
 
 
 def _assert_sqlite_database_uri(app):
-    uri = str(app.config.get("SQLALCHEMY_DATABASE_URI", ""))
+    config = getattr(app, "config", None)
+    if config is None:
+        config = getattr(getattr(app, "state", None), "config", None)
+    uri = str((config.get("SQLALCHEMY_DATABASE_URI", "") if isinstance(config, dict)
+               else getattr(config, "SQLALCHEMY_DATABASE_URI", "")))
     if not uri.startswith("sqlite://"):
         raise RuntimeError(f"Refusing to run tests against non-SQLite database URI: {uri}")
 
@@ -51,33 +55,79 @@ def _safe_test_environment():
 
 
 @pytest.fixture(scope="session")
-def app():
+def fastapi_app():
+    """FastAPI 主应用（全量迁移完成后所有 API 都在 FastAPI 侧）。"""
     app = create_app(overrides=TEST_CONFIG_OVERRIDES)
-    _assert_sqlite_database_uri(app)
-    with app.app_context():
-        from .. import models  # noqa: F401
+    app.config = TEST_CONFIG_OVERRIDES
+    return app
 
-        db.create_all()
-        yield app
-        db.session.remove()
-        db.drop_all()
+
+@pytest.fixture(scope="session")
+def app(fastapi_app):
+    """FastAPI runtime，测试直接使用 SQLAlchemy session。"""
+    _assert_sqlite_database_uri(fastapi_app)
+    from .. import models  # noqa: F401
+
+    db.create_all()
+    yield fastapi_app
+    SessionRegistry.remove()
+    db.drop_all()
 
 
 @pytest.fixture()
-def client(app):
-    return app.test_client()
+def client(fastapi_app):
+    """FastAPI TestClient。"""
+    from starlette.testclient import TestClient
+
+    return TestClient(fastapi_app)
 
 
 @pytest.fixture(autouse=True)
 def db_session(app):
     _assert_sqlite_database_uri(app)
-    with app.app_context():
-        try:
-            yield db.session
-        finally:
-            db.session.remove()
-            db.drop_all()
-            db.create_all()
+    db.drop_all()
+    db.create_all()
+    # 每次重建表后重跑 seed，保证 RBAC 实体/组数据完整（app 创建时的 seed 会被 drop 清掉）
+    from ..services.rbac_service import seed_rbac_defaults
+    seed_rbac_defaults()
+    # 镜像内置模板同样重跑（幂等），镜像测试可依赖 seed 存在
+    from ..services.image_tasks import seed_image_defaults
+    seed_image_defaults()
+    # 必要系统设置同样重跑（幂等），镜像注入模板依赖 seed 存在。
+    from ..services.settings_tasks import seed_system_settings_defaults
+    seed_system_settings_defaults()
+    from ..services.container_module.node_comms import clear_runtime_buffers
+    clear_runtime_buffers()
+    try:
+        yield SessionRegistry
+    finally:
+        SessionRegistry.remove()
+        db.drop_all()
+        db.create_all()
+
+
+@pytest.fixture()
+def ensure_auth_users(db_session):
+    """幂等补建 API 测试伪造认证常用的固定用户（1 / 7）。
+
+    SQLite 已开启 PRAGMA foreign_keys=ON（extensions._make_engine，2026-09 决策）：
+    插入引用 users.id 的行（如 images.created_by_user_id / operation_logs.operator）
+    要求用户真实存在；而不少 API 测试用 monkeypatch 伪造固定假 user_id 不建用户。
+    相关测试文件用 pytestmark usefixtures 挂载本 fixture。
+    """
+
+    from ..models.user import User
+
+    for uid, uname in ((1, "auth_user_1"), (7, "auth_user_7")):
+        if db_session.get(User, uid) is None:
+            db_session.add(User(
+                id=uid,
+                username=uname,
+                email=f"{uname}@bjtu.edu.cn",
+                password_hash="unused",
+                graduation_year="2026",
+            ))
+    db_session.commit()
 
 
 @pytest.fixture(autouse=True)
@@ -119,23 +169,7 @@ def mock_external_services(monkeypatch, request):
     monkeypatch.setattr("FuxiYu_CtrKernel.services.user_tasks.send_mail", _mail_send)
     monkeypatch.setattr("FuxiYu_CtrKernel.services.announcement_tasks.send_mail", _mail_send)
     monkeypatch.setattr("FuxiYu_CtrKernel.services.announcement_tasks.send_batch", _mail_send_batch)
-    monkeypatch.setattr("FuxiYu_CtrKernel.schemas.container_cleanup_task.send_mail", _mail_send)
-    monkeypatch.setattr("FuxiYu_CtrKernel.utils.heartbeat.start_machine_maintenance_transition_heartbeat", _fake_thread)
-    monkeypatch.setattr("FuxiYu_CtrKernel.utils.heartbeat.container_starting_status_heartbeat", _fake_thread)
-    monkeypatch.setattr("FuxiYu_CtrKernel.utils.heartbeat.container_stopping_status_heartbeat", _fake_thread)
-    monkeypatch.setattr("FuxiYu_CtrKernel.utils.heartbeat.container_restart_status_heartbeat", _fake_thread)
-    monkeypatch.setattr("FuxiYu_CtrKernel.services.machine_tasks.start_machine_maintenance_transition_heartbeat", _fake_thread)
-    monkeypatch.setattr("FuxiYu_CtrKernel.services.container_tasks.container_starting_status_heartbeat", _fake_thread)
-    monkeypatch.setattr("FuxiYu_CtrKernel.services.container_tasks.container_stopping_status_heartbeat", _fake_thread)
-    monkeypatch.setattr("FuxiYu_CtrKernel.services.container_tasks.container_restart_status_heartbeat", _fake_thread)
+    monkeypatch.setattr("FuxiYu_CtrKernel.schedulers.container_cleanup_task.send_mail", _mail_send)
     yield
 
-
-@pytest.fixture(autouse=True)
-def _clear_reachability_cache():
-    """机器可达性 TTL 缓存是模块级全局：每个测试前后清空，防止跨测试污染。"""
-    from FuxiYu_CtrKernel.services import machine_tasks
-    machine_tasks._reach_cache.clear()
-    yield
-    machine_tasks._reach_cache.clear()
 

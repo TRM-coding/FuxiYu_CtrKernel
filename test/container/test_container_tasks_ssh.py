@@ -87,83 +87,30 @@ class TestBuildCleanupInfo:
         assert info["cleanup_after_days"] == 1
 
 
-# ── get_container_last_ssh_login_time 归一化 ───────────────────────────
+# ── get_container_last_ssh_login_time（WSS 落库后只读 DB） ─────────────
 
-def test_get_last_ssh_time_normalizes_raw_output_to_iso(
-    db_session,
-    container_graph,
-    mock_node_send,
-    mock_crypto,
-):
-    """Node 返回 raw last 文本 → Ctrl 归一化为 ISO UTC 存入 DB。"""
+def test_get_last_ssh_time_reads_db_record(db_session, container_graph):
+    """getter 只查库：读 WSS 推送落库的 ssh 记录。"""
     _root, machine, container = container_graph
-    # Node 响应（TZ=UTC 后，last 输出 UTC 时间）
-    mock_node_send({"success": 1, "last_ssh_connect_time": "root pts/0 10.0.0.1 Wed Jun 17 03:40 still logged in"})
-
-    last_time = container_tasks.get_container_last_ssh_login_time(container.id)
-
-    # 返回值和 DB 存储都应该是 ISO 格式
-    assert last_time == "2026-06-17T03:40:00"
-    record = container_ssh_login_repo.get_by_machine_container(machine.id, container.id)
-    assert record.last_ssh_login_time == "2026-06-17T03:40:00"
-
-
-def test_get_last_ssh_time_passes_through_iso(
-    db_session,
-    container_graph,
-    mock_node_send,
-    mock_crypto,
-):
-    """Node 返回已是 ISO 格式 → 直接存储，不重复转换。"""
-    _root, machine, container = container_graph
-    mock_node_send({"success": 1, "last_ssh_connect_time": "2026-06-17T03:40:00"})
-
-    last_time = container_tasks.get_container_last_ssh_login_time(container.id)
-
-    assert last_time == "2026-06-17T03:40:00"
-    record = container_ssh_login_repo.get_by_machine_container(machine.id, container.id)
-    assert record.last_ssh_login_time == "2026-06-17T03:40:00"
-
-
-def test_get_last_ssh_time_not_found_does_not_overwrite(
-    db_session,
-    container_graph,
-    mock_node_send,
-    mock_crypto,
-):
-    """Node 返回 not_found → 不覆写已有值。"""
-    _root, machine, container = container_graph
-    # 先设一个初始值
-    initial_time = "2026-06-13T18:06:23"
     container_ssh_login_repo.upsert_last_ssh_login_time(
-        machine.id, container.id, initial_time
+        machine.id,
+        container.id,
+        "2026-06-17T03:40:00",
+        session=db_session,
     )
+    db_session.commit()
 
-    mock_node_send(NODE_LAST_SSH_NOT_FOUND)
     last_time = container_tasks.get_container_last_ssh_login_time(container.id)
 
-    # Node 返回 not_found，但 DB 已有初始值 → 兜底返回 DB 值
-    assert last_time == initial_time
-    record = container_ssh_login_repo.get_by_machine_container(machine.id, container.id)
-    # 数据库里的值没有被 None 覆写
-    assert record.last_ssh_login_time == initial_time
+    assert last_time == "2026-06-17T03:40:00"
+
+
+def test_get_last_ssh_time_no_record_returns_none(db_session, container_graph):
+    _root, _machine, container = container_graph
+
+    assert container_tasks.get_container_last_ssh_login_time(container.id) is None
 
 
 def test_get_last_ssh_time_invalid_container_id_returns_none(db_session):
     assert container_tasks.get_container_last_ssh_login_time("bad") is None
     assert container_tasks.get_container_last_ssh_login_time(999999) is None
-
-
-def test_get_last_ssh_time_endpoint_404_raises_node_endpoint_not_found(
-    db_session,
-    container_graph,
-    mock_node_send,
-    mock_crypto,
-):
-    _root, _machine, container = container_graph
-    mock_node_send(NODE_ENDPOINT_404_HTML)
-
-    with pytest.raises(container_tasks.NodeServiceError) as excinfo:
-        container_tasks.get_container_last_ssh_login_time(container.id)
-
-    assert excinfo.value.reason == "node_endpoint_not_found"

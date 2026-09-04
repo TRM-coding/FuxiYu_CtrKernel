@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 
-from ...blueprints import user_api
-from ...constant import PERMISSION
+from ...api import user_api, deps
 
 
 def _fake_user(**overrides):
@@ -9,7 +8,6 @@ def _fake_user(**overrides):
         "id": 1,
         "username": "api_user",
         "email": "api_user@bjtu.edu.cn",
-        "permission": PERMISSION.USER,
     }
     data.update(overrides)
     return SimpleNamespace(**data)
@@ -27,11 +25,32 @@ def test_register_success(client, monkeypatch):
     })
 
     assert resp.status_code == 201
-    assert resp.get_json()["success"] == 1
+    assert resp.json()["success"] == 1
+
+
+def test_register_blank_graduation_year_is_optional(client, monkeypatch):
+    captured = {}
+
+    def _register(username, email, password, graduation_year, registration_code):
+        captured["graduation_year"] = graduation_year
+        return True, _fake_user(), None
+
+    monkeypatch.setattr(user_api.user_tasks, "Register_with_code", _register)
+
+    resp = client.post("/api/register", json={
+        "username": "api_user",
+        "email": "api_user@bjtu.edu.cn",
+        "password": "Password_123",
+        "graduation_year": "",
+        "registration_code": "123456",
+    })
+
+    assert resp.status_code == 201
+    assert captured["graduation_year"] is None
 
 
 def test_register_invalid_json(client):
-    resp = client.post("/api/register", data="not-json", content_type="application/json")
+    resp = client.post("/api/register", content="not-json", headers={"content-type": "application/json"})
 
     assert resp.status_code == 400
 
@@ -54,7 +73,7 @@ def test_register_duplicate_username_returns_409(client, monkeypatch):
     })
 
     assert resp.status_code == 409
-    assert resp.get_json()["error_reason"] == "username_exists"
+    assert resp.json()["error_reason"] == "username_exists"
 
 
 def test_register_registration_code_required_returns_400(client, monkeypatch):
@@ -68,7 +87,7 @@ def test_register_registration_code_required_returns_400(client, monkeypatch):
     })
 
     assert resp.status_code == 400
-    assert resp.get_json()["error_reason"] == "registration_code_required"
+    assert resp.json()["error_reason"] == "registration_code_required"
 
 
 def test_request_register_code_success(client, monkeypatch):
@@ -77,14 +96,14 @@ def test_request_register_code_success(client, monkeypatch):
     resp = client.post("/api/request_register_code", json={"email": "api_user@bjtu.edu.cn"})
 
     assert resp.status_code == 200
-    assert resp.get_json()["success"] == 1
+    assert resp.json()["success"] == 1
 
 
 def test_request_register_code_missing_email(client):
     resp = client.post("/api/request_register_code", json={})
 
     assert resp.status_code == 400
-    assert resp.get_json()["error_reason"] == "missing_email"
+    assert resp.json()["error_reason"] == "missing_email"
 
 
 def test_request_register_code_domain_not_allowed(client, monkeypatch):
@@ -93,7 +112,7 @@ def test_request_register_code_domain_not_allowed(client, monkeypatch):
     resp = client.post("/api/request_register_code", json={"email": "api_user@example.com"})
 
     assert resp.status_code == 400
-    assert resp.get_json()["error_reason"] == "email_domain_not_allowed"
+    assert resp.json()["error_reason"] == "email_domain_not_allowed"
 
 
 def test_login_success_sets_cookie(client, monkeypatch):
@@ -103,8 +122,39 @@ def test_login_success_sets_cookie(client, monkeypatch):
 
     assert resp.status_code == 200
     # token 已不再出现在 JSON body，只走 httpOnly cookie
-    assert "token" not in resp.get_json()
+    assert "token" not in resp.json()
     assert "auth_token=token-1" in resp.headers.get("Set-Cookie", "")
+
+
+def test_logout_clears_cookie_and_auth_record(client, monkeypatch):
+    deleted = {}
+
+    class _Session:
+        pass
+
+    class _Scope:
+        def __enter__(self):
+            return _Session()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(user_api, "session_scope", lambda: _Scope())
+
+    def _delete_auth(token, *, session):
+        deleted["token"] = token
+        deleted["session"] = session
+        return True
+
+    monkeypatch.setattr(user_api.authentications_repo, "delete_auth", _delete_auth)
+
+    client.cookies.set("auth_token", "token-1")
+    resp = client.post("/api/logout")
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] == 1
+    assert deleted["token"] == "token-1"
+    assert "auth_token=" in resp.headers.get("Set-Cookie", "")
 
 
 def test_login_user_not_found(client, monkeypatch):
@@ -113,7 +163,7 @@ def test_login_user_not_found(client, monkeypatch):
     resp = client.post("/api/login", json={"username": "missing", "password": "Password_123"})
 
     assert resp.status_code == 404
-    assert resp.get_json()["error_reason"] == "user_not_found"
+    assert resp.json()["error_reason"] == "user_not_found"
 
 
 def test_login_wrong_password(client, monkeypatch):
@@ -122,4 +172,4 @@ def test_login_wrong_password(client, monkeypatch):
     resp = client.post("/api/login", json={"username": "api_user", "password": "bad"})
 
     assert resp.status_code == 400
-    assert resp.get_json()["error_reason"] == "password_incorrect"
+    assert resp.json()["error_reason"] == "password_incorrect"

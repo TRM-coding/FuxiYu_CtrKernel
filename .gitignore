@@ -1,19 +1,24 @@
 **/.pytest_cache/
 **/__pycache__/
+*/.pytest_cache/
+*/__pycache__/
 
 venv/
-
-# ignore locally-generated TLS certs (mkcert)
-certs/*.pem
-certs/*-key.pem
-certs/*.key
-*.log
 .env
 .mysql-fix-*.sql
 
 /logs/*
 !/logs/.gitkeep
 
+/certs/*
+!/certs/.gitkeep
+
+/pinned_certs/
+/runtime_cache/
+
 docs/audit/*
 
 *.db
+*.sqlite
+*.sqlite3
+*.log

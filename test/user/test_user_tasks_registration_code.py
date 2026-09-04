@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta
 
-from ...models.registration_code import RegistrationCode
 from ...repositories import registration_code_repo
 from ...services import user_tasks
 
@@ -15,9 +14,12 @@ def test_request_register_code_success_creates_code_and_sends_mail(monkeypatch, 
     assert success is True
     assert reason == "code_sent"
     assert sent and sent[0]["to"] == "code_user@bjtu.edu.cn"
-    record = RegistrationCode.query.filter_by(email="code_user@bjtu.edu.cn").first()
+    from sqlalchemy import select
+    from ...models.registration_code import RegistrationCode
+
+    record = db_session.scalars(select(RegistrationCode).where(RegistrationCode.email == "code_user@bjtu.edu.cn")).first()
     assert record is not None
-    assert registration_code_repo.verify_code("code_user@bjtu.edu.cn", "012345", "bjtu.edu.cn") is True
+    assert registration_code_repo.verify_code("code_user@bjtu.edu.cn", "012345", "bjtu.edu.cn", session=db_session) is True
 
 
 def test_request_register_code_rejects_unallowed_domain(db_session):
@@ -93,6 +95,7 @@ def test_registration_code_repo_rejects_expired_code(db_session):
         school_domain="bjtu.edu.cn",
         code="123456",
         expires_at=datetime.utcnow() - timedelta(seconds=1),
+        session=db_session,
     )
 
-    assert registration_code_repo.verify_code("expired@bjtu.edu.cn", "123456", "bjtu.edu.cn") is False
+    assert registration_code_repo.verify_code("expired@bjtu.edu.cn", "123456", "bjtu.edu.cn", session=db_session) is False

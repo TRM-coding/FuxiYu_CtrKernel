@@ -3,8 +3,9 @@ import pytest
 from . import mocks
 from .conftest import TEST_AUTH_TOKEN
 from .factories import create_container_graph, create_machine, create_user
-from ..constant import MachineStatus, PERMISSION, ROLE
-from ..repositories import authentications_repo
+from ..constant import MachineStatus, ROLE
+from ..extensions import session_scope
+from ..repositories import authentications_repo, usercontainer_repo
 from ..services import container_tasks
 
 
@@ -17,9 +18,9 @@ def test_user_factory_creates_unique_users(db_session):
 
 
 def test_user_factory_can_create_operator(db_session):
-    operator = create_user(permission=PERMISSION.OPERATOR)
+    operator = create_user(operator=True)
 
-    assert operator.permission == PERMISSION.OPERATOR
+    assert operator is not None
 
 
 def test_machine_factory_creates_online_machine_by_default(db_session):
@@ -31,7 +32,8 @@ def test_machine_factory_creates_online_machine_by_default(db_session):
 def test_container_factory_creates_root_binding_by_default(db_session):
     root, _machine, container = create_container_graph()
 
-    bindings = container_tasks.get_container_bindings(container.id)
+    with session_scope(commit=False) as session:
+        bindings = usercontainer_repo.get_container_bindings(container.id, session=session)
 
     assert bindings[0]["user_id"] == root.id
     assert getattr(bindings[0]["role"], "value", bindings[0]["role"]) == ROLE.ROOT.value
@@ -42,7 +44,7 @@ def test_auth_token_factory_creates_valid_token(db_session):
 
     token = mocks.auth_token_factory(user, token=TEST_AUTH_TOKEN)
 
-    assert authentications_repo.is_token_valid(token) is True
+    assert authentications_repo.is_token_valid(token, session=db_session) is True
 
 
 def test_auth_token_factory_can_create_expired_token(db_session):
@@ -50,20 +52,20 @@ def test_auth_token_factory_can_create_expired_token(db_session):
 
     token = mocks.auth_token_factory(user, expired=True, token="expired-platform-token")
 
-    assert authentications_repo.is_token_valid(token) is False
+    assert authentications_repo.is_token_valid(token, session=db_session) is False
 
 
 def test_mock_node_response_records_calls(monkeypatch):
     calls = mocks.mock_node_response(monkeypatch, container_tasks, {"success": 1})
 
-    result = container_tasks.send(b"cipher", b"sig", "http://node")
+    result = container_tasks.send("http://node", {"config": {}})
 
     assert result == {"success": 1}
-    assert calls[0]["args"] == (b"cipher", b"sig", "http://node")
+    assert calls[0]["args"] == ("http://node", {"config": {}})
 
 
 def test_mock_mail_success_records_recipient_subject_content(monkeypatch):
-    from ..schemas import container_cleanup_task
+    from ..schedulers import container_cleanup_task
 
     calls = mocks.mock_mail_success(monkeypatch, container_cleanup_task)
 

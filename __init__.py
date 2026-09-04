@@ -1,55 +1,305 @@
-# yourapp/__init__.py
+﻿from contextlib import asynccontextmanager
 from pathlib import Path
+
 from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 _DOTENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(_DOTENV_PATH, override=True)
 
-import os
-from flask import Flask
-from flask_cors import CORS
-from .extensions import db
-from .config import get_config, build_allowed_origins
-from .blueprints import register_blueprints
-from .schemas.container_ssh_refresh_task import start_container_ssh_refresh_scheduler
-from .schemas.container_cleanup_task import start_container_cleanup_scheduler
-from .schemas.container_mount_cleanup_task import start_mount_cleanup_scheduler
+from .api import register_api
+from .config import AppConfig, build_allowed_origins
+from . import extensions
+from .extensions import configure_database, db
 from .utils.logging_config import configure_daily_logging
 
 
-def create_app(config: str | None = None, overrides: dict | None = None):
+def _apply_overrides(overrides: dict | None) -> None:
+    """Apply test or local configuration overrides."""
+
     if not overrides:
-        load_dotenv(_DOTENV_PATH, override=True)
-    app = Flask(__name__)
-    app.config.from_object(get_config(config))
-    if overrides:
-        app.config.update(overrides)
-    configure_daily_logging(app)
-    # Configure CORS for API routes. 统一由 build_allowed_origins() 生成：
-    # 只枚举 https 变体 + WEB_IP/127.0.0.1/localhost 三种写法，尾斜杠归一化。
-    # When credentials are used, do NOT set origins to * — specify exact origins.
-    origins = build_allowed_origins()
-    CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": origins}})
-
-    db.init_app(app)
-    with app.app_context():
-        from . import models
-        db.create_all()
+        return
+    for key, value in overrides.items():
+        setattr(AppConfig, key, value)
 
 
-    register_blueprints(app)
+def _init_database() -> None:
+    """Import models, create tables, and seed minimal RBAC defaults."""
 
-    # 启动“每5分钟刷新容器上次 SSH 登录时间”的后台任务。
-    # Flask debug 模式下父进程和子进程都会执行 create_app，这里仅在 reloader 子进程启动任务，避免重复线程。
-    if (
-        not app.config.get("TESTING")
-        and not app.config.get("DISABLE_BACKGROUND_TASKS")
-        and ((not app.debug) or os.environ.get("WERKZEUG_RUN_MAIN") == "true")
+    from . import models  # noqa: F401
+
+    db.create_all()
+    _ensure_image_template_schema()
+    _ensure_container_failure_schema()
+    _ensure_gpu_columns()
+    try:
+        from .services.rbac_service import seed_rbac_defaults
+
+        seed_rbac_defaults()
+    except Exception as e:
+        import logging
+
+        logging.getLogger(__name__).warning("rbac seed skipped: %s", e)
+    try:
+        from .services.image_tasks import seed_image_defaults
+
+        seed_image_defaults()
+    except Exception as e:
+        import logging
+
+        logging.getLogger(__name__).warning("image seed skipped: %s", e)
+    try:
+        from .services.settings_tasks import seed_system_settings_defaults
+
+        seed_system_settings_defaults()
+    except Exception as e:
+        import logging
+
+        logging.getLogger(__name__).warning("system settings seed skipped: %s", e)
+
+
+def _ensure_image_template_schema() -> None:
+    """补齐开发期旧 images 表缺失的镜像模板列。
+
+    create_all 只创建新表，不会修改旧表；镜像模板在开发期经历过字段拆分，
+    旧 SQLite 库会缺 base_image/dockerfile_body 等列，导致列表接口 500。
+    """
+
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    current_engine = extensions.engine
+    inspector = inspect(current_engine)
+    if not inspector.has_table("images"):
+        return
+
+    existing = {column["name"] for column in inspector.get_columns("images")}
+    required_sqlite = {
+        "base_image": "ALTER TABLE images ADD COLUMN base_image VARCHAR(255) NOT NULL DEFAULT 'ubuntu:22.04'",
+        "dockerfile_body": "ALTER TABLE images ADD COLUMN dockerfile_body TEXT NOT NULL DEFAULT ''",
+        "status": "ALTER TABLE images ADD COLUMN status VARCHAR(8) NOT NULL DEFAULT 'draft'",
+        "created_by_user_id": "ALTER TABLE images ADD COLUMN created_by_user_id INTEGER NULL",
+        "created_at": "ALTER TABLE images ADD COLUMN created_at DATETIME NULL",
+        "updated_at": "ALTER TABLE images ADD COLUMN updated_at DATETIME NULL",
+    }
+    required_mysql = {
+        "base_image": "ALTER TABLE images ADD COLUMN base_image VARCHAR(255) NOT NULL DEFAULT 'ubuntu:22.04'",
+        "dockerfile_body": "ALTER TABLE images ADD COLUMN dockerfile_body TEXT NOT NULL",
+        "status": "ALTER TABLE images ADD COLUMN status ENUM('draft', 'ready', 'disabled') NOT NULL DEFAULT 'draft'",
+        "created_by_user_id": "ALTER TABLE images ADD COLUMN created_by_user_id INT NULL",
+        "created_at": "ALTER TABLE images ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "updated_at": "ALTER TABLE images ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
+    }
+    required = required_sqlite if current_engine.dialect.name == "sqlite" else required_mysql
+
+    missing = [name for name in required if name not in existing]
+    if not missing:
+        return
+
+    with current_engine.begin() as conn:
+        for name in missing:
+            conn.execute(text(required[name]))
+    logging.getLogger(__name__).warning("image schema upgraded: added columns %s", ", ".join(missing))
+
+
+def _ensure_container_failure_schema() -> None:
+    """补齐开发期旧 containers 表缺失的失败诊断列。"""
+
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    current_engine = extensions.engine
+    inspector = inspect(current_engine)
+    if not inspector.has_table("containers"):
+        return
+
+    existing = {column["name"] for column in inspector.get_columns("containers")}
+    required = {
+        "failed_reason": "ALTER TABLE containers ADD COLUMN failed_reason VARCHAR(255) NULL",
+        "failed_detail": "ALTER TABLE containers ADD COLUMN failed_detail TEXT NULL",
+    }
+    missing = [name for name in required if name not in existing]
+    if not missing:
+        return
+
+    with current_engine.begin() as conn:
+        for name in missing:
+            conn.execute(text(required[name]))
+    logging.getLogger(__name__).warning("container schema upgraded: added columns %s", ", ".join(missing))
+
+
+def _ensure_gpu_columns() -> None:
+    """补齐 GPU 三集合建模列（machines: gpu_list/gpu_allow_list；containers: gpu_chosen_list）。
+
+    旧库补 JSON 列（SQLite 存 TEXT，MySQL 存 JSON）；新库由 create_all 直接建。
+    """
+
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    current_engine = extensions.engine
+    inspector = inspect(current_engine)
+    for table, required in (
+        ("machines", {
+            "gpu_list": "ALTER TABLE machines ADD COLUMN gpu_list JSON NULL",
+            "gpu_allow_list": "ALTER TABLE machines ADD COLUMN gpu_allow_list JSON NULL",
+            "max_disk_size_gb": "ALTER TABLE machines ADD COLUMN max_disk_size_gb INTEGER NULL",
+        }),
+        ("containers", {
+            "gpu_chosen_list": "ALTER TABLE containers ADD COLUMN gpu_chosen_list JSON NULL",
+            "port_mappings": "ALTER TABLE containers ADD COLUMN port_mappings JSON NULL",
+            # 容器创建时间（2026-09）：容器 id 在 SQLite 删除后可复用，created_at 提供
+            # 新旧区分锚（op log 审计对照用）；老库 NULL 由下次创建/回填补齐。
+            "created_at": "ALTER TABLE containers ADD COLUMN created_at DATETIME NULL",
+        }),
     ):
-        start_container_ssh_refresh_scheduler(app, interval_seconds=300)
-        # 启动容器定时清理任务（每20分钟扫描一次到期容器并释放）
-        start_container_cleanup_scheduler(app, interval_seconds=1200)
-        # 启动已删除容器 mount 清理任务（每天一次）
-        start_mount_cleanup_scheduler(app)
+        if not inspector.has_table(table):
+            continue
+        existing = {column["name"] for column in inspector.get_columns(table)}
+        missing = [name for name in required if name not in existing]
+        if not missing:
+            continue
+        with current_engine.begin() as conn:
+            for name in missing:
+                conn.execute(text(required[name]))
+        logging.getLogger(__name__).warning("gpu schema upgraded: %s added columns %s", table, ", ".join(missing))
 
+    # 磁盘上限语义收敛回填：max_disk_size_gb 新列 NULL → 沿用原 disk_size_gb
+    # （上限行为延续，管理员之后可调；幂等：只补 NULL）。
+    if inspector.has_table("machines"):
+        try:
+            with current_engine.begin() as conn:
+                conn.execute(text(
+                    "UPDATE machines SET max_disk_size_gb = disk_size_gb "
+                    "WHERE max_disk_size_gb IS NULL AND disk_size_gb IS NOT NULL"
+                ))
+        except Exception as e:  # pragma: no cover
+            logging.getLogger(__name__).warning("max_disk_size_gb backfill failed: %s", e)
+
+    _backfill_container_created_at(current_engine)
+
+
+def _backfill_container_created_at(current_engine) -> None:
+    """容器 created_at 存量回填（2026-09）：id 复用区分锚。
+
+    反查来源 = op log 的 create_container 成功记录，取 MAX：id 复用 N 次有 N 条
+    create 日志，现存容器 = 最近一次成功创建 → MAX 才是当前实体创建时刻。
+    幂等：只补 NULL；无 create 日志的容器维持 NULL（getter 不过滤，兜底）。
+    """
+
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(current_engine)
+    if not (inspector.has_table("containers") and inspector.has_table("operation_logs")):
+        return
+    try:
+        with current_engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE containers SET created_at = ("
+                "  SELECT MAX(created_at) FROM operation_logs"
+                "  WHERE target_type = 'container' AND target_id = containers.id"
+                "    AND operation = 'create_container' AND success = 1"
+                ") WHERE created_at IS NULL"
+            ))
+    except Exception as e:  # pragma: no cover
+        logging.getLogger(__name__).warning("container created_at backfill failed: %s", e)
+
+
+def _should_start_background_tasks() -> bool:
+    """Return whether Ctrl background tasks should start."""
+
+    return not getattr(AppConfig, "TESTING", False) and not getattr(AppConfig, "DISABLE_BACKGROUND_TASKS", False)
+
+
+def _start_background_tasks() -> None:
+    """Start Ctrl background tasks after their DB access is migrated."""
+
+    return None
+
+
+def create_app(config: str | None = None, overrides: dict | None = None) -> FastAPI:
+    """Create the Ctrl FastAPI application."""
+
+    _apply_overrides(overrides)
+    configure_database(AppConfig.SQLALCHEMY_DATABASE_URI)
+    configure_daily_logging(AppConfig)
+    _init_database()
+    # 内部运行时推送共享 token 预热（API 先于 WSS 子进程启动，保证两进程同一 token）
+    try:
+        import logging
+
+        from .services.container_module.node_comms import _read_internal_token
+
+        _read_internal_token()
+    except Exception as e:  # pragma: no cover
+        logging.getLogger(__name__).warning("internal token warmup failed: %s", e)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        if _should_start_background_tasks():
+            _start_background_tasks()
+        yield
+
+    app = FastAPI(title="FuxiYu CtrlKernel API", lifespan=lifespan)
+    app.state.config = AppConfig
+    app.state.db = db
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=build_allowed_origins(),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error_handler(request: Request, exc: RequestValidationError):
+        errors = exc.errors()
+        reason = "invalid_payload"
+        fields = {
+            str(part)
+            for error in errors
+            for part in error.get("loc", ())
+            if part not in ("body", "query", "path")
+        }
+        if any(error.get("type") == "json_invalid" for error in errors):
+            reason = "invalid_json"
+        elif request.url.path.endswith("/users/get_user_detail_information") and "user_id" in fields:
+            reason = "missing_user_id"
+        elif request.url.path.endswith("/request_register_code") and "email" in fields:
+            reason = "missing_email"
+        elif (
+            request.url.path.endswith("/machines/add_machine_permission")
+            or request.url.path.endswith("/machines/remove_machine_permission")
+        ) and {"machine_id", "user_id"} & fields:
+            reason = "missing_fields"
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": 0,
+                "message": "invalid request payload",
+                "error_reason": reason,
+                "detail": errors,
+            },
+        )
+
+    @app.exception_handler(HTTPException)
+    async def _http_exception_handler(_: Request, exc: HTTPException):
+        if isinstance(exc.detail, dict) and "success" in exc.detail:
+            return JSONResponse(status_code=exc.status_code, content=exc.detail, headers=exc.headers)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"success": 0, "message": str(exc.detail), "error_reason": None},
+            headers=exc.headers,
+        )
+
+    register_api(app)
     return app

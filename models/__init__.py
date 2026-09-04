@@ -7,8 +7,16 @@ from .container_ssh_login import ContainerSSHLogin  # noqa: F401
 from .container_cleanup_reminder import ContainerCleanupReminder  # noqa: F401
 from .container_disk_freeze_state import ContainerDiskFreezeState  # noqa: F401
 from .container_mount_cleanup import ContainerMountCleanup  # noqa: F401
+from .deleted_container_restore_snapshot import DeletedContainerRestoreSnapshot  # noqa: F401
 
 from .registration_code import RegistrationCode  # noqa: F401
 from .announcement import Announcement, AnnouncementTemplate, AnnouncementDraft  # noqa: F401
 from .authentications import Authentication  # noqa: F401
 from .operation_log import OperationLog  # noqa: F401
+
+from .auth_group import AuthGroup, AuthGroupEntity  # noqa: F401
+from .user_group import UserGroup  # noqa: F401
+from .image import Image  # noqa: F401
+from .userimage import UserImage  # noqa: F401
+from .user_managed_user import UserManagedUser  # noqa: F401
+from .system_setting import SystemSetting  # noqa: F401

@@ -2,594 +2,130 @@ import json
 import requests
 import time
 import base64
-from datetime import datetime, timedelta
+import logging
+from datetime import datetime
 import traceback
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
 from pydantic import BaseModel, Field
+from ..extensions import session_scope
 
-from ..config import CommsConfig
 from ..constant import *
-from ..utils.parallel import parallel_node_calls
 from sqlalchemy.exc import IntegrityError
 from ..repositories import containers_repo, machine_repo, machine_permission_repo, user_repo, long_term_container_repo
+from ..repositories import container_mount_cleanup_repo, deleted_container_restore_snapshot_repo
 from .operation_log_tasks import write_operation_log as write_op_log
+from . import settings_tasks
 from ..repositories import containers_repo as container_repo
 from ..repositories import container_ssh_login_repo
-from .machine_tasks import is_machine_online_remote, get_machine_reachable
 from ..repositories.machine_repo import *
 from ..repositories.user_repo import *
-from ..utils.CheckKeys import *
 from ..utils.Container import Container_info
 from ..repositories.containers_repo import *
 from ..repositories.usercontainer_repo import *
-from ..utils.heartbeat import (
-    container_starting_status_heartbeat,
-    container_stopping_status_heartbeat,
-    container_restart_status_heartbeat,
-)
 from ..models.containers import Container
 import math
-import re
 from ..utils import sanitizer as _sanitizer
 
-####################################################
-# 辅助工具
+from .container_module.node_comms import (
+    send,
+    get_full_url,
+    _ensure_machine_online_for_operation,
+)
+from .container_module.exceptions import NodeServiceError, _raise_on_node_error
+from .container_module.operation_guard import ensure_container_operation_allowed
+from .container_module.pydantic_models import (
+    container_bref_information,
+    container_detail_information,
+    _derive_effective_status,
+)
+from .container_module.utils import (
+    _parse_last_ssh_time,
+    build_cleanup_info,
+    build_long_term_container_state,
+    container_image_dockerfile,
+    derive_allocated_limits,
+    select_gpu_allowance,
+)
+from .container_module.deleted_containers import (
+    build_container_restore_snapshot,
+    build_deleted_container_page,
+    delete_restore_artifacts,
+    record_deleted_container_artifacts,
+    restore_accounts_from_snapshot,
+    restore_role_api_value,
+)
+from ..repositories.containers_repo import _binding_role_value, _root_user_ids_from_bindings, derive_port_mappings
 
-_MONTH_ABBR_TO_NUM = {
-    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
-    "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
-}
-
-
-def _parse_last_ssh_time(raw: str | None) -> datetime | None:
-    """
-    尝试把 Node 返回的 last ssh 时间解析为 datetime。
-    支持：
-    - ISO/常见 datetime 字符串
-    - syslog 风格：`Mar 20 12:34:56 ...`
-    - `last` 输出中的日期片段：`Fri Mar 20 12:34 ...`
-    """
-    if not raw:
-        return None
-    s = str(raw).strip()
-    if not s:
-        return None
-
-    # 1) 直接尝试 fromisoformat / 通用格式
-    try:
-        v = s.replace("Z", "+00:00")
-        return datetime.fromisoformat(v)
-    except Exception:
-        pass
-
-    # 2) 提取 "Mon DD HH:MM[:SS]" 片段（无年份时使用当前年）
-    m = re.search(r"\b([A-Z][a-z]{2})\s+(\d{1,2})\s+(\d{2}:\d{2}(?::\d{2})?)\b", s)
-    if not m:
-        return None
-    mon = _MONTH_ABBR_TO_NUM.get(m.group(1))
-    if not mon:
-        return None
-    day = int(m.group(2))
-    hhmmss = m.group(3)
-    parts = hhmmss.split(":")
-    hour = int(parts[0])
-    minute = int(parts[1])
-    second = int(parts[2]) if len(parts) > 2 else 0
-    now = datetime.utcnow()
-    try:
-        return datetime(now.year, mon, day, hour, minute, second)
-    except Exception:
-        return None
+logger = logging.getLogger(__name__)
 
 
-def build_cleanup_info(last_ssh_login_time: str | None, cleanup_after_days: int) -> dict:
-    """
-    基于上次 SSH 登录时间计算清理时间信息（仅计算，不执行清理）。
-    """
-    #print(f"DEBUG: build_cleanup_info called with last_ssh_login_time='{last_ssh_login_time}' and cleanup_after_days={cleanup_after_days}")
-    if cleanup_after_days <= 0:
-        cleanup_after_days = 1
-
-    last_dt = _parse_last_ssh_time(last_ssh_login_time)
-    if last_dt is None:
-        return {
-            "cleanup_after_days": cleanup_after_days,
-            "cleanup_at": None,
-            "seconds_until_cleanup": None,
-            "cleanup_status": "unknown",
-        }
-
-    cleanup_at = last_dt + timedelta(days=cleanup_after_days)
-    seconds_left = int((cleanup_at - datetime.utcnow()).total_seconds())
-    if seconds_left <= 0:
-        status = "due"
-        seconds_left = 0
-    else:
-        status = "countdown"
-
-    return {
-        "cleanup_after_days": cleanup_after_days,
-        "cleanup_at": cleanup_at.isoformat(),
-        "seconds_until_cleanup": seconds_left,
-        "cleanup_status": status,
-    }
-
-def _is_operator_user(user_id: int) -> bool:
-    try:
-        u = user_repo.get_by_id(user_id)
-        #print(f"DEBUG: checking if user {user_id} is operator: permission={getattr(u, 'permission', None)}")
-        perm = getattr(u, 'permission', None) if u else None
-        return bool(perm and getattr(perm, 'value', str(perm)).lower() == 'operator')
-    except Exception:
-        return False
+def _container_effective_status(container: Container) -> str:
+    return _derive_effective_status(container.container_status, container.machine_id, container=container)
 
 
-def _can_access_machine(user_id: int, machine_id: int) -> bool:
-    if not user_id or not machine_id:
-        return False
-    if _is_operator_user(user_id):
-        return True
-    try:
-        allowed = set(machine_permission_repo.list_machine_ids_by_user(user_id))
-        return machine_id in allowed
-    except Exception:
-        return False
-
-def _ensure_machine_online_for_operation(machine_id: int, operation: str = ''):
-    """
-    这里检查机器在线状态的主要目的是为了在执行诸如创建/删除/修改容器等操作之前，先验证目标机器是否在线，以避免不必要的远程调用和更快地反馈给用户。虽然最终的远程调用也会有类似的检查，但这个预检查可以节省资源并提供更即时的错误响应。
-    """
-    try:
-        m = machine_repo.get_by_id(machine_id)
-    except Exception:
-        m = None
-    if not m:
-        raise NodeServiceError(f"MACHINE {operation} failed: machine {machine_id} not found", reason="machine_not_found")
-    try:
-        machine_status = m.machine_status.value.lower() if hasattr(m.machine_status, 'value') else str(m.machine_status).lower()
-    except Exception:
-        machine_status = str(getattr(m, 'machine_status', '')).lower()
-    if machine_status == 'maintenance':
-        raise NodeServiceError(f"MACHINE {operation} aborted: machine is maintenance", reason="machine_maintenance")
-    ok = is_machine_online_remote(machine_id)
-    if not ok:
-        raise NodeServiceError(f"MACHINE {operation} aborted: remote node not reachable or not online", reason="machine_offline")
+def get_long_term_container_limit() -> int:
+    return settings_tasks.get_long_term_container_limit()
 
 
-####################################################
-#发送指令到集群实体机
-
-
-def send(ciphertext:bytes,signature:bytes,mechine_ip:str, timeout:float=5.0)->dict:
-    """
-    发送 POST 并返回解析后的响应（优先 JSON），出现错误时返回包含 error 字段的 dict。
-    """
-    try:
-        resp = requests.post(mechine_ip, json={
-            "message": base64.b64encode(ciphertext).decode('utf-8'),
-            "signature": base64.b64encode(signature).decode('utf-8')
-        }, timeout=timeout)
-
-        # 尝试解析为 JSON（即使是 4xx/5xx，也优先解析 body 中的 JSON，以保留 Node 返回的 error_reason）
-        try:
-            j = resp.json()
-            if isinstance(j, dict):
-                j.setdefault('status_code', resp.status_code)
-            return j
-        except ValueError:
-            return {"status_code": resp.status_code, "text": resp.text}
-
-    except requests.RequestException as e:
-        # 网络/超时/连接等错误
-        print(f"Request error: {e}")
-        return {"error": str(e)}
-
-#这个纯粹是为了方便统一异常处置流程
-def _raise_on_node_error(res: dict, action: str):
-    '''
-    检查远端（Node）提供的响应的具体内容
-    
-    '''
-    
-    if not isinstance(res, dict):
-        raise NodeServiceError(f"NODE {action} unexpected response: {res}", reason="unexpected_response")
-    # network-level error
-    if 'error' in res:
-        err = res.get('error')
-        err_reason = res.get('error_reason')
-        raise NodeServiceError(f"NODE {action} failed: {err}", reason=err_reason or "NODE_error")
-    # Node may include error_reason even without 'error'
-    if 'error_reason' in res and res.get('success') != 1:
-        raise NodeServiceError(f"NODE {action} failed: reason={res.get('error_reason')}", reason=res.get('error_reason'))
-
-
-class NodeServiceError(Exception):
-    '''
-    提高一些Node侧错误上下文。只是为了z增加可读性
-    '''
-    
-    def __init__(self, message: str, reason: str | None = None):
-        super().__init__(message)
-        self.reason = reason
-
-def get_full_url(machine_ip:str, endpoint:str)->str:
-    return f"http://{machine_ip}{CommsConfig.NODE_URL_MIDDLE}{endpoint}"
-
-
-def get_container_status(machine_ip: str, container_name: str, timeout: float = 5.0) -> dict:
-    """
-    这个方法主要是为了在服务端调用 Node 的 /container_status API 来验证容器状态的。但是这个方法不被heartbeat使用。
-    """
-    url = get_full_url(machine_ip, "/container_status")
-    payload = json.dumps({"config": {"container_name": container_name}})
-    sig = signature(payload)
-    enc = encryption(payload)
-
-    last_exc = None
-    for attempt in range(2):
-        try:
-            resp = requests.post(url, json={
-                "message": base64.b64encode(enc).decode('utf-8'),
-                "signature": base64.b64encode(sig).decode('utf-8')
-            }, timeout=timeout)
-            # Do not raise_for_status() here; inspect status code
-            try:
-                if resp.status_code == 200:
-                    try:
-                        return resp.json()
-                    except ValueError:
-                        return {"status_code": resp.status_code, "text": resp.text}
-                elif resp.status_code == 404:
-                    return {"status_code": 404, "error": "not found", "text": resp.text}
-                else:
-                    return {"status_code": resp.status_code, "text": resp.text}
-            except Exception as e:
-                return {"error": str(e)}
-        except requests.RequestException as e:
-            last_exc = e
-            print(f"get_container_status request error (attempt {attempt+1}): {e}")
-            # short backoff before retrying
-            if attempt == 0:
-                time.sleep(0.5)
-            continue
-
-    # both attempts failed due to network/request errors
-    return {"error": str(last_exc) if last_exc is not None else "unknown error"}
-
-
-# 容器展示态派生：宿主机不可达时覆盖为 host_offline（仅展示，DB 状态不动）
-DISPLAY_STATUS_HOST_OFFLINE = "host_offline"
-
-
-def _derive_display_status(container_status, machine_id: int | None) -> str:
-    """由"容器 DB 状态 + 机器可达性"派生展示态。
-
-    规则：failed 是终态诊断不覆盖；机器不可达则一律 host_offline。
-    """
-    status_str = container_status.value if hasattr(container_status, 'value') else str(container_status)
-    if str(status_str).lower() == ContainerStatus.FAILED.value:
-        return status_str
-    if machine_id is None:
-        return status_str
-    if not get_machine_reachable(machine_id):
-        return DISPLAY_STATUS_HOST_OFFLINE
-    return status_str
 
 
 def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -> str | None:
-    """
-    通过中心端向集群客户端请求容器上次 SSH 登录时间。
-    入参: container_id
-    返回: 时间字符串或 None
-    """
-    try:
-        container_id = int(container_id)
-    except Exception:
-        print(f"Invalid container id for SSH login time query: {container_id}")
-        return None
+    """读容器上次 SSH 登录时间。
 
-    try:
-        container = containers_repo.get_by_id(container_id)
-    except Exception:
-        print(f"Error querying container info for id={container_id}: {traceback.format_exc()}")
-        return None
-
-    if not container:
-        return None
-    try:
-        machine_id = container.machine_id
-        machine_ip = get_machine_ip_by_id(machine_id)
-        url = get_full_url(machine_ip, "/container_last_ssh_time")
-    except Exception:
-        print(f"Error retrieving machine info for container id={container_id}: {traceback.format_exc()}")
-        return None
-
-    container_name = getattr(container, 'name', None)
-    payload = json.dumps({"config": {"container_name": container_name}})
-    try:
-        sig = signature(payload)
-        enc = encryption(payload)
-        res = send(enc, sig, url, timeout=timeout)
-    except Exception as e:
-        print(f"Error sending request to {url}: {e}")
-        # Node 不可达时，以 DB 已有记录兜底
-        record = container_ssh_login_repo.get_by_machine_container(machine_id, container.id)
-        return record.last_ssh_login_time if record else None
-    #print(f"DEBUG: get_container_last_ssh_login_time: sent request to {url} with payload {payload}")
-    #print(f"get_container_last_ssh_login_time: NODE response: {res}")
-
-    if not isinstance(res, dict):
-        raise NodeServiceError(
-            f"NODE get_last_ssh_login_time unexpected response: {res}",
-            reason="unexpected_response",
-        )
-
-    status_code = res.get("status_code")
-    err_reason = res.get("error_reason")
-
-    # 这类 404 通常是 Node 尚未部署该接口（返回 HTML 404），不是"容器没有SSH记录"
-    if status_code == 404 and not err_reason:
-        txt = str(res.get("text") or "")
-        if "<!doctype html" in txt.lower() or "not found" in txt.lower():
-            raise NodeServiceError(
-                f"NODE get_last_ssh_login_time failed: endpoint /container_last_ssh_time not found on node {machine_ip}",
-                reason="node_endpoint_not_found",
-            )
-
-    # 节点明确声明"未找到SSH登录记录"才返回空值
-    if err_reason == "not_found":
-        last_time = None
-    elif res.get("success") in (1, True):
-        raw = res.get("last_ssh_connect_time")
-        last_time = str(raw) if raw is not None else None
-    else:
-        # 其余情况都作为错误抛出，避免被静默吞掉
-        _raise_on_node_error(res, "get_last_ssh_login_time")
-        raise NodeServiceError(
-            f"NODE get_last_ssh_login_time failed: {res}",
-            reason=err_reason or "NODE_error",
-        )
-
-    # 归一化为 ISO 8601 UTC 格式存储（Node 现已用 TZ=UTC，无需再减 8h）
-    if last_time is not None:
-        parsed = _parse_last_ssh_time(last_time)
-        if parsed is not None:
-            last_time = parsed.strftime('%Y-%m-%dT%H:%M:%S')
-
-    # 记录请求结果（空值不覆写，保护初始创建时间，使从未 SSH 的容器也可被清理）
-    if last_time is not None:
-        try:
-            container_ssh_login_repo.upsert_last_ssh_login_time(
-                machine_id=machine_id,
-                container_id=container.id,
-                last_ssh_login_time=last_time,
-            )
-        except Exception as e:
-            print(f"Warning: failed to persist last ssh login time for container {container.id}: {e}")
-
-    # Node 返回空值时，以 DB 已有记录兜底
-    if last_time is None:
-        record = container_ssh_login_repo.get_by_machine_container(machine_id, container.id)
-        if record and record.last_ssh_login_time:
-            last_time = record.last_ssh_login_time
-
-    return last_time
-
-
-def unpause_container(container_id: int, operator_user_id: int | None = None) -> bool:
-    """解冻因磁盘超限被 pause 的容器。"""
-    try:
-        container_id = int(container_id)
-    except Exception:
-        return False
-
-    container = containers_repo.get_by_id(container_id)
-    if not container:
-        return False
-
-    machine_id = container.machine_id
-    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
-        raise NodeServiceError(f'Machine {machine_id} not accessible', reason='machine_permission_denied')
-
-    machine_ip = get_machine_ip_by_id(machine_id)
-    url = get_full_url(machine_ip, "/pause_container")
-    payload = json.dumps({"config": {"container_name": container.name, "action": "unpause"}})
-    try:
-        sig = signature(payload)
-        enc = encryption(payload)
-        res = send(enc, sig, url, timeout=10.0)
-    except Exception as e:
-        print(f"unpause_container send error: {e}")
-        write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.UNPAUSE_CONTAINER,
-                     target_type="container", target_id=container.id,
-                     detail={"name": container.name, "machine_id": machine_id},
-                     error_reason=getattr(e, 'reason', None) or str(e))
-        return False
-
-    _raise_on_node_error(res, 'unpause')
-    if res.get('success') == 1:
-        # 更新本地状态为 online
-        try:
-            update_container(container.id, container_status=ContainerStatus.ONLINE)
-        except Exception:
-            pass
-        write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.UNPAUSE_CONTAINER,
-                     target_type="container", target_id=container.id,
-                     detail={"name": container.name, "machine_id": machine_id})
-
-        # 磁盘超限冻结宽限期：管理员解冻后给予宽限
-        try:
-            from ..repositories import container_disk_freeze_state_repo
-            freeze_state = container_disk_freeze_state_repo.get(container_id)
-            if freeze_state is not None:
-                from flask import current_app
-                grace_days = current_app.config.get("CONTAINER_DISK_FREEZE_GRACE_DAYS", 3)
-                container_disk_freeze_state_repo.set_grace(container_id, grace_days)
-                print(
-                    f"[disk-check] grace period set for container {container_id} "
-                    f"({getattr(container, 'name', '?')}) "
-                    f"({grace_days} days, until {freeze_state.grace_until})"
-                )
-        except Exception as e:
-            print(f"[disk-check] failed to set grace for container {container_id}: {e}")
-
-        return True
-    return False
-
-
-def get_container_disk_usage(container_id: int, timeout: float = 20.0) -> dict | None:
-    """
-    通过 Node 查询容器磁盘使用情况（只读）。
-    入参: container_id
-    返回: dict 包含 machine_disk 和 container 信息，或 None
+    WSS 推送已接管采集（last_ssh 快照落库 container_ssh_login_records），getter 只查库。
     """
     try:
         container_id = int(container_id)
     except Exception:
-        print(f"Invalid container id for disk usage query: {container_id}")
+        logger.warning("Invalid container id for SSH login time query: %s", container_id)
         return None
 
     try:
-        container = containers_repo.get_by_id(container_id)
+        with session_scope(commit=False) as session:
+            record = container_ssh_login_repo.get_by_container(container_id, session=session)
     except Exception:
-        print(f"Error querying container info for id={container_id}: {traceback.format_exc()}")
+        logger.error("Error querying ssh login record for id=%s: %s", container_id, traceback.format_exc())
         return None
 
-    if not container:
-        return None
-    try:
-        machine_id = container.machine_id
-        machine_ip = get_machine_ip_by_id(machine_id)
-        url = get_full_url(machine_ip, "/check_disk_usage")
-    except Exception:
-        print(f"Error retrieving machine info for container id={container_id}: {traceback.format_exc()}")
-        return None
-
-    container_name = getattr(container, 'name', None)
-    payload = json.dumps({"config": {"container_name": container_name}})
-    try:
-        sig = signature(payload)
-        enc = encryption(payload)
-        res = send(enc, sig, url, timeout=timeout)
-    except Exception as e:
-        print(f"Error sending disk check request to {url}: {e}")
-        return None
-
-    if not isinstance(res, dict):
-        print(f"get_container_disk_usage: unexpected response type: {type(res)}")
-        return None
-
-    _raise_on_node_error(res, 'check_disk')
-    if res.get('success') != 1:
-        print(f"get_container_disk_usage: Node returned failure: {res}")
-        return None
-
-    cd = res.get("container", {})
-    _errs = {k: cd[k] for k in ("overlay_rw_error", "bind_mount_error", "bind_mount_path") if k in cd}
-    print(f"[disk-check] ctrl received: container={container_name} "
-          f"overlay={cd.get('overlay_rw_bytes')}B bind={cd.get('bind_mount_bytes')}B "
-          f"total={cd.get('total_bytes')}B errs={_errs}")
-    return res
-
-
-####################################################
-
-#API Definition
-####################################################
-class container_bref_information(BaseModel):
-    container_id: int # 加入这个 只是为了方便调取详细信息
-    container_name:str
-    machine_id:int
-    machine_ip:str
-    port:int
-    container_status:str
-    display_status: str | None = None  # 派生展示态（如 host_offline），DB 不落库
-    accounts: list[dict] = Field(default_factory=list)
-    is_long_term: bool = False
-    long_term_container_can_enable: bool = True
-    long_term_container_blocked_user_ids: list[int] = Field(default_factory=list)
-    long_term_container_remaining_by_user: dict[int, int] = Field(default_factory=dict)
-    last_ssh_login_time: str | None = None
-    cleanup_after_days: int | None = None
-    cleanup_at: str | None = None
-    seconds_until_cleanup: int | None = None
-    cleanup_status: str | None = None
-    disk_total_gb: float | None = None
-    disk_limit_gb: float | None = None
-    disk_usage_percent: float | None = None
-    freeze_first_frozen_at: str | None = None
-    freeze_grace_until: str | None = None
-    freeze_days_frozen: int | None = None
-    freeze_escalation_days: int | None = None
-
-class container_detail_information(BaseModel):
-    container_id: int # 与上方结构对称
-    container_name:str
-    container_image:str
-    machine_id:int
-    machine_ip:str
-    container_status:str
-    memory_gb:int
-    shared_gb:int
-    gpu_number:int
-    cpu_number:int
-    port:int
-    owners:list[str]
-    accounts:list[(str,ROLE)]
-    is_long_term: bool = False
-    long_term_container_can_enable: bool = True
-    long_term_container_blocked_user_ids: list[int] = Field(default_factory=list)
-    long_term_container_remaining_by_user: dict[int, int] = Field(default_factory=dict)
-    disk_usage: dict | None = None
-    freeze_state: dict | None = None
-####################################################
-
+    return record.last_ssh_login_time if record else None
 
 
 #Function Implementation
 ####################################################
 
 
-# 将user_id作为admin，创建新容器
-def Create_container(owner_name:str,machine_id:int,container:Container_info,public_key=None, debug=False, operator_user_id:int|None=None)->bool:
-    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
-        raise NodeServiceError(f'Machine {machine_id} not accessible for user {operator_user_id}', reason='machine_permission_denied')
+def Create_container(
+    owner_user_id: int,
+    machine_id: int,
+    container: Container_info,
+    public_key=None,
+    operator_user_id: int | None = None,
+    image_build: dict | None = None,
+    restore_mount_path: str | None = None,
+    restore_accounts: list[dict] | None = None,
+) -> bool:
     # ensure machine is online before attempting creation
     _ensure_machine_online_for_operation(machine_id, 'create')
-    machine_ip=get_machine_ip_by_id(machine_id)
+    with session_scope(commit=False) as session:
+        machine_ip = machine_repo.get_machine_ip_by_id(machine_id, session=session)
     full_url = get_full_url(machine_ip, "/create_container")
+    with session_scope(commit=False) as session:
+        owner_name = user_repo.get_name_by_id(owner_user_id, session=session)
+    if not owner_name:
+        raise NodeServiceError(f"owner user {owner_user_id} not found", reason="invalid_payload")
 
-
-
-    free_port = get_the_first_free_port(machine_id=machine_id)
-    container.set_port(free_port)
-    
+    # 端口发布交给 docker（2026-08 决策）：22 与 EXPOSE 端口由 docker 自动分配宿主端口，
+    # 创建后经 WSS 快照回填 container.port / port_mappings——Ctrl 不再分配端口（free_port 退役）。
 
     ### 参数检查 (delegated to repositories.container_repo helpers) ###
     try:
-        # 存在性检查
-        print(f"DEBUG: ensuring machine {machine_id} exists for container {container.NAME}")
-        machine = container_repo.ensure_machine_exists(machine_id)
-        # GPU 参数检查 
-        print(f"DEBUG: validating GPU request for machine {machine_id} and container {container.NAME}")
-        container_repo.validate_gpu_request(machine, container)
-        # memory 参数检查（必须先于 shared）
-        print(f"DEBUG: validating memory request for machine {machine_id} and container {container.NAME}")
-        requested_memory = container_repo.validate_memory_request(machine, container)
-        # shared 参数检查（要求 shared <= memory）
-        print(f"DEBUG: validating shared request for machine {machine_id} and container {container.NAME}")
-        requested_shared = container_repo.validate_shared_request(machine, container, requested_memory)
-        # cpu 参数检查
-        print(f"DEBUG: validating CPU request for machine {machine_id} and container {container.NAME}")
-        requested_cpus = container_repo.validate_cpu_request(machine, container)
-        # name/image/public_key length and format checks
-        container_repo.validate_names_and_lengths(container, public_key)
-        # duplicate name check (may raise IntegrityError)
-        container_repo.check_duplicate_container_name(container_name=container.NAME, machine_id=machine_id)
+        logger.debug("DEBUG: validating create params for container %s on machine %s", container.NAME, machine_id)
+        with session_scope(commit=False) as session:
+            containers_repo.validate_create_params(machine_id, container, public_key, session=session)
     except IntegrityError:
-        # let DB integrity errors bubble up as-is so callers (blueprints) can handle duplicate entries
+        # let DB integrity errors bubble up as-is so API callers can handle duplicate entries
         raise
     except Exception as e:
         # preserve any repository-provided error_reason if present
@@ -602,6 +138,16 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
         # fallback: treat as invalid_config if it's a validation-like issue, else unexpected_response
         raise NodeServiceError(str(e), reason='invalid_config')
 
+    # GPU 三集合（决策）：申请数量 → allow_list 内轮转选卡，系统决定具体卡（替换前端占位 id）
+    if getattr(container, 'GPU_LIST', None) and not restore_mount_path:
+        try:
+            with session_scope(commit=False) as session:
+                machine = machine_repo.get_by_id(machine_id, session=session)
+            if machine is not None:
+                container.GPU_LIST = select_gpu_allowance(machine, len(container.GPU_LIST))
+        except Exception as e:
+            logger.warning("select_gpu_allowance failed (fallback to raw GPU_LIST): %s", e)
+
     ### container构建 ###
 
     container_info=dict()
@@ -609,21 +155,25 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
     container_info['config']=container.get_config()
     if public_key:
         container_info['public_key']=public_key
-    container_info=json.dumps(container_info)
-    # 防御性检查：限制字段长度，防止过长输入导致数据库异常或远程调用异常
-    if container.NAME and len(container.NAME) > 115:
-        raise ValueError(f"container name too long (max 115): length={len(container.NAME)}")
-    if container.image and len(container.image) > 195:
-        raise ValueError(f"container image name too long (max 195): length={len(container.image)}")
-    if public_key and len(public_key) > 495:
-        raise ValueError(f"public_key too long (max 495): length={len(public_key)}")
-    # 只允许字母数字下划线
-    if not re.fullmatch(r'[A-Za-z0-9_]+', container.NAME):
-        raise ValueError(f"invalid container name: '{container.NAME}'. Allowed characters: A-Z a-z 0-9 _")
+    if image_build:
+        container_info["image_build"] = image_build
+    if restore_mount_path:
+        container_info["restore_mount_path"] = restore_mount_path
+    if restore_accounts:
+        container_info["restore_accounts"] = [
+            {
+                "user_name": account.get("container_username") or account.get("system_username"),
+                "role": restore_role_api_value(account.get("role")),
+            }
+            for account in restore_accounts
+            if account.get("container_username") or account.get("system_username")
+        ]
+    # 名称/长度/格式等校验已在参数检查阶段由 container_repo.validate_create_params 完成
 
     # check duplicate container name on this machine before sending to Node
     try:
-        existing_id = get_id_by_name_machine(container_name=container.NAME, machine_id=machine_id)
+        with session_scope(commit=False) as session:
+            existing_id = containers_repo.get_id_by_name_machine(container_name=container.NAME, machine_id=machine_id, session=session)
         if existing_id:
             # raise IntegrityError so callers can handle duplicate-name consistently
             orig_msg = f"container name '{container.NAME}' already exists on machine {machine_id} (id={existing_id})"
@@ -633,155 +183,139 @@ def Create_container(owner_name:str,machine_id:int,container:Container_info,publ
         raise
     except Exception as e:
         # If the check fails unexpectedly, log and continue to avoid blocking creation due to DB issues
-        print(f"Warning: failed to check existing container name: {e}")
-    signatured_message=signature(container_info)
-    
-
-    encryptioned_message=encryption(container_info)
-    res=send(encryptioned_message,signatured_message,full_url)
-    print(f"Create_container: NODE response: {res}")
+        logger.warning("failed to check existing container name: %s", e)
+    res=send(full_url, container_info)
+    logger.debug("Create_container: NODE response: %s", res)
     # 检查Node是否返回错误，如果有则抛出异常；如果没有则继续后续流程（写DB记录、建立绑定、启动心跳等）
     _raise_on_node_error(res, 'create')
     if res.get('success') != 1:
         # unexpected response from Node; abort to avoid DB inconsistency
         raise NodeServiceError(f"NODE create returned failure or unexpected response: {res}", reason=res.get('error_reason') or "unexpected_response")
 
-    if debug:
-        #######
-        # DEBUG PURPOSE
-        Key=False
-        original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
-        server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
-        if server_decrypted_dict == original_dict:
-            print("验证成功：服务端返回的解密内容与原始明文一致")
-            # （可选）如果验证通过，再执行实际的容器创建逻辑
-            # 这里放原有的容器创建、数据库写入等代码
-            Key=True
-        else:
-            raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
-                            + "\n回应：" + str(res))
-        # DEBUG PURPOSE
-        #######
-    else:
-        Key=True
-    
     gpu_list = getattr(container, 'GPU_LIST', None)
     gpu_count = len(gpu_list) if gpu_list else 0
-    # 写入容器记录 
-    create_container(name=container.NAME,
-                     image=container.image,
-                     machine_id=machine_id,
-                     memory_gb=container.MEMORY,
-                     shared_gb=requested_shared,
-                     gpu_number=gpu_count,
-                     cpu_number=container.CPU_NUMBER,
-                     port=free_port,
-                     status=ContainerStatus.CREATING
-                     )
+    # 写入容器记录（gpu_chosen_list：allow_list 内选定的物理卡，创建锁定；
+    # port 先占位 0，docker 自动分配的宿主端口由 WSS 快照回填）
+    with session_scope() as session:
+        containers_repo.create_container(name=container.NAME,
+                                         image=container.image,
+                                         machine_id=machine_id,
+                                         memory_gb=container.MEMORY,
+                                         shared_gb=int(getattr(container, 'SHARED_MEMORY', getattr(container, 'shared_memory', 0)) or 0),
+                                         gpu_number=gpu_count,
+                                         cpu_number=container.CPU_NUMBER,
+                                          port=0,
+                                          status=ContainerStatus.BUILDING if image_build else ContainerStatus.CREATING,
+                                          gpu_chosen_list=list(gpu_list) if gpu_list else None,
+                                          bind_mount_path=restore_mount_path,
+                                          session=session)
 
     # 建立用户绑定（包含必须的 role/username/public_key）
-    container_id=get_id_by_name_machine(container_name=container.NAME, machine_id=machine_id)
-    user = get_by_name(owner_name)
-    add_binding(user_id=user.id,
+    with session_scope(commit=False) as session:
+        container_id = containers_repo.get_id_by_name_machine(container_name=container.NAME, machine_id=machine_id, session=session)
+    with session_scope() as session:
+        usercontainer_repo.add_binding(user_id=owner_user_id,
+                                       container_id=container_id,
+                                       public_key=public_key,
+                                       username='root', # 强制使用 root 作为用户名
+                                       role=ROLE.ROOT, # 这里在创建时，自动变成 ROOT
+                                       session=session)
+        for account in restore_accounts or []:
+            user_id = account.get("user_id")
+            if user_id is None or int(user_id) == int(owner_user_id):
+                continue
+            role_value = account.get("role") or ROLE.COLLABORATOR.value
+            role = ROLE(role_value) if not isinstance(role_value, ROLE) else role_value
+            if role == ROLE.ROOT:
+                continue
+            usercontainer_repo.add_binding(
+                user_id=int(user_id),
                 container_id=container_id,
-                public_key=public_key,
-                username='root', # 强制使用 root 作为用户名
-                role=ROLE.ROOT) # 这里在创建时，自动变成 ROOT
+                public_key=account.get("public_key"),
+                username=account.get("container_username") or account.get("system_username"),
+                role=role,
+                session=session,
+            )
 
     # 写入初始 SSH 登录记录，以创建时间作为 last_ssh_login_time，防止无法清退
-    container_ssh_login_repo.upsert_last_ssh_login_time(
-        machine_id=machine_id,
-        container_id=container_id,
-        last_ssh_login_time=datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
-    )
-
-    # start heartbeat in background (non-blocking)
-    try:
-        container_starting_status_heartbeat(machine_ip, container.NAME, container_id=container_id,
-                                         timeout=180, interval=3)
-    except Exception:
-        print(f"Warning: Heartbeat for container {container_id} failed to start or encountered an error. Container may be stuck in CREATING status.")
-        return False
-
-    if Key:
-        write_op_log(success=True,
-            operator_user_id=operator_user_id,
-            operation=OperationType.CREATE_CONTAINER,
-            target_type="container",
-            target_id=container_id,
-            detail={
-                "name": container.NAME,
-                "machine_id": machine_id,
-                "image": container.image,
-                "port": free_port,
-                "memory_gb": container.MEMORY,
-                "cpu_number": container.CPU_NUMBER,
-                "gpu_number": gpu_count,
-            },
+    with session_scope() as session:
+        container_ssh_login_repo.upsert_last_ssh_login_time(
+            machine_id=machine_id,
+            container_id=container_id,
+            last_ssh_login_time=datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S'),
+            session=session,
         )
-        return True
-    return False
+
+    # 状态推进已由 WSS 推送接管（status_cache 转换态 → Ctrl 落库），心跳轮询已退役
+    write_op_log(success=True,
+        operator_user_id=operator_user_id,
+        operation=OperationType.CREATE_CONTAINER,
+        target_type="container",
+        target_id=container_id,
+        detail={
+            "name": container.NAME,
+            "machine_id": machine_id,
+            "image": container.image,
+            "memory_gb": container.MEMORY,
+            "cpu_number": container.CPU_NUMBER,
+            "gpu_number": gpu_count,
+        },
+    )
+    return True
 
 #删除容器并删除其所有者记录
-def remove_container(container_id:int, debug=False, operator_user_id:int|None=None)->bool:
-    machine_id = get_machine_id_by_container_id(container_id)
-    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
-        raise NodeServiceError(f'Machine {machine_id} not accessible for user {operator_user_id}', reason='machine_permission_denied')
+def remove_container(container_id:int, operator_user_id:int|None=None)->bool:
+    with session_scope(commit=False) as session:
+        machine_id = containers_repo.get_machine_id_by_container_id(container_id, session=session)
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
     # 使得只在机器在线时执行
-    _ensure_machine_online_for_operation(machine_id, 'remove')
-    machine_ip=get_machine_ip_by_id(machine_id)
-    full_url = get_full_url(machine_ip, "/remove_container")
 
-    container_name = get_by_id(container_id).name
+    with session_scope(commit=False) as session:
+        container_obj = containers_repo.get_by_id(container_id, session=session)
+    if not container_obj:
+        raise ValueError("Container not found")
+    ensure_container_operation_allowed(_container_effective_status(container_obj), "remove")
+    _ensure_machine_online_for_operation(machine_id, 'remove')
+    with session_scope(commit=False) as session:
+        machine_ip = machine_repo.get_machine_ip_by_id(machine_id, session=session)
+    full_url = get_full_url(machine_ip, "/remove_container")
+    container_name = container_obj.name
     data={
         "config":{
             "container_name":container_name
         }
     }        
     
-    container_info=json.dumps(data)
-    signatured_message=signature(container_info)
-    encryptioned_message=encryption(container_info)
-    res=send(encryptioned_message,signatured_message,full_url)
-    print(f"remove_container: NODE response: {res}")
-    # 先看看远程调用层面是否有错误（网络/请求/远程处理错误等），如果有则抛出异常；如果没有则根据 Node 的返回内容来决定是否继续本地删除（Node 返回 NOTFOUND 则本地也删除，Node 返回 FAILED 则不删除并抛出异常）
+    container_info=data
+    res=send(full_url, container_info)
+    logger.debug("remove_container: NODE response: %s", res)
+    # Node remove 实际 wire 协议：docker 侧确认删除 → HTTP 200 {"success": 1}；
+    # docker 中不存在该容器（创建失败未入 docker / 外部已清理等）→ HTTP 404
+    # {"error": ..., "error_reason": "not_found"}；其余失败 → HTTP 500。
+    # NOT_FOUND 是"docker 已无残留"的权威证明：视同成功继续本地删库，
+    # 否则创建失败等从未入 docker 的容器行将永远删不掉（库残留）。
+    if isinstance(res, dict) and (res.get('error_reason') == 'not_found' or res.get('status_code') == 404):
+        logger.warning("remove_container: NODE reports container absent (not_found), proceeding with local cleanup")
+        res = {"success": 1}
+    # 先看看远程调用层面是否有错误（网络/请求/远程处理错误等），如果有则抛出异常；
+    # 没有则按上述协议继续：仅 success=1（docker 已删除）或上面放行的 not_found 允许本地删除
     _raise_on_node_error(res, 'remove')
-    # Node remove_container currently returns numeric code in 'success': 0=SUCCESS,1=NOTFOUND,2=FAILED
     NODE_code = res.get('success')
     if NODE_code is None:
         raise Exception(f"NODE remove returned unexpected response: {res}")
-    if NODE_code == 2:
+    if NODE_code != 1:
         # FAILED
         raise NodeServiceError(f"NODE remove reported failure: {res}", reason=res.get('error_reason') or 'remove_failed')
-    # treat 0 (SUCCESS) and 1 (NOTFOUND) as acceptable success for local cleanup
 
-    if debug:
-        #######
-        # DEBUG PURPOSE
-        Key=False
-        original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
-        server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
-        if server_decrypted_dict == original_dict:
-            print("验证成功：服务端返回的解密内容与原始明文一致")
-            # （可选）如果验证通过，再执行实际的容器创建逻辑
-            # 这里放原有的容器创建、数据库写入等代码
-            Key=True
-        else:
-            raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
-                            + "\n回应：" + str(res))
-        # DEBUG PURPOSE
-        #######
-    else:
-        if 'error' in res:
-            print(f"远程调用失败: {res['error']}")
-            raise Exception(f"远程调用失败: {res['error']}")
-        Key=True
+    if 'error' in res:
+        logger.error("远程调用失败: %s", res['error'])
+        raise Exception(f"远程调用失败: {res['error']}")
     
     # 记录操作日志（删前写，保留容器名称等信息）
     try:
-        container = containers_repo.get_by_id(container_id)
+        with session_scope(commit=False) as session:
+            container = containers_repo.get_by_id(container_id, session=session)
     except Exception:
         container = None
     write_op_log(success=True,
@@ -797,154 +331,317 @@ def remove_container(container_id:int, debug=False, operator_user_id:int|None=No
     )
 
     # 移除所有绑定并删除容器
-    remove_binding(0, container_id, all=True)
+    with session_scope() as session:
+        record_deleted_container_artifacts(
+            container_id,
+            removed_trigger="api" if operator_user_id else "cleanup",
+            operator_user_id=operator_user_id,
+            session=session,
+        )
+        usercontainer_repo.remove_binding(0, container_id, all=True, session=session)
+        containers_repo.delete_container(container_id, session=session)
 
     # 记录 mount 清理信息（删前捕获路径）
-    _bind_mount = getattr(container, 'bind_mount_path', None) if container else None
-    _container_name = getattr(container, 'name', '?') if container else '?'
+    return True
 
-    delete_container(container_id)
+def pause_container(container_id: int, operator_user_id: int | None = None, extra_detail: dict | None = None) -> bool:
+    """冻结容器（磁盘超限等场景）。与 unpause_container 对称。
 
-    # 插入 mount 清理追踪（14 天后由定期任务清理）
-    if _bind_mount:
+    *extra_detail* 供调用方补充操作详情（如磁盘处置的 reason/usage），合并进 op-log。
+    """
+    try:
+        container_id = int(container_id)
+    except Exception:
+        return False
+
+    with session_scope(commit=False) as session:
+
+        container = containers_repo.get_by_id(container_id, session=session)
+    if not container:
+        return False
+
+    machine_id = container.machine_id
+    ensure_container_operation_allowed(_container_effective_status(container), "pause")
+    _ensure_machine_online_for_operation(machine_id, 'pause')
+
+    with session_scope(commit=False) as session:
+
+        machine_ip = machine_repo.get_machine_ip_by_id(machine_id, session=session)
+    url = get_full_url(machine_ip, "/pause_container")
+    payload = {"config": {"container_name": container.name, "action": "pause"}}
+    try:
+        res = send(url, payload, timeout=10.0)
+    except Exception as e:
+        logger.error("pause_container send error: %s", e)
+        write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.PAUSE_CONTAINER,
+                     target_type="container", target_id=container.id,
+                     detail={"name": container.name, "machine_id": machine_id, **(extra_detail or {})},
+                     error_reason=getattr(e, 'reason', None) or str(e))
+        return False
+
+    _raise_on_node_error(res, 'pause')
+    if res.get('success') == 1:
+        # 更新本地状态为 paused
         try:
-            from ..repositories.container_mount_cleanup_repo import insert as insert_mount_cleanup
-            from datetime import datetime as dt
-            insert_mount_cleanup(
-                container_id=container_id,
-                container_name=_container_name,
-                machine_id=machine_id,
-                mount_path=_bind_mount,
-                escalation=False,
-                removed_at=dt.utcnow(),
-            )
-            print(f"remove_container: mount cleanup recorded for container {container_id} path={_bind_mount}")
+            with session_scope() as session:
+                containers_repo.update_container(container.id, container_status=ContainerStatus.PAUSED, session=session)
         except Exception as e:
-            print(f"remove_container: failed to record mount cleanup for {container_id}: {e}")
-
-    if Key:
+            logger.warning("pause: failed to update container %s status to PAUSED: %s", container.id, e)
+        write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.PAUSE_CONTAINER,
+                     target_type="container", target_id=container.id,
+                     detail={"name": container.name, "machine_id": machine_id, **(extra_detail or {})})
         return True
     return False
 
 
-def build_container_restore_snapshot(container_id: int, cleanup_context: dict | None = None) -> dict:
-    """
-    Build a pre-removal snapshot with enough metadata to recreate the container and bindings.
-    """
-    container = get_by_id(container_id)
+def unpause_container(container_id: int, operator_user_id: int | None = None) -> bool:
+    """解冻因磁盘超限被 pause 的容器。"""
+    try:
+        container_id = int(container_id)
+    except Exception:
+        return False
+
+    with session_scope(commit=False) as session:
+
+        container = containers_repo.get_by_id(container_id, session=session)
     if not container:
-        return {
-            "container_id": container_id,
-            "snapshot_status": "container_not_found",
-            "cleanup_context": cleanup_context or {},
+        return False
+
+    machine_id = container.machine_id
+    ensure_container_operation_allowed(_container_effective_status(container), "unpause")
+    _ensure_machine_online_for_operation(machine_id, 'unpause')
+
+    with session_scope(commit=False) as session:
+
+        machine_ip = machine_repo.get_machine_ip_by_id(machine_id, session=session)
+    url = get_full_url(machine_ip, "/pause_container")
+    payload = {"config": {"container_name": container.name, "action": "unpause"}}
+    try:
+        res = send(url, payload, timeout=10.0)
+    except Exception as e:
+        logger.error("unpause_container send error: %s", e)
+        write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.UNPAUSE_CONTAINER,
+                     target_type="container", target_id=container.id,
+                     detail={"name": container.name, "machine_id": machine_id},
+                     error_reason=getattr(e, 'reason', None) or str(e))
+        return False
+
+    _raise_on_node_error(res, 'unpause')
+    if res.get('success') == 1:
+        # 状态推进由 WSS 快照接管（数据通路对账契约 C6）：不直写 ONLINE——
+        # Node 侧 finish_action 已即时更新缓存，下一个快照（≤5s）自然推进；
+        # 快照是 container_status 权威源，操作路径直写仅作即时回执（pause 保留）。
+        write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.UNPAUSE_CONTAINER,
+                     target_type="container", target_id=container.id,
+                     detail={"name": container.name, "machine_id": machine_id})
+
+        # 磁盘超限冻结宽限期：管理员解冻后给予宽限
+        try:
+            from ..repositories import container_disk_freeze_state_repo
+            with session_scope() as session:
+                freeze_state = container_disk_freeze_state_repo.get(container_id, session=session)
+                if freeze_state is not None:
+                    grace_days = settings_tasks.get_container_disk_freeze_grace_days()
+                    container_disk_freeze_state_repo.set_grace(container_id, grace_days, session=session)
+            if freeze_state is not None:
+                logger.info(
+                    "[disk-check] grace period set for container %s (%s) (%s days, until %s)",
+                    container_id, getattr(container, 'name', '?'), grace_days, freeze_state.grace_until,
+                )
+        except Exception as e:
+            logger.warning("[disk-check] failed to set grace for container %s: %s", container_id, e)
+
+        return True
+    return False
+
+
+def get_container_disk_usage(container_id: int, timeout: float = 20.0) -> dict | None:
+    """读容器磁盘用量（WSS 推送落库 disk_* 字段，getter 只查库）。
+
+    返回形状兼容原 Node 响应：{"success": 1, "container": {...}}。
+    """
+    try:
+        container_id = int(container_id)
+    except Exception:
+        logger.warning("Invalid container id for disk usage query: %s", container_id)
+        return None
+
+    try:
+        with session_scope(commit=False) as session:
+            container = containers_repo.get_by_id(container_id, session=session)
+    except Exception:
+        logger.error("Error querying container info for id=%s: %s", container_id, traceback.format_exc())
+        return None
+
+    if not container:
+        return None
+
+    return {
+        "success": 1,
+        "container": {
+            "overlay_rw_bytes": getattr(container, 'disk_overlay_rw_bytes', None),
+            "bind_mount_bytes": getattr(container, 'disk_bind_mount_bytes', None),
+            "total_bytes": getattr(container, 'disk_total_bytes', None),
+            "bind_mount_path": getattr(container, 'bind_mount_path', None),
+        },
+    }
+
+
+####################################################
+
+
+def list_deleted_containers(page_number: int = 1, page_size: int = 20) -> dict:
+    return build_deleted_container_page(page_number=page_number, page_size=page_size)
+
+
+def resurrect_container(deleted_id: int, operator_user_id: int | None = None) -> dict:
+    try:
+        deleted_id = int(deleted_id)
+    except Exception:
+        raise NodeServiceError("invalid deleted_id", reason="invalid_payload")
+
+    with session_scope(commit=False) as session:
+        deleted = deleted_container_restore_snapshot_repo.get_by_id(deleted_id, session=session)
+        if deleted is None:
+            raise NodeServiceError("deleted container snapshot not found", reason="not_found")
+        cleanup = (
+            container_mount_cleanup_repo.get_by_id(deleted.mount_cleanup_id, session=session)
+            if deleted.mount_cleanup_id
+            else None
+        )
+        snapshot = dict(deleted.snapshot or {})
+        mount_path = deleted.mount_path or snapshot.get("bind_mount_path")
+        if not snapshot:
+            raise NodeServiceError("deleted container snapshot is empty", reason="data_not_recoverable")
+        if not mount_path:
+            raise NodeServiceError("deleted container has no retained mount path", reason="data_not_recoverable")
+        if cleanup is not None and cleanup.cleaned_at is not None:
+            raise NodeServiceError("deleted container mount has been cleaned", reason="data_not_recoverable")
+        machine_id = int(deleted.machine_id or snapshot.get("machine_id") or 0)
+        mount_cleanup_id = deleted.mount_cleanup_id
+
+    if not machine_id:
+        raise NodeServiceError("deleted container snapshot has no machine_id", reason="invalid_payload")
+
+    root_account, restored_accounts = restore_accounts_from_snapshot(snapshot)
+    owner_user_id = root_account.get("user_id")
+    if not owner_user_id:
+        raise NodeServiceError("deleted container snapshot has no owner user", reason="invalid_payload")
+    with session_scope(commit=False) as session:
+        owner_name = user_repo.get_name_by_id(owner_user_id, session=session)
+    if not owner_name:
+        raise NodeServiceError("deleted container owner no longer exists", reason="data_not_recoverable")
+
+    existing_accounts = []
+    for account in restored_accounts:
+        user_id = account.get("user_id")
+        role_value = account.get("role") or ROLE.COLLABORATOR.value
+        try:
+            role = ROLE(role_value) if not isinstance(role_value, ROLE) else role_value
+        except Exception:
+            role = ROLE.COLLABORATOR
+        if user_id is None or role == ROLE.ROOT:
+            continue
+        with session_scope(commit=False) as session:
+            system_username = user_repo.get_name_by_id(user_id, session=session)
+        if not system_username:
+            continue
+        restored = {
+            **account,
+            "user_id": int(user_id),
+            "system_username": system_username,
+            "role": role.value,
+            "container_username": account.get("container_username") or system_username,
         }
+        existing_accounts.append(restored)
 
-    try:
-        machine = machine_repo.get_by_id(container.machine_id)
-    except Exception:
-        machine = None
+    gpu_list = snapshot.get("gpu_chosen_list") or []
+    container = Container_info(
+        gpu_list=list(gpu_list),
+        cpu_number=int(snapshot.get("cpu_number") or 0),
+        memory=int(snapshot.get("memory_gb") or 0),
+        shared_memory=int(snapshot.get("shared_gb") or 0),
+        name=str(snapshot.get("container_name") or ""),
+        image=str(snapshot.get("image") or ""),
+        port=0,
+    )
+    if not container.NAME or not container.image:
+        raise NodeServiceError("deleted container snapshot lacks name or image", reason="invalid_payload")
 
-    bindings = get_container_bindings(container_id) or []
-    accounts = []
-    for binding in bindings:
-        user_id = binding.get("user_id")
-        role = binding.get("role")
-        role_value = role.value if isinstance(role, ROLE) else str(role or "")
-        accounts.append({
-            "user_id": user_id,
-            "system_username": get_name_by_id(user_id) if user_id is not None else None,
-            "container_username": binding.get("username"),
-            "role": role_value,
-            "public_key": binding.get("public_key"),
-            "granted_at": str(binding.get("granted_at")) if binding.get("granted_at") is not None else None,
-        })
+    Create_container(
+        owner_user_id=int(owner_user_id),
+        machine_id=machine_id,
+        container=container,
+        public_key=root_account.get("public_key"),
+        operator_user_id=operator_user_id,
+        restore_mount_path=mount_path,
+        restore_accounts=existing_accounts,
+    )
 
-    status = container.container_status
-    status_value = status.value if isinstance(status, ContainerStatus) else str(status or "")
-    snapshot = {
-        "container_id": container.id,
-        "container_name": container.name,
-        "image": container.image,
-        "machine_id": container.machine_id,
-        "machine_ip": getattr(machine, "machine_ip", None),
-        "machine_name": getattr(machine, "machine_name", None),
-        "container_status": status_value,
-        "port": container.port,
-        "memory_gb": container.memory_gb,
-        "shared_gb": container.shared_gb,
-        "gpu_number": container.gpu_number,
-        "cpu_number": container.cpu_number,
-        "is_long_term": long_term_container_repo.is_long_term(container.id),
-        "accounts": accounts,
-        "cleanup_context": cleanup_context or {},
-    }
-    return snapshot
+    with session_scope(commit=False) as session:
+        container_id = containers_repo.get_id_by_name_machine(
+            container_name=container.NAME,
+            machine_id=machine_id,
+            session=session,
+        )
+    if not container_id:
+        raise NodeServiceError("resurrected container record not found", reason="unexpected_response")
 
+    if snapshot.get("is_long_term"):
+        with session_scope() as session:
+            long_term_container_repo.add(container_id, created_by_user_id=operator_user_id, session=session)
 
-def get_container_root_owner_emails(container_id: int) -> list[str]:
-    bindings = get_container_bindings(container_id) or []
-    emails = []
-    seen = set()
-    for binding in bindings:
-        if _binding_role_value(binding).upper() != ROLE.ROOT.value:
-            continue
-        user_id = binding.get("user_id")
-        if user_id is None:
-            continue
-        user = user_repo.get_by_id(int(user_id))
-        email = getattr(user, "email", None)
-        if email and email not in seen:
-            emails.append(email)
-            seen.add(email)
-    return emails
+    with session_scope() as session:
+        delete_restore_artifacts(deleted_id, mount_cleanup_id, session=session)
 
-
-def _get_long_term_container_limit() -> int:
-    try:
-        from flask import current_app
-        return max(0, int(current_app.config.get("LONG_TERM_CONTAINER_LIMIT", 1) or 1))
-    except Exception:
-        return 1
+    write_op_log(
+        success=True,
+        operator_user_id=operator_user_id,
+        operation=OperationType.CREATE_CONTAINER,
+        target_type="container",
+        target_id=container_id,
+        detail={
+            "trigger": "resurrect",
+            "deleted_id": deleted_id,
+            "original_container_id": snapshot.get("container_id"),
+            "name": container.NAME,
+            "machine_id": machine_id,
+            "restore_mount_path": mount_path,
+            "restored_accounts": len(existing_accounts) + 1,
+        },
+    )
+    return {"container_id": int(container_id)}
 
 
-def get_long_term_container_remaining(user_id: int) -> int:
-    limit = _get_long_term_container_limit()
-    used = long_term_container_repo.count_by_user(user_id)
-    return max(0, limit - used)
+def clean_deleted_container_mount(mount_cleanup_id: int, operator_user_id: int | None = None) -> dict:
+    with session_scope(commit=False) as session:
+        cleanup = container_mount_cleanup_repo.get_by_id(mount_cleanup_id, session=session)
+        if cleanup is None:
+            raise NodeServiceError("mount cleanup record not found", reason="not_found")
+        if cleanup.cleaned_at is not None:
+            return {"mount_cleanup_id": cleanup.id, "cleaned": True, "already_cleaned": True}
+        machine_ip = machine_repo.get_machine_ip_by_id(cleanup.machine_id, session=session)
+        mount_path = cleanup.mount_path
 
+    full_url = get_full_url(machine_ip, "/clean_mount")
+    res = send(full_url, {"config": {"mount_path": mount_path}}, timeout=10.0)
+    _raise_on_node_error(res, "clean_mount")
+    if res.get("success") != 1:
+        raise NodeServiceError(f"NODE clean_mount unexpected response: {res}", reason="clean_mount_failed")
 
-def _binding_role_value(binding: dict) -> str:
-    role = binding.get("role") if isinstance(binding, dict) else None
-    return role.value if isinstance(role, ROLE) else str(role or "")
-
-
-def _root_user_ids_from_bindings(bindings: list | None) -> set[int]:
-    return {
-        int(b["user_id"])
-        for b in (bindings or [])
-        if isinstance(b, dict)
-        and b.get("user_id") is not None
-        and _binding_role_value(b).upper() == ROLE.ROOT.value
-    }
-
-
-def _build_long_term_container_state(container_id: int, bindings: list | None = None) -> dict:
-    bindings = bindings if bindings is not None else (get_container_bindings(container_id) or [])
-    is_long_term = long_term_container_repo.is_long_term(container_id)
-    user_ids = _root_user_ids_from_bindings(bindings)
-    remaining_by_user = {
-        uid: get_long_term_container_remaining(uid)
-        for uid in user_ids
-    }
-    blocked_user_ids = [] if is_long_term else [
-        uid for uid, remaining in remaining_by_user.items() if remaining <= 0
-    ]
-    return {
-        "is_long_term": is_long_term,
-        "long_term_container_can_enable": len(blocked_user_ids) == 0,
-        "long_term_container_blocked_user_ids": blocked_user_ids,
-        "long_term_container_remaining_by_user": remaining_by_user,
-    }
+    with session_scope() as session:
+        ok = container_mount_cleanup_repo.mark_cleaned(mount_cleanup_id, session=session)
+        if not ok:
+            raise NodeServiceError("mount cleanup record not found", reason="not_found")
+    write_op_log(
+        success=True,
+        operator_user_id=operator_user_id,
+        operation=OperationType.DELETE_CONTAINER,
+        target_type="container_mount_cleanup",
+        target_id=mount_cleanup_id,
+        detail={"mount_path": mount_path, "trigger": "manual_clean_mount"},
+    )
+    return {"mount_cleanup_id": int(mount_cleanup_id), "cleaned": True, "already_cleaned": False}
 
 
 def set_long_term_container(container_id: int, is_long_term: bool, operator_user_id: int | None = None) -> dict:
@@ -953,37 +650,43 @@ def set_long_term_container(container_id: int, is_long_term: bool, operator_user
     except Exception:
         raise NodeServiceError("invalid container_id", reason="invalid_payload")
 
-    container = get_by_id(container_id)
+    with session_scope(commit=False) as session:
+
+        container = containers_repo.get_by_id(container_id, session=session)
     if not container:
         raise NodeServiceError("Container not found", reason="container_not_found")
+    ensure_container_operation_allowed(_container_effective_status(container), "set_long_term")
 
-    bindings = get_container_bindings(container_id) or []
+    with session_scope(commit=False) as session:
+        bindings = usercontainer_repo.get_container_bindings(container_id, session=session) or []
     root_user_ids = _root_user_ids_from_bindings(bindings)
-    if operator_user_id is not None and operator_user_id not in root_user_ids and not _is_operator_user(operator_user_id):
-        raise NodeServiceError(
-            f"User {operator_user_id} is not owner of container {container_id}",
-            reason="container_permission_denied",
-        )
 
-    existing = long_term_container_repo.is_long_term(container_id)
+    with session_scope(commit=False) as session:
+        existing = long_term_container_repo.is_long_term(container_id, session=session)
     if is_long_term:
         if not existing:
-            limit = _get_long_term_container_limit()
+            limit = get_long_term_container_limit()
             for uid in root_user_ids:
-                if long_term_container_repo.count_by_user(uid) >= limit:
+                with session_scope(commit=False) as session:
+                    count_by_user = long_term_container_repo.count_by_user(uid, session=session)
+                if count_by_user >= limit:
                     raise NodeServiceError(
                         f"User {uid} has reached long-term container limit",
                         reason="long_term_limit_reached",
                     )
-            long_term_container_repo.add(container_id, created_by_user_id=operator_user_id)
+            with session_scope() as session:
+                long_term_container_repo.add(container_id, created_by_user_id=operator_user_id, session=session)
     else:
-        long_term_container_repo.remove(container_id)
+        with session_scope() as session:
+            long_term_container_repo.remove(container_id, session=session)
 
-    long_term_state = _build_long_term_container_state(container_id, bindings)
+    long_term_state = build_long_term_container_state(container_id, bindings)
+    with session_scope(commit=False) as session:
+        container_name = getattr(containers_repo.get_by_id(container_id, session=session), 'name', None)
     write_op_log(success=True, operator_user_id=operator_user_id,
                  operation=OperationType.SET_LONG_TERM,
                  target_type="container", target_id=container_id,
-                 detail={"name": getattr(get_by_id(container_id), 'name', None),
+                 detail={"name": container_name,
                          "is_long_term": is_long_term})
     return {
         "container_id": container_id,
@@ -991,26 +694,29 @@ def set_long_term_container(container_id: int, is_long_term: bool, operator_user
     }
 #将container_id对应的容器新增user_id作为collaborator,其权限为role
 
-def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False, operator_user_id:int|None=None)->bool:
-    machine_id = get_machine_id_by_container_id(container_id)
-    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
-        raise NodeServiceError(f'Machine {machine_id} not accessible for user {operator_user_id}', reason='machine_permission_denied')
+def add_collaborator(container_id:int,user_id:int,role:ROLE, operator_user_id:int|None=None)->bool:
+    with session_scope(commit=False) as session:
+        machine_id = containers_repo.get_machine_id_by_container_id(container_id, session=session)
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
-    machine_ip=get_machine_ip_by_id(machine_id)
+    with session_scope(commit=False) as session:
+        machine_ip = machine_repo.get_machine_ip_by_id(machine_id, session=session)
     full_url = get_full_url(machine_ip, "/add_collaborator")
 
-    container_name = get_by_id(container_id).name
+    with session_scope(commit=False) as session:
+
+        container_name = containers_repo.get_by_id(container_id, session=session).name
     # operation guard: machine must be online
-    _ensure_machine_online_for_operation(machine_id, 'add_collaborator')
-    # Ensure container is online before attempting collaborator changes
-    container_obj = get_by_id(container_id)
+    # Ensure container is online before attempting collaborator changes.
+    with session_scope(commit=False) as session:
+        container_obj = containers_repo.get_by_id(container_id, session=session)
     if not container_obj:
         raise ValueError("Container not found")
-    if container_obj.container_status != ContainerStatus.ONLINE:
-        raise NodeServiceError(f"Container {container_id} is not online", reason="container_offline")
+    ensure_container_operation_allowed(_container_effective_status(container_obj), "add_collaborator", require_online=True)
+    _ensure_machine_online_for_operation(machine_id, 'add_collaborator')
 
-    user_name=get_name_by_id(user_id)
+    with session_scope(commit=False) as session:
+        user_name = user_repo.get_name_by_id(user_id, session=session)
     # validate inputs to avoid passing unsafe values to Node
     try:
         _sanitizer.validate_username(user_name)
@@ -1028,73 +734,51 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, debug=False, operat
         }
            
     }
-    container_info=json.dumps(data)
-    signatured_message=signature(container_info)
-    encryptioned_message=encryption(container_info)
-    res=send(encryptioned_message,signatured_message,full_url)
+    container_info=data
+    res=send(full_url, container_info)
 
-    if debug:
-        #######
-        # DEBUG PURPOSE
-        Key=False
-        original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
-        server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
-        if server_decrypted_dict == original_dict:
-            print("验证成功：服务端返回的解密内容与原始明文一致")
-            # （可选）如果验证通过，再执行实际的容器创建逻辑
-            # 这里放原有的容器创建、数据库写入等代码
-            Key=True
-        else:
-            raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
-                            + "\n回应：" + str(res))
-        # DEBUG PURPOSE
-        #######
-    else:
-        _raise_on_node_error(res, 'add_collaborator')
-        if res.get('success') not in (1, True):
-            raise NodeServiceError(f"NODE add_collaborator returned failure: {res}", reason=res.get('error_reason') or 'add_failed')
-        Key=True
+    _raise_on_node_error(res, 'add_collaborator')
+    if res.get('success') not in (1, True):
+        raise NodeServiceError(f"NODE add_collaborator returned failure: {res}", reason=res.get('error_reason') or 'add_failed')
     # 直接通过绑定表建立关联
-    add_binding(user_id=user_id,
-                container_id=container_id,
-                username=user_name,
-                public_key=None,
-                role=role)
+    with session_scope() as session:
+        usercontainer_repo.add_binding(user_id=user_id,
+                                       container_id=container_id,
+                                       username=user_name,
+                                       public_key=None,
+                                       role=role,
+                                       session=session)
     
-    if Key:
-        write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.ADD_COLLABORATOR,
-                     target_type="container", target_id=container_id,
-                     detail={"user_id": user_id, "username": user_name,
-                             "role": role.value if hasattr(role, 'value') else str(role),
-                             "container_name": container_name})
-        return True
-    write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.ADD_COLLABORATOR,
+    write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.ADD_COLLABORATOR,
                  target_type="container", target_id=container_id,
                  detail={"user_id": user_id, "username": user_name,
-                         "container_name": container_name},
-                 error_reason="add_collaborator_failed")
-    return False
+                         "role": role.value if hasattr(role, 'value') else str(role),
+                         "container_name": container_name})
+    return True
 #从container_id中移除user_id对应的用户访问权
 
-def remove_collaborator(container_id:int,user_id:int,debug=False, operator_user_id:int|None=None)->bool:
-    machine_id = get_machine_id_by_container_id(container_id)
-    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
-        raise NodeServiceError(f'Machine {machine_id} not accessible for user {operator_user_id}', reason='machine_permission_denied')
+def remove_collaborator(container_id:int,user_id:int,operator_user_id:int|None=None)->bool:
+    with session_scope(commit=False) as session:
+        machine_id = containers_repo.get_machine_id_by_container_id(container_id, session=session)
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
-    machine_ip=get_machine_ip_by_id(machine_id)
+    with session_scope(commit=False) as session:
+        machine_ip = machine_repo.get_machine_ip_by_id(machine_id, session=session)
     full_url = get_full_url(machine_ip, "/remove_collaborator")
 
-    container_name = get_by_id(container_id).name
+    with session_scope(commit=False) as session:
+
+        container_name = containers_repo.get_by_id(container_id, session=session).name
     # operation guard: machine must be online
-    _ensure_machine_online_for_operation(machine_id, 'remove_collaborator')
-    # Ensure container is online before attempting collaborator changes
-    container_obj = get_by_id(container_id)
+    # Ensure container is online before attempting collaborator changes.
+    with session_scope(commit=False) as session:
+        container_obj = containers_repo.get_by_id(container_id, session=session)
     if not container_obj:
         raise ValueError("Container not found")
-    if container_obj.container_status != ContainerStatus.ONLINE:
-        raise NodeServiceError(f"Container {container_id} is not online", reason="container_offline")
-    user_name = get_name_by_id(user_id)
+    ensure_container_operation_allowed(_container_effective_status(container_obj), "remove_collaborator", require_online=True)
+    _ensure_machine_online_for_operation(machine_id, 'remove_collaborator')
+    with session_scope(commit=False) as session:
+        user_name = user_repo.get_name_by_id(user_id, session=session)
     try:
         _sanitizer.validate_username(user_name)
     except Exception as e:
@@ -1102,7 +786,8 @@ def remove_collaborator(container_id:int,user_id:int,debug=False, operator_user_
 
     # prevent removing ROOT owners
     try:
-        binding = get_binding(user_id, container_id)
+        with session_scope(commit=False) as session:
+            binding = usercontainer_repo.get_binding(user_id, container_id, session=session)
     except Exception:
         binding = None
     if binding:
@@ -1111,78 +796,56 @@ def remove_collaborator(container_id:int,user_id:int,debug=False, operator_user_
             # 不可移除 ROOT 用户
             return False
 
-    user_name=get_name_by_id(user_id)
+    with session_scope(commit=False) as session:
+        user_name = user_repo.get_name_by_id(user_id, session=session)
     data={
         "config":{
             "container_name":container_name,
             "user_name":user_name
         }
     }
-    container_info=json.dumps(data)
-    signatured_message=signature(container_info)
-    encryptioned_message=encryption(container_info)
-    res=send(encryptioned_message,signatured_message,full_url)
+    container_info=data
+    res=send(full_url, container_info)
     
-    if debug:
-        #######
-        # DEBUG PURPOSE
-        Key=False
-        original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
-        server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
-        if server_decrypted_dict == original_dict:
-            print("验证成功：服务端返回的解密内容与原始明文一致")
-            # （可选）如果验证通过，再执行实际的容器创建逻辑
-            # 这里放原有的容器创建、数据库写入等代码
-            Key=True
-        else:
-            raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
-                            + "\n回应：" + str(res))
-        # DEBUG PURPOSE
-        #######
-    else:
-        _raise_on_node_error(res, 'remove_collaborator')
-        if res.get('success') not in (1, True):
-            raise NodeServiceError(f"NODE remove_collaborator returned failure: {res}", reason=res.get('error_reason') or 'remove_failed')
-        Key=True
+    _raise_on_node_error(res, 'remove_collaborator')
+    if res.get('success') not in (1, True):
+        raise NodeServiceError(f"NODE remove_collaborator returned failure: {res}", reason=res.get('error_reason') or 'remove_failed')
     # 仅删除绑定
-    remove_binding(user_id,container_id)
+    with session_scope() as session:
+        usercontainer_repo.remove_binding(user_id,container_id, session=session)
 
-    if Key:
-        write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.REMOVE_COLLABORATOR,
-                     target_type="container", target_id=container_id,
-                     detail={"user_id": user_id, "username": user_name,
-                             "container_name": container_name})
-        return True
-    write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.REMOVE_COLLABORATOR,
+    write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.REMOVE_COLLABORATOR,
                  target_type="container", target_id=container_id,
                  detail={"user_id": user_id, "username": user_name,
-                         "container_name": container_name},
-                 error_reason="remove_collaborator_failed")
-    return False
+                         "container_name": container_name})
+    return True
 
 #修改user_id对container_id的访问权
 
-def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False, operator_user_id:int|None=None)->bool:
-    machine_id = get_machine_id_by_container_id(container_id)
-    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
-        raise NodeServiceError(f'Machine {machine_id} not accessible for user {operator_user_id}', reason='machine_permission_denied')
+def update_role(container_id:int,user_id:int,updated_role:ROLE,operator_user_id:int|None=None)->bool:
+    with session_scope(commit=False) as session:
+        machine_id = containers_repo.get_machine_id_by_container_id(container_id, session=session)
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
-    machine_ip=get_machine_ip_by_id(machine_id)
+    with session_scope(commit=False) as session:
+        machine_ip = machine_repo.get_machine_ip_by_id(machine_id, session=session)
     full_url = get_full_url(machine_ip, "/update_role")
 
-    container_name = get_by_id(container_id).name
+    with session_scope(commit=False) as session:
+
+        container_name = containers_repo.get_by_id(container_id, session=session).name
 
     # Ensure container is online before attempting role updates
     # operation guard: machine must be online
-    _ensure_machine_online_for_operation(machine_id, 'update_role')
-    container_obj = get_by_id(container_id)
+    with session_scope(commit=False) as session:
+        container_obj = containers_repo.get_by_id(container_id, session=session)
     if not container_obj:
         raise ValueError("Container not found")
-    if container_obj.container_status != ContainerStatus.ONLINE:
-        raise NodeServiceError(f"Container {container_id} is not online", reason="container_offline")
+    ensure_container_operation_allowed(_container_effective_status(container_obj), "update_role", require_online=True)
+    _ensure_machine_online_for_operation(machine_id, 'update_role')
 
-    user_name=get_name_by_id(user_id)
+    with session_scope(commit=False) as session:
+        user_name = user_repo.get_name_by_id(user_id, session=session)
     try:
         _sanitizer.validate_username(user_name)
     except Exception as e:
@@ -1195,33 +858,13 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False, oper
             "updated_role":updated_role.value
         }
     }
-    container_info=json.dumps(data)
-    signatured_message=signature(container_info)
-    encryptioned_message=encryption(container_info)
+    container_info=data
     # 使用 machine_ip 发送
-    res=send(encryptioned_message,signatured_message,full_url)
+    res=send(full_url, container_info)
 
-    if debug:
-        #######
-        # DEBUG PURPOSE
-        Key=False
-        original_dict = json.loads(container_info)  # 把原始 JSON 字符串解析成 dict
-        server_decrypted_dict = res.get('decrypted_message')  # 直接取解密后的 dict
-        if server_decrypted_dict == original_dict:
-            print("验证成功：服务端返回的解密内容与原始明文一致")
-            # （可选）如果验证通过，再执行实际的容器创建逻辑
-            # 这里放原有的容器创建、数据库写入等代码
-            Key=True
-        else:
-            raise Exception("验证失败：解密内容不一致: \n原始："+ str(original_dict)
-                            + "\n回应：" + str(res))
-        # DEBUG PURPOSE
-        #######
-    else:
-        _raise_on_node_error(res, 'update_role')
-        if res.get('success') not in (1, True):
-            raise NodeServiceError(f"NODE update_role returned failure: {res}", reason=res.get('error_reason') or 'update_failed')
-        Key=True
+    _raise_on_node_error(res, 'update_role')
+    if res.get('success') not in (1, True):
+        raise NodeServiceError(f"NODE update_role returned failure: {res}", reason=res.get('error_reason') or 'update_failed')
     if updated_role == ROLE.ROOT:
         # 强制使用 root 作为用户名
         username = 'root'
@@ -1230,61 +873,53 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,debug=False, oper
 
     # 记录旧角色，便于审计"从什么改到什么"
     try:
-        old_binding = get_binding(user_id, container_id)
+        with session_scope(commit=False) as session:
+            old_binding = usercontainer_repo.get_binding(user_id, container_id, session=session)
         old_role = _binding_role_value(old_binding) if old_binding else None
     except Exception:
         old_role = None
 
     # 更新绑定时同时传入 username 和 role，确保数据库中的 username 在变更为 ROOT 时被设置为 'root'
-    update_binding(user_id, container_id, username=username, role=updated_role)
+    with session_scope() as session:
+        usercontainer_repo.update_binding(user_id, container_id, username=username, role=updated_role, session=session)
 
-    if Key:
-        write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.UPDATE_COLLABORATOR_ROLE,
-                     target_type="container", target_id=container_id,
-                     detail={"user_id": user_id, "username": user_name,
-                             "old_role": old_role,
-                             "new_role": updated_role.value if hasattr(updated_role, 'value') else str(updated_role),
-                             "container_name": container_name})
-        return True
-    write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.UPDATE_COLLABORATOR_ROLE,
+    write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.UPDATE_COLLABORATOR_ROLE,
                  target_type="container", target_id=container_id,
                  detail={"user_id": user_id, "username": user_name,
                          "old_role": old_role,
                          "new_role": updated_role.value if hasattr(updated_role, 'value') else str(updated_role),
-                         "container_name": container_name},
-                 error_reason="update_role_failed")
-    return False
+                         "container_name": container_name})
+    return True
 
 
-def start_container(container_id:int, debug=False, operator_user_id:int|None=None)->bool:
+def start_container(container_id:int, operator_user_id:int|None=None)->bool:
     """发送start到对应容器所在node,启动后心跳机制监控状态，直到状态变为ONLINE或失败"""
-    machine_id = get_machine_id_by_container_id(container_id)
-    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
-        raise NodeServiceError(f'Machine {machine_id} not accessible for user {operator_user_id}', reason='machine_permission_denied')
+    with session_scope(commit=False) as session:
+        machine_id = containers_repo.get_machine_id_by_container_id(container_id, session=session)
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
-    _ensure_machine_online_for_operation(machine_id, 'start')
-    machine_ip = get_machine_ip_by_id(machine_id)
+    with session_scope(commit=False) as session:
+        machine_ip = machine_repo.get_machine_ip_by_id(machine_id, session=session)
     full_url = get_full_url(machine_ip, "/start_container")
 
-    container_name = get_by_id(container_id).name
+    with session_scope(commit=False) as session:
+        container_obj = containers_repo.get_by_id(container_id, session=session)
+    if not container_obj:
+        raise ValueError("Container not found")
+    ensure_container_operation_allowed(_container_effective_status(container_obj), "start")
+    _ensure_machine_online_for_operation(machine_id, 'start')
+    container_name = container_obj.name
     data = {"config": {"container_name": container_name}}
-    container_info = json.dumps(data)
-    signatured_message = signature(container_info)
-    encryptioned_message = encryption(container_info)
+    container_info = data
 
-    res = send(encryptioned_message, signatured_message, full_url)
-    print(f"start_container: NODE response: {res}")
+    res = send(full_url, container_info)
+    logger.debug("start_container: NODE response: %s", res)
 
     # Check node-level errors
     _raise_on_node_error(res, 'start')
     # Expect success truthy
     if res.get('success') in (1, True):
-        # start controller-side heartbeat to watch for ONLINE
-        try:
-            container_starting_status_heartbeat(machine_ip, container_name, container_id=container_id)
-        except Exception as e:
-            print(f"Failed to start start-heartbeat: {e}")
+        # 状态推进由 WSS 推送接管（转换态 → Ctrl 落库），心跳轮询已退役
         write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.START_CONTAINER,
                      target_type="container", target_id=container_id,
                      detail={"name": container_name})
@@ -1293,33 +928,32 @@ def start_container(container_id:int, debug=False, operator_user_id:int|None=Non
     raise NodeServiceError(f"NODE start returned failure: {res}", reason=res.get('error_reason') or 'start_failed')
 
 
-def stop_container(container_id:int, debug=False, operator_user_id:int|None=None)->bool:
+def stop_container(container_id:int, operator_user_id:int|None=None)->bool:
     """发送stop到对应容器所在node,停止后心跳机制监控状态，直到状态变为OFFLINE或失败"""
-    machine_id = get_machine_id_by_container_id(container_id)
-    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
-        raise NodeServiceError(f'Machine {machine_id} not accessible for user {operator_user_id}', reason='machine_permission_denied')
+    with session_scope(commit=False) as session:
+        machine_id = containers_repo.get_machine_id_by_container_id(container_id, session=session)
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
-    _ensure_machine_online_for_operation(machine_id, 'stop')
-    machine_ip = get_machine_ip_by_id(machine_id)
+    with session_scope(commit=False) as session:
+        machine_ip = machine_repo.get_machine_ip_by_id(machine_id, session=session)
     full_url = get_full_url(machine_ip, "/stop_container")
 
-    container_name = get_by_id(container_id).name
+    with session_scope(commit=False) as session:
+        container_obj = containers_repo.get_by_id(container_id, session=session)
+    if not container_obj:
+        raise ValueError("Container not found")
+    ensure_container_operation_allowed(_container_effective_status(container_obj), "stop")
+    _ensure_machine_online_for_operation(machine_id, 'stop')
+    container_name = container_obj.name
     data = {"config": {"container_name": container_name}}
-    container_info = json.dumps(data)
-    signatured_message = signature(container_info)
-    encryptioned_message = encryption(container_info)
+    container_info = data
 
-    res = send(encryptioned_message, signatured_message, full_url)
-    print(f"stop_container: NODE response: {res}")
+    res = send(full_url, container_info)
+    logger.debug("stop_container: NODE response: %s", res)
 
     _raise_on_node_error(res, 'stop')
     if res.get('success') in (1, True):
-        # start controller-side heartbeat to watch for OFFLINE
-        try:
-            container_stopping_status_heartbeat(machine_ip, container_name, container_id=container_id)
-        except Exception as e:
-            print(f"Failed to start stop-heartbeat: {e}")
+        # 状态推进由 WSS 推送接管，心跳轮询已退役
         write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.STOP_CONTAINER,
                      target_type="container", target_id=container_id,
                      detail={"name": container_name})
@@ -1327,38 +961,32 @@ def stop_container(container_id:int, debug=False, operator_user_id:int|None=None
     raise NodeServiceError(f"NODE stop returned failure: {res}", reason=res.get('error_reason') or 'stop_failed')
 
 
-def restart_container(container_id:int, debug=False, operator_user_id:int|None=None)->bool:
+def restart_container(container_id:int, operator_user_id:int|None=None)->bool:
     """发送restart到对应容器所在node,重启后心跳机制监控状态，直到状态变为ONLINE或失败"""
-    machine_id = get_machine_id_by_container_id(container_id)
-    if operator_user_id is not None and not _can_access_machine(operator_user_id, machine_id):
-        raise NodeServiceError(f'Machine {machine_id} not accessible for user {operator_user_id}', reason='machine_permission_denied')
+    with session_scope(commit=False) as session:
+        machine_id = containers_repo.get_machine_id_by_container_id(container_id, session=session)
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
-    _ensure_machine_online_for_operation(machine_id, 'restart')
-    machine_ip = get_machine_ip_by_id(machine_id)
+    with session_scope(commit=False) as session:
+        machine_ip = machine_repo.get_machine_ip_by_id(machine_id, session=session)
     full_url = get_full_url(machine_ip, "/restart_container")
 
-    container_name = get_by_id(container_id).name
+    with session_scope(commit=False) as session:
+        container_obj = containers_repo.get_by_id(container_id, session=session)
+    if not container_obj:
+        raise ValueError("Container not found")
+    ensure_container_operation_allowed(_container_effective_status(container_obj), "restart")
+    _ensure_machine_online_for_operation(machine_id, 'restart')
+    container_name = container_obj.name
     data = {"config": {"container_name": container_name}}
-    container_info = json.dumps(data)
-    signatured_message = signature(container_info)
-    encryptioned_message = encryption(container_info)
+    container_info = data
 
-    res = send(encryptioned_message, signatured_message, full_url)
-    print(f"restart_container: NODE response: {res}")
+    res = send(full_url, container_info)
+    logger.debug("restart_container: NODE response: %s", res)
 
     _raise_on_node_error(res, 'restart')
     if res.get('success') in (1, True):
-        #先t finished
-        try:
-            update_container(container_id, container_status=ContainerStatus.OFFLINE)
-        except Exception as e:
-            print(f"Warning: failed to mark container {container_id} as OFFLINE before restart-heartbeat: {e}")
-        # start controller-side heartbeat to watch for ONLINE after restart
-        try:
-            container_restart_status_heartbeat(machine_ip, container_name, container_id=container_id)
-        except Exception as e:
-            print(f"Failed to start restart-heartbeat: {e}")
+        # 状态推进由 WSS 推送接管（转换态 → Ctrl 落库），心跳轮询已退役
         write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.RESTART_CONTAINER,
                      target_type="container", target_id=container_id,
                      detail={"name": container_name})
@@ -1367,78 +995,33 @@ def restart_container(container_id:int, debug=False, operator_user_id:int|None=N
 
 #返回容器的细节信息
 def get_container_detail_information(container_id:int)->container_detail_information:
-    container=get_by_id(container_id)
+    with session_scope(commit=False) as session:
+        container = containers_repo.get_by_id(container_id, session=session)
     if not container:
         raise ValueError("Container not found")
-    # 这个状态查询主要是为了验证容器是否真的存在于 Node 上，如果 Node 返回 404 则说明容器实际上已经不存在了，这时本地也应该删除记录并返回 not found 错误
-    # 这个方法不处理从未放入数据库的容器（因为它们不应该有 container_id），也不处理网络/其他错误（因为它们不应该阻止返回数据库中的信息）。
-    # 这里先检查机器状态，如果机器离线或维护中，则跳过 Node 检查直接返回数据库内容；如果机器在线，则进行 Node 检查以验证容器状态并尝试更新数据库中的状态信息。
-    # 无论如何，如果 Node 检查失败（网络错误、超时等），都应该忽略错误并继续返回数据库内容，而不是阻止整个请求失败。
-    try:
-        m = machine_repo.get_by_id(container.machine_id)
-    except Exception:
-        m = None
-    do_node_check = True
-    if m is not None:
-        try:
-            status_val = m.machine_status.value.lower() if hasattr(m.machine_status, 'value') else str(m.machine_status).lower()
-        except Exception:
-            status_val = str(getattr(m, 'machine_status', '')).lower()
-        if status_val in ('offline', 'maintenance'):
-            do_node_check = False
-
-    st = None
-    if do_node_check:
-        try:
-            machine_ip = get_machine_ip_by_id(container.machine_id)
-            st = get_container_status(machine_ip, container.name)
-            # 找不到容器（Node 返回 404）时，删除本地记录并返回 not found 错误；其他错误（网络错误、超时、解析错误等）则忽略并继续返回数据库内容
-            if isinstance(st, dict) and st.get('status_code') == 404:
-                try:
-                    remove_binding(0, container_id, all=True)
-                except Exception as e:
-                    print(f"Warning: failed to remove bindings for {container_id}: {e}")
-                try:
-                    delete_container(container_id)
-                except Exception as e:
-                    print(f"Warning: failed to delete container {container_id} from DB: {e}")
-                raise ValueError("Container not found")
-        except Exception as e:
-            # 如果是 ValueError（通常是因为 Node 返回 404 导致的），则需要抛出以终止并返回 not found；如果是其他类型的异常（网络错误、超时、解析错误等），则应该捕获并忽略，以继续返回数据库中的信息。
-            if isinstance(e, ValueError):
-                raise
-            print(f"get_container_detail_information: ignored NODE check error: {e}")
-
-    # If Node returned a status payload, and it's not a 404, try to persist container_status to DB
-    try:
-        if st and isinstance(st, dict) and st.get('status_code') != 404:
-            status_str = st.get('container_status')
-            if status_str:
-                try:
-                    new_status = ContainerStatus(status_str)
-                except Exception:
-                    # try case-insensitive match of enum values
-                    try:
-                        new_status = next(s for s in ContainerStatus if s.value.lower() == str(status_str).lower())
-                    except StopIteration:
-                        new_status = None
-                if new_status:
-                    try:
-                        update_container(container.id, container_status=new_status)
-                    except Exception as e:
-                        print(f"Warning: failed to update container status for {container.id}: {e}")
-    except Exception as e:
-        print(f"Warning: error while attempting to persist Node status for {container.id if 'container' in locals() and container else '?'}: {e}")
-
-    owener_bindings= get_container_bindings(container_id)
-    long_term_state = _build_long_term_container_state(container.id, owener_bindings)
+    # 状态直接读 WSS 推送落库的 DB 字段（getter 只查库，不打 Node）。
+    # 「容器在 Node 侧消失」的 404 删记录语义由 WSS delete 帧接管
+    # （Node 对账发现消失 → 推送 delete → Ctrl 抹 DB）。
+    with session_scope(commit=False) as session:
+        owener_bindings = usercontainer_repo.get_container_bindings(container_id, session=session)
+    long_term_state = build_long_term_container_state(container.id, owener_bindings)
+    from .container_module.node_comms import get_cached_container_runtime_metrics
 
     # 附加磁盘用量（从 DB 快照）
+    try:
+        with session_scope(commit=False) as session:
+            machine = machine_repo.get_by_id(container.machine_id, session=session)
+    except Exception:
+        machine = None
+
     disk_usage = None
     try:
         d_total = getattr(container, 'disk_total_bytes', None)
         if d_total is not None and d_total >= 0:
-            limit_bytes = getattr(container, 'disk_limit_bytes', None) or 0
+            # 容器磁盘上限统一（2026-09-01 决策）：以 machine.max_disk_size_gb 现算派生，
+            # 未配置（<=0）视为未设限（disk_limit_bytes 列已移除）。
+            machine_disk_max = getattr(machine, "max_disk_size_gb", None) or 0
+            limit_bytes = int(machine_disk_max * 1024**3) if machine_disk_max > 0 else 0
             limit_gb = limit_bytes / (1024**3) if limit_bytes else 0.0
             disk_usage = {
                 "overlay_rw_gb": round((getattr(container, 'disk_overlay_rw_bytes', None) or 0) / (1024**3), 1),
@@ -1448,17 +1031,18 @@ def get_container_detail_information(container_id:int)->container_detail_informa
                 "usage_percent": round((d_total / limit_bytes * 100) if limit_bytes > 0 else 0, 1),
             }
     except Exception as e:
-        print(f"Warning: failed to read DB disk snapshot for container {container.id}: {e}")
+        logger.warning("failed to read DB disk snapshot for container %s: %s", container.id, e)
 
     # 冻结升级状态
     freeze_state_val = None
     try:
         from ..repositories import container_disk_freeze_state_repo
-        fs = container_disk_freeze_state_repo.get(container.id)
+        with session_scope(commit=False) as session:
+            fs = container_disk_freeze_state_repo.get(container.id, session=session)
         if fs:
             from datetime import datetime
             days_frozen = (datetime.utcnow() - fs.first_frozen_at).days if fs.first_frozen_at else 0
-            escalation_days = int(current_app.config.get("CONTAINER_DISK_FREEZE_ESCALATION_DAYS", 7) or 7)
+            escalation_days = settings_tasks.get_container_disk_freeze_escalation_days()
             freeze_state_val = {
                 "is_frozen": True,
                 "first_frozen_at": fs.first_frozen_at.isoformat() if fs.first_frozen_at else None,
@@ -1467,26 +1051,58 @@ def get_container_detail_information(container_id:int)->container_detail_informa
                 "escalation_days": escalation_days,
             }
     except Exception as e:
-        print(f"Warning: failed to read freeze state for container {container.id}: {e}")
+        logger.warning("failed to read freeze state for container %s: %s", container.id, e)
+
+    # 上次 SSH 登录时间 + 清理倒计时（与列表组装同一口径：WSS 落库快照 + build_cleanup_info）
+    ssh_record = None
+    try:
+        with session_scope(commit=False) as session:
+            ssh_record = container_ssh_login_repo.get_by_machine_container(
+                container.machine_id,
+                container.id,
+                session=session,
+            )
+    except Exception:
+        logger.warning("failed to read ssh login record for container %s", container.id)
+    cleanup_days = settings_tasks.get_container_cleanup_after_days()
+    cleanup_info = build_cleanup_info(
+        ssh_record.last_ssh_login_time if ssh_record else None,
+        cleanup_days,
+    )
+
+    # 备忘：owners才是系统对应的用户名列表
+    with session_scope(commit=False) as session:
+        owners = [user_repo.get_name_by_id(binding['user_id'], session=session) for binding in owener_bindings]
 
     res={
         "container_id": container.id,
         "container_name": container.name,
         "container_image": container.image,
+        "created_at": container.created_at.isoformat() if container.created_at else None,
+        "image_dockerfile": container_image_dockerfile(container),
         "machine_id": container.machine_id,
-        "machine_ip": get_machine_ip_by_id(container.machine_id),
-        "container_status": container.container_status.value,
-        "display_status": _derive_display_status(container.container_status, container.machine_id),
+        "machine_ip": machine.machine_ip if machine else "",
+        "effective_status": _container_effective_status(container),
+        "failed_reason": getattr(container, "failed_reason", None),
+        "failed_detail": getattr(container, "failed_detail", None),
         "memory_gb": container.memory_gb,
         "shared_gb": container.shared_gb,
         "gpu_number": container.gpu_number,
         "cpu_number": container.cpu_number,
         "port": container.port,
+        **derive_allocated_limits(container, machine),
+        "gpu_chosen_list": container.gpu_chosen_list,
+        "port_mappings": derive_port_mappings(container.port, container.port_mappings),
         **long_term_state,
         "disk_usage": disk_usage,
+        "last_ssh_login_time": ssh_record.last_ssh_login_time if ssh_record else None,
+        "cleanup_after_days": cleanup_info.get("cleanup_after_days"),
+        "cleanup_at": cleanup_info.get("cleanup_at"),
+        "seconds_until_cleanup": cleanup_info.get("seconds_until_cleanup"),
+        "cleanup_status": cleanup_info.get("cleanup_status"),
+        "runtime_metrics": get_cached_container_runtime_metrics(container.machine_id, container.name),
         "freeze_state": freeze_state_val,
-        # 备忘：owners才是系统对应的用户名列表
-        "owners": [get_name_by_id(binding['user_id']) for binding in owener_bindings],
+        "owners": owners,
         # 这里的变动是为了
         # 1. 语句写法 - 防止报错（针对API提取时的格式问题）
         # 2. username -> user_id 使得在页面层对应性更强，并避免可能存在的 user_name与username不同
@@ -1497,151 +1113,73 @@ def get_container_detail_information(container_id:int)->container_detail_informa
     }
     return res
 
-
-
-#返回一页容器的概要信息
-def _node_probe_container(container, machine_ip: str, _app=None) -> dict | None:
-    """封装单次 NodeKernel /container_status 查询。
-
-    等同于原 for 循环内 ``get_container_status(machine_ip, container.name)``，
-    抽取为独立函数以适配 ``parallel_node_calls``。
-
-    *_app* 可选传入 Flask app 实例，用于线程池内推送 app context。
-    """
-    try:
-        if _app is not None:
-            with _app.app_context():
-                return get_container_status(machine_ip, container.name)
-        return get_container_status(machine_ip, container.name)
-    except Exception:
-        return None
-
-
-def list_all_container_bref_information(machine_id:int, request_user_id:int, page_number:int, page_size:int, user_id:int = None)->dict:
-    # 非管理员用户必须先通过机器权限表过滤可见机器
-    if not _is_operator_user(request_user_id):
-        allowed = set(machine_permission_repo.list_machine_ids_by_user(user_id))
-        if machine_id is not None:
-            if machine_id not in allowed:
-                containers = []
-            else:
-                containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=request_user_id)
+def list_all_container_bref_information(
+    machine_id: int | None,
+    request_user_id: int,
+    page_number: int,
+    page_size: int,
+    user_id: int | None = None,
+    container_search: str | None = None,
+    viewer_user_id: int | None = None,
+) -> dict:
+    container_search = (container_search or "").strip() or None
+    offset = page_number * page_size
+    total_count = 0
+    # 资源级集合过滤：无通配（bypass_resource / container:manage）的查看者只看自己绑定的容器
+    visible_container_ids = None
+    if viewer_user_id is not None:
+        from .rbac_service import _has_entity_direct, _has_resource_manage_direct
+        if not (_has_entity_direct(viewer_user_id, "bypass_resource") or _has_resource_manage_direct(viewer_user_id, "container")):
+            with session_scope(commit=False) as session:
+                bindings = usercontainer_repo.get_user_bindings(viewer_user_id, session=session) or []
+            visible_container_ids = {int(b["container_id"]) for b in bindings if b.get("container_id")}
+    with session_scope(commit=False) as session:
+        if user_id is not None:
+            containers = containers_repo.list_containers(
+                limit=page_size,
+                offset=offset,
+                machine_id=machine_id,
+                user_id=user_id,
+                container_search=container_search,
+                visible_container_ids=visible_container_ids,
+                session=session,
+            )
+            total_count = containers_repo.count_containers(
+                machine_id=machine_id,
+                user_id=user_id,
+                container_search=container_search,
+                visible_container_ids=visible_container_ids,
+                session=session,
+            )
         else:
-            containers = [c for c in list_containers(limit=99999, offset=0, machine_id=None, user_id=request_user_id) if c.machine_id in allowed]
-            containers = containers[page_number*page_size:page_number*page_size+page_size]
-    elif user_id is not None:
-        containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=user_id)
-    else:
-        containers = list_containers(limit=page_size, offset=page_number*page_size, machine_id=machine_id, user_id=None)
-    # --- Phase A: 预过滤，分离需要 NodeKernel 查询的容器 ---
-    try:
-        from flask import current_app
-        use_parallel = current_app.config.get("NODE_PARALLEL_ENABLED_CONTAINERS", True)
-        _app = current_app._get_current_object()
-    except RuntimeError:
-        use_parallel = True
-        _app = None
-
-    _probe_results: dict[int, dict | None] = {}  # container_id → result
-    _deleted: set[int] = set()                     # 404 已删除的容器
-
-    # 预过滤：收集所有容器，确定哪些需要调用 NodeKernel
-    _need_check: list[tuple] = []   # [(container, machine_ip), ...]
-    _skip: list = []                # [container, ...]
-    _container_ip: dict[int, str] = {}
-
-    for container in containers:
-        machine_ip = ""
-        do_node_check = True
-        try:
-            m = machine_repo.get_by_id(container.machine_id)
-        except Exception:
-            m = None
-        if m is not None:
-            try:
-                status_val = m.machine_status.value.lower() if hasattr(m.machine_status, 'value') else str(m.machine_status).lower()
-            except Exception:
-                status_val = str(getattr(m, 'machine_status', '')).lower()
-            if status_val in ('offline', 'maintenance'):
-                do_node_check = False
-            try:
-                machine_ip = get_machine_ip_by_id(container.machine_id)
-            except Exception:
-                machine_ip = None
-
-        _container_ip[container.id] = machine_ip
-        if do_node_check and machine_ip:
-            _need_check.append((container, machine_ip))
-        else:
-            _skip.append(container)
-
-    # --- Phase B: 并发查询 NodeKernel ---
-    if _need_check:
-        if use_parallel and _app is not None:
-            _callables = [
-                lambda c=c, ip=ip, a=_app: _node_probe_container(c, ip, _app=a)
-                for c, ip in _need_check
-            ]
-            _raw = parallel_node_calls(_callables, timeout_per_call=12.0)
-            for (c, _), r in zip(_need_check, _raw):
-                _probe_results[c.id] = r if isinstance(r, (dict, type(None))) else None
-        else:
-            for c, ip in _need_check:
-                _probe_results[c.id] = _node_probe_container(c, ip)
-
-    # --- Phase C: 逐条处理结果（串行，避免 DB session 竞争） ---
+            containers = containers_repo.list_containers(
+                limit=page_size,
+                offset=offset,
+                machine_id=machine_id,
+                user_id=None,
+                container_search=container_search,
+                visible_container_ids=visible_container_ids,
+                session=session,
+            )
+            total_count = containers_repo.count_containers(
+                machine_id=machine_id,
+                user_id=None,
+                container_search=container_search,
+                visible_container_ids=visible_container_ids,
+                session=session,
+            )
+    # WSS 推送已接管状态采集（apply_container_status_snapshot 落库 container_status）；
+    # getter 只查库组装，不再实时打 Node。「容器在 Node 侧消失」由 WSS delete 帧处理。
+    from .container_module.node_comms import get_cached_container_runtime_metrics
     res = []
-    _all_containers = _skip + [c for c, _ in _need_check]
-    # 按原始顺序重建
-    _id_order = {c.id: idx for idx, c in enumerate(containers)}
-    _all_containers.sort(key=lambda c: _id_order.get(c.id, 99999))
-
-    for container in _all_containers:
-        if container.id in _deleted:
-            continue
-        machine_ip = _container_ip.get(container.id, "")
-        st = _probe_results.get(container.id)
-        if st is None and container in _need_check:
-            # probe 返回 None 表示异常/超时，保持原逻辑（不更新状态）
-            pass
-        elif st is not None:
-            # If Node reports 404, delete local record
-            if isinstance(st, dict) and st.get('status_code') == 404:
-                try:
-                    remove_binding(0, container.id, all=True)
-                except Exception as e:
-                    print(f"Warning: failed to remove bindings for {container.id}: {e}")
-                try:
-                    delete_container(container.id)
-                except Exception as e:
-                    print(f"Warning: failed to delete container {container.id} from DB: {e}")
-                _deleted.add(container.id)
-                continue
-            else:
-                try:
-                    if st and isinstance(st, dict) and st.get('status_code') is None or (isinstance(st, dict) and st.get('status_code') != 404):
-                        status_str = st.get('container_status')
-                        if status_str:
-                            try:
-                                new_status = ContainerStatus(status_str)
-                            except Exception:
-                                try:
-                                    new_status = next(s for s in ContainerStatus if s.value.lower() == str(status_str).lower())
-                                except StopIteration:
-                                    new_status = None
-                            if new_status:
-                                try:
-                                    update_container(container.id, container_status=new_status)
-                                except Exception as e:
-                                    print(f"Warning: failed to update container status for {container.id}: {e}")
-                except Exception as e:
-                    print(f"list_all_container_bref_information: ignored error while persisting status for {container.name}: {e}")
-
-        bindings = get_container_bindings(container.id) or []
-        long_term_state = _build_long_term_container_state(container.id, bindings)
+    for container in containers:
+        with session_scope(commit=False) as session:
+            bindings = usercontainer_repo.get_container_bindings(container.id, session=session) or []
+        long_term_state = build_long_term_container_state(container.id, bindings)
         # 冻结升级状态
         from ..repositories import container_disk_freeze_state_repo
-        freeze_state = container_disk_freeze_state_repo.get(container.id)
+        with session_scope(commit=False) as session:
+            freeze_state = container_disk_freeze_state_repo.get(container.id, session=session)
         freeze_first_frozen_at = freeze_state.first_frozen_at.isoformat() if (freeze_state and freeze_state.first_frozen_at) else None
         freeze_grace_until = freeze_state.grace_until.isoformat() if (freeze_state and freeze_state.grace_until) else None
         freeze_days_frozen = None
@@ -1649,25 +1187,31 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
         if freeze_state and freeze_state.first_frozen_at:
             from datetime import datetime
             freeze_days_frozen = (datetime.utcnow() - freeze_state.first_frozen_at).days
-            try:
-                from flask import current_app
-                freeze_escalation_days = int(current_app.config.get("CONTAINER_DISK_FREEZE_ESCALATION_DAYS", 7) or 7)
-            except Exception:
-                freeze_escalation_days = 7
-        ssh_record = container_ssh_login_repo.get_by_machine_container(container.machine_id, container.id)
+            freeze_escalation_days = settings_tasks.get_container_disk_freeze_escalation_days()
+        with session_scope(commit=False) as session:
+            ssh_record = container_ssh_login_repo.get_by_machine_container(
+                container.machine_id,
+                container.id,
+                session=session,
+            )
         cleanup_days = 7
-        try:
-            from flask import current_app
-            cleanup_days = int(current_app.config.get("CONTAINER_CLEANUP_AFTER_DAYS", 7) or 7)
-        except Exception:
-            pass
+        cleanup_days = settings_tasks.get_container_cleanup_after_days()
         cleanup_info = build_cleanup_info(
             ssh_record.last_ssh_login_time if ssh_record else None,
             cleanup_days,
         )
+        try:
+            with session_scope(commit=False) as session:
+                machine = machine_repo.get_by_id(container.machine_id, session=session)
+        except Exception:
+            machine = None
+        machine_ip = machine.machine_ip if machine else ""
         # 磁盘用量（从 DB 快照，不实时查 Node）
         d_total = getattr(container, 'disk_total_bytes', None)
-        d_limit = getattr(container, 'disk_limit_bytes', None) or 0
+        # 容器磁盘上限统一（2026-09-01 决策）：以 machine.max_disk_size_gb 现算派生，
+        # 未配置（<=0）视为未设限（disk_limit_bytes 列已移除）。
+        machine_disk_max = getattr(machine, "max_disk_size_gb", None) or 0
+        d_limit = int(machine_disk_max * 1024**3) if machine_disk_max > 0 else 0
         disk_total_gb = round(d_total / (1024**3), 1) if d_total is not None else None
         disk_limit_gb = round(d_limit / (1024**3), 1) if d_limit else None
         disk_usage_percent = round((d_total / d_limit * 100) if (d_total is not None and d_limit > 0) else 0, 1)
@@ -1675,11 +1219,17 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
         info = container_bref_information(
             container_id=container.id,
             container_name=container.name,
+            container_image=container.image,
+            created_at=container.created_at.isoformat() if container.created_at else None,
             machine_id=container.machine_id,
             machine_ip=machine_ip,
             port=container.port,
-            container_status=container.container_status.value,
-            display_status=_derive_display_status(container.container_status, container.machine_id),
+            **derive_allocated_limits(container, machine),
+            gpu_chosen_list=container.gpu_chosen_list,
+            port_mappings=derive_port_mappings(container.port, container.port_mappings),
+            effective_status=_container_effective_status(container),
+            failed_reason=getattr(container, "failed_reason", None),
+            failed_detail=getattr(container, "failed_detail", None),
             accounts=[
                 {"user_id": binding.get('user_id'), "username": binding.get("username"), "role": (ROLE(binding.get('role')).value if binding.get('role') is not None else None)}
                 for binding in bindings
@@ -1691,6 +1241,7 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
             disk_total_gb=disk_total_gb,
             disk_limit_gb=disk_limit_gb,
             disk_usage_percent=disk_usage_percent,
+            runtime_metrics=get_cached_container_runtime_metrics(container.machine_id, container.name),
             cleanup_status=cleanup_info.get("cleanup_status"),
             freeze_first_frozen_at=freeze_first_frozen_at,
             freeze_grace_until=freeze_grace_until,
@@ -1702,15 +1253,15 @@ def list_all_container_bref_information(machine_id:int, request_user_id:int, pag
 
     # 这里计算总页数
     try: # 理论不会报错 但是被建议保留
-        total_count = count_containers(machine_id=machine_id)
         total_page = max(1, math.ceil(total_count / page_size))
     except Exception:
         total_page = 1
 
-    result = {"containers": res, "total_page": total_page}
+    result = {"containers": res, "total_page": total_page, "total_number": total_count}
     if user_id is not None:
-        result["long_term_container_remaining"] = get_long_term_container_remaining(user_id)
-        result["long_term_container_limit"] = _get_long_term_container_limit()
+        with session_scope(commit=False) as session:
+            result["long_term_container_remaining"] = long_term_container_repo.get_long_term_container_remaining(user_id, session=session)
+        result["long_term_container_limit"] = get_long_term_container_limit()
     return result
 
 ####################################################

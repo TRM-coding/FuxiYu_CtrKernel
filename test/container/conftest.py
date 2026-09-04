@@ -14,9 +14,11 @@ TEST_MACHINE_IP = "127.0.0.1"
 VALID_PUBLIC_KEY = "ssh-rsa AAAATEST"
 NODE_SUCCESS_TRUE = {"success": 1}
 NODE_SUCCESS_BOOL = {"success": True}
-NODE_REMOVE_SUCCESS = {"success": 0}
-NODE_REMOVE_NOT_FOUND = {"success": 1}
-NODE_REMOVE_FAILED = {"success": 2, "error_reason": "remove_failed"}
+# remove_container 的真实 wire（Node network/api.py）：docker 已删除 → 200 {"success": 1}；
+# docker 中不存在 → HTTP 404 {"success": 0, error_reason: not_found}；删除失败 → HTTP 500 remove_failed
+NODE_REMOVE_SUCCESS = {"success": 1}
+NODE_REMOVE_NOT_FOUND = {"success": 0, "error": "container not found", "error_reason": "not_found", "status_code": 404}
+NODE_REMOVE_FAILED = {"success": 0, "error": "failed to remove container", "error_reason": "remove_failed", "status_code": 500}
 NODE_STATUS_ONLINE = {"success": 1, "container_status": "online"}
 NODE_STATUS_OFFLINE = {"success": 1, "container_status": "offline"}
 NODE_STATUS_404 = {"status_code": 404, "error": "not found", "text": "not found"}
@@ -28,7 +30,7 @@ NODE_LAST_SSH_NOT_FOUND = {"success": 0, "error_reason": "not_found"}
 @pytest.fixture(autouse=True)
 def mock_container_machine_online(monkeypatch):
     monkeypatch.setattr(
-        "FuxiYu_CtrKernel.services.container_tasks.is_machine_online_remote",
+        "FuxiYu_CtrKernel.services.container_module.node_comms.is_machine_online_remote",
         lambda machine_id: True,
     )
 
@@ -67,11 +69,10 @@ def mock_node_send(monkeypatch):
     def _install(response):
         calls.clear()
 
-        def _send(ciphertext, signature, url, timeout=5.0):
+        def _send(url, payload, timeout=5.0):
             calls.append({
-                "ciphertext": ciphertext,
-                "signature": signature,
                 "url": url,
+                "payload": payload,
                 "timeout": timeout,
             })
             return dict(response)
@@ -82,36 +83,3 @@ def mock_node_send(monkeypatch):
     return _install
 
 
-@pytest.fixture()
-def mock_crypto(monkeypatch):
-    payloads = []
-
-    def _signature(payload):
-        payloads.append(json.loads(payload))
-        return b"signature"
-
-    def _encryption(payload):
-        return payload.encode("utf-8")
-
-    monkeypatch.setattr("FuxiYu_CtrKernel.services.container_tasks.signature", _signature)
-    monkeypatch.setattr("FuxiYu_CtrKernel.services.container_tasks.encryption", _encryption)
-    return payloads
-
-
-@pytest.fixture()
-def heartbeat_calls(monkeypatch):
-    calls = {"start": [], "stop": [], "restart": []}
-
-    monkeypatch.setattr(
-        "FuxiYu_CtrKernel.services.container_tasks.container_starting_status_heartbeat",
-        lambda *args, **kwargs: calls["start"].append((args, kwargs)),
-    )
-    monkeypatch.setattr(
-        "FuxiYu_CtrKernel.services.container_tasks.container_stopping_status_heartbeat",
-        lambda *args, **kwargs: calls["stop"].append((args, kwargs)),
-    )
-    monkeypatch.setattr(
-        "FuxiYu_CtrKernel.services.container_tasks.container_restart_status_heartbeat",
-        lambda *args, **kwargs: calls["restart"].append((args, kwargs)),
-    )
-    return calls

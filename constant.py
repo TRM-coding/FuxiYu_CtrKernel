@@ -3,7 +3,6 @@ from enum import Enum
 class MachineStatus(Enum):
     ONLINE = "online"
     OFFLINE = "offline"
-    MAINTENANCE = "maintenance"
 
 
 class MachineTypes(Enum):
@@ -13,11 +12,30 @@ class MachineTypes(Enum):
 class ContainerStatus(Enum):
     ONLINE = "online"
     OFFLINE = "offline"
+    BUILDING = "building"
     CREATING = "creating"
     STARTING = "starting"
+    RESTARTING = "restarting"
     STOPPING = "stopping"
     FAILED = "failed"
     PAUSED = "paused"
+
+
+class ContainerEffectiveStatus(Enum):
+    """Transport/guard status = persisted container_status plus derived host state.
+
+    container_status remains the DB fact for the container itself. effective_status
+    is used by container API responses, frontend rendering, and operation guards.
+    """
+    HOST_OFFLINE = "host_offline"
+    HOST_MAINTENANCE = "host_maintenance"
+    STATUS_UNKNOWN = "status_unknown"
+
+
+class ImageStatus(Enum):
+    DRAFT = "draft"
+    READY = "ready"
+    DISABLED = "disabled"
 
 
 
@@ -25,11 +43,6 @@ class ROLE(Enum):
     ADMIN="ADMIN"
     COLLABORATOR="COLLABORATOR"
     ROOT="ROOT"
-
-class PERMISSION(Enum):
-    USER="user"
-    OPERATOR="operator"
-
 
 class AnnouncementStatus(Enum):
     SENDING = "sending"
@@ -76,9 +89,15 @@ class OperationType(str, Enum):
     CHANGE_PASSWORD = "change_password"
     DELETE_USER = "delete_user"
     RESET_PASSWORD = "reset_password"
+    # RBAC 权限组（管理动作，敏感审计）
+    CREATE_RBAC_GROUP = "create_group"
+    UPDATE_RBAC_GROUP_ENTITIES = "update_group_entities"
+    UPDATE_USER_GROUPS = "update_user_groups"
+    # 镜像
+    CREATE_IMAGE = "create_image"
+    UPDATE_IMAGE = "update_image"
+    DELETE_IMAGE = "delete_image"
     # 定时任务（operator=系统）
     SEND_CLEANUP_REMINDER = "send_cleanup_reminder"
     PAUSE_CONTAINER = "pause_container"
     # 系统事件（非用户操作，仅审计记录；RBAC / 告警维度请勿把它当"操作"）
-    MACHINE_STATUS_TRANSITION = "machine_status_transition"
-    REMOVE_CONTAINER = "remove_container"  # 磁盘超硬限，系统自动删除（区别于用户删除 delete_container）

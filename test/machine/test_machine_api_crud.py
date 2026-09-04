@@ -2,12 +2,13 @@ from types import SimpleNamespace
 
 from sqlalchemy.exc import IntegrityError
 
-from ...blueprints import machine_api
+from ...api import machine_api, deps
 
 
 def _auth(monkeypatch, *, valid=True, operator=True):
-    monkeypatch.setattr(machine_api.authentications_repo, "is_token_valid", lambda token: valid)
-    monkeypatch.setattr(machine_api.user_repo, "check_permission", lambda token, required_permission: operator)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: valid)
+    from ...services import rbac_service
+    monkeypatch.setattr(rbac_service, "_has_entity_direct", lambda uid, entity: operator)
 
 
 def test_add_machine_requires_token(client, monkeypatch):
@@ -43,7 +44,7 @@ def test_add_machine_duplicate_entry_returns_409(client, monkeypatch):
     resp = client.post("/api/machines/add_machine", json={"machine_name": "m"} )
 
     assert resp.status_code == 409
-    assert resp.get_json()["error_reason"] == "duplicate_entry"
+    assert resp.json()["error_reason"] == "duplicate_entry"
 
 
 def test_add_machine_validation_error_returns_422(client, monkeypatch):
@@ -79,7 +80,7 @@ def test_remove_machine_requires_operator(client, monkeypatch):
 
 def test_remove_machine_success(client, monkeypatch):
     _auth(monkeypatch)
-    monkeypatch.setattr(machine_api.machine_service, "Remove_machine", lambda machine_id, operator_user_id=None: True)
+    monkeypatch.setattr(machine_api.machine_service, "Remove_machine", lambda machine_id, operator_user_id=None: {"removed": list(machine_id), "blocked": []})
 
     resp = client.post("/api/machines/remove_machine", json={"machine_ids": [1]} )
 
@@ -126,6 +127,50 @@ def test_update_machine_validation_error_returns_422(client, monkeypatch):
     assert resp.status_code == 422
 
 
+def test_set_maintenance_requires_token(client, monkeypatch):
+    _auth(monkeypatch, valid=False)
+
+    resp = client.post("/api/machines/set_maintenance", json={"machine_id": 1, "is_maintenance": True})
+
+    assert resp.status_code == 401
+
+
+def test_set_maintenance_requires_operator(client, monkeypatch):
+    _auth(monkeypatch, operator=False)
+
+    resp = client.post("/api/machines/set_maintenance", json={"machine_id": 1, "is_maintenance": True})
+
+    assert resp.status_code == 403
+
+
+def test_set_maintenance_success(client, monkeypatch):
+    _auth(monkeypatch)
+    called = {}
+
+    def _set(machine_id, is_maintenance, operator_user_id=None):
+        called["machine_id"] = machine_id
+        called["is_maintenance"] = is_maintenance
+        return True
+
+    monkeypatch.setattr(machine_api.machine_service, "Set_maintenance", _set)
+
+    resp = client.post("/api/machines/set_maintenance", json={"machine_id": 1, "is_maintenance": True})
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] == 1
+    assert called == {"machine_id": 1, "is_maintenance": True}
+
+
+def test_set_maintenance_missing_machine_returns_404(client, monkeypatch):
+    _auth(monkeypatch)
+    monkeypatch.setattr(machine_api.machine_service, "Set_maintenance", lambda **kwargs: False)
+
+    resp = client.post("/api/machines/set_maintenance", json={"machine_id": 1, "is_maintenance": True})
+
+    assert resp.status_code == 404
+    assert resp.json()["error_reason"] == "machine_not_found"
+
+
 def test_get_machine_detail_requires_token(client, monkeypatch):
     _auth(monkeypatch, valid=False)
 
@@ -166,4 +211,4 @@ def test_get_machine_detail_success(client, monkeypatch):
     resp = client.post("/api/machines/get_detail_information", json={"machine_id": 1} )
 
     assert resp.status_code == 200
-    assert resp.get_json()["machine_name"] == "m"
+    assert resp.json()["machine_name"] == "m"

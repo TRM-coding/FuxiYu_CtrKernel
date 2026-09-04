@@ -1,29 +1,43 @@
 import importlib
 
 
-def test_config_reads_cleanup_and_long_term_defaults(monkeypatch):
-    monkeypatch.delenv("CONTAINER_CLEANUP_AFTER_DAYS", raising=False)
-    monkeypatch.delenv("CONTAINER_CLEANUP_REMINDER_HOURS", raising=False)
-    monkeypatch.delenv("LONG_TERM_CONTAINER_LIMIT", raising=False)
+def test_config_reads_deployment_defaults(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("CTRL_PORT", raising=False)
+    monkeypatch.delenv("WEB_PORT", raising=False)
+    monkeypatch.delenv("NODE_PORT", raising=False)
+    monkeypatch.delenv("ENABLE_SSL", raising=False)
+    monkeypatch.delenv("SSL_CERT_PATH", raising=False)
+    monkeypatch.delenv("SSL_KEY_PATH", raising=False)
     from ... import config
 
     importlib.reload(config)
 
-    assert config.AppConfig.CONTAINER_CLEANUP_AFTER_DAYS == 7
-    assert config.AppConfig.CONTAINER_CLEANUP_REMINDER_HOURS == "72,24,12"
-    assert config.AppConfig.LONG_TERM_CONTAINER_LIMIT == 1
+    assert config.NetConfig.CTRL_PORT == 5000
+    assert config.NetConfig.WEB_PORT == 5173
+    assert config.CommsConfig.NODE_PORT == 5789
+    assert config.AppConfig.SSL_ENABLED is True
+    assert config.AppConfig.SSL_CERT_PATH == "certs/ctrl.pem"
+    assert config.AppConfig.SSL_KEY_PATH == "certs/ctrl-key.pem"
 
 
-def test_config_reads_env_overrides(monkeypatch):
+def test_config_reads_deployment_env_overrides(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
-    monkeypatch.setenv("CONTAINER_CLEANUP_AFTER_DAYS", "9")
-    monkeypatch.setenv("CONTAINER_CLEANUP_REMINDER_HOURS", "48,6")
-    monkeypatch.setenv("LONG_TERM_CONTAINER_LIMIT", "3")
+    monkeypatch.setenv("CTRL_PORT", "5100")
+    monkeypatch.setenv("WEB_PORT", "5273")
+    monkeypatch.setenv("NODE_PORT", "6789")
+    monkeypatch.setenv("ENABLE_SSL", "false")
+    monkeypatch.setenv("SSL_CERT_PATH", "certs/custom-ctrl.pem")
+    monkeypatch.setenv("SSL_KEY_PATH", "certs/custom-ctrl-key.pem")
     from ... import config
 
     importlib.reload(config)
 
     assert config.AppConfig.SQLALCHEMY_DATABASE_URI == "sqlite:///:memory:"
-    assert config.AppConfig.CONTAINER_CLEANUP_AFTER_DAYS == 9
-    assert config.AppConfig.CONTAINER_CLEANUP_REMINDER_HOURS == "48,6"
-    assert config.AppConfig.LONG_TERM_CONTAINER_LIMIT == 3
+    assert config.NetConfig.CTRL_PORT == 5100
+    assert config.NetConfig.WEB_PORT == 5273
+    assert config.CommsConfig.NODE_PORT == 6789
+    assert config.CommsConfig.NODE_URL_MIDDLE == ":6789/api"
+    assert config.AppConfig.SSL_ENABLED is False
+    assert config.AppConfig.SSL_CERT_PATH == "certs/custom-ctrl.pem"
+    assert config.AppConfig.SSL_KEY_PATH == "certs/custom-ctrl-key.pem"

@@ -1,143 +1,189 @@
-from ..extensions import db
-from ..models.machine import Machine
+"""机器仓储。
+
+repo 只接收显式 session，负责查询/写入/flush；事务提交由 service/tasks 的
+session_scope 统一决定。
+"""
 from typing import Sequence
-from ..models.machine import MachineTypes
-from ..models.machine import MachineStatus
+
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
 from ..models.containers import Container as model_Container
-from sqlalchemy import func
+from ..models.machine import Machine, MachineStatus, MachineTypes
 
-def get_by_id(machine_id:int):
-    return Machine.query.get(machine_id)
 
-def get_id_by_ip(machine_ip:str):
-    machine = Machine.query.filter_by(machine_ip=machine_ip).first()
+def get_by_id(machine_id: int, *, session: Session) -> Machine | None:
+    return session.get(Machine, int(machine_id))
+
+
+def get_id_by_ip(machine_ip: str, *, session: Session) -> int | None:
+    machine = session.scalars(select(Machine).where(Machine.machine_ip == machine_ip)).first()
     return machine.id if machine else None
 
-def get_machine_ip_by_id(machine_id:int)->str:
-    machine = get_by_id(machine_id)
+
+def get_by_uid(uid: str, *, session: Session) -> Machine | None:
+    """按 Ctrl 颁发的 UID 查询机器，供 WSS 身份归位使用。"""
+    return session.scalars(select(Machine).where(Machine.node_uid == uid)).first()
+
+
+def get_machine_ip_by_id(machine_id: int, *, session: Session) -> str:
+    machine = get_by_id(machine_id, session=session)
     if not machine:
         raise ValueError(f"Machine with ID {machine_id} not found.")
     return machine.machine_ip
 
-def get_the_first_free_port(machine_id:int)->int:
-    # 查询该机器上所有容器已使用的端口
+
+def get_the_first_free_port(machine_id: int, *, session: Session) -> int:
     used_ports = set(
-        port for (port,) in db.session.query(model_Container.port)
-        .filter(model_Container.machine_id == machine_id, model_Container.port.isnot(None))
-        .all()
+        session.scalars(
+            select(model_Container.port).where(
+                model_Container.machine_id == machine_id,
+                model_Container.port.isnot(None),
+            )
+        ).all()
     )
-    
-    # 定义端口范围 (1024-49151)
-    PORT_START = 1024
-    PORT_END = 49151
-    
-    # 查找第一个可用端口
-    for port in range(PORT_START, PORT_END + 1):
+    for port in range(1024, 49152):
         if port not in used_ports:
             return port
-    
-    # 如果所有端口都被占用，抛出异常
     raise RuntimeError(f"No free ports available on machine {machine_id}")
 
-def get_by_name(machine_name:str):
-    return Machine.query.filter_by(machine_name=machine_name).first()
 
-def list_machines(limit: int = 50, offset: int = 0) -> Sequence[Machine]:
-	return Machine.query.order_by(Machine.id).offset(offset).limit(limit).all()
+def get_by_name(machine_name: str, *, session: Session) -> Machine | None:
+    return session.scalars(select(Machine).where(Machine.machine_name == machine_name)).first()
 
-def count_machines() -> int: # 增加的额外方法 只辅助用于计算总数
-    """Return total number of machines in DB."""
-    return Machine.query.count()
 
-def create_machine(machinename:str,
-                   machine_ip:str,
-                   machine_type:MachineTypes,
-                   machine_description:str,
-                   cpu_core_number:int,
-                   gpu_number:int,
-                   gpu_type:str,
-                   memory_size:int,
-                   max_shared_gb:int,
-                   disk_size:int,
-                   max_cpu_core_number:int,
-                   max_gpu_number:int,
-                   max_memory_gb:int)->bool:
-    machine=Machine(
-         machine_name=machinename,
-         machine_ip=machine_ip,
-         machine_type=machine_type,
-         machine_description=machine_description,
-         cpu_core_number=cpu_core_number,
-         gpu_number=gpu_number,
-         gpu_type=gpu_type,
-         memory_size_gb=memory_size,
+def list_machines(limit: int = 50, offset: int = 0, *, session: Session) -> Sequence[Machine]:
+    stmt = select(Machine).order_by(Machine.id).offset(offset).limit(limit)
+    return list(session.scalars(stmt).all())
+
+
+def list_machines_by_status(status: MachineStatus, *, session: Session) -> Sequence[Machine]:
+    """按真实连接状态列出机器（Ctrl 启动探活用；数据通路对账契约 C3）。"""
+    stmt = select(Machine).where(Machine.machine_status == status).order_by(Machine.id)
+    return list(session.scalars(stmt).all())
+
+
+def count_machines(*, session: Session) -> int:
+    return int(session.scalar(select(func.count()).select_from(Machine)) or 0)
+
+
+def create_machine(
+    *,
+    machinename: str,
+    machine_ip: str,
+    machine_type: MachineTypes,
+    machine_description: str,
+    cpu_core_number: int,
+    gpu_number: int,
+    gpu_type: str,
+    memory_size: int,
+    max_shared_gb: int,
+    disk_size: int,
+    max_cpu_core_number: int,
+    max_gpu_number: int,
+    max_memory_gb: int,
+    max_disk_size_gb: int | None = None,
+    session: Session,
+) -> Machine:
+    machine = Machine(
+        machine_name=machinename,
+        machine_ip=machine_ip,
+        machine_type=machine_type,
+        machine_description=machine_description,
+        cpu_core_number=cpu_core_number,
+        gpu_number=gpu_number,
+        gpu_type=gpu_type,
+        memory_size_gb=memory_size,
         max_shared_gb=max_shared_gb,
-         max_cpu_core_number=max_cpu_core_number,
-         max_gpu_number=max_gpu_number,
-         max_memory_gb=max_memory_gb,
-         disk_size_gb=disk_size
+        max_cpu_core_number=max_cpu_core_number,
+        max_gpu_number=max_gpu_number,
+        max_memory_gb=max_memory_gb,
+        max_disk_size_gb=max_disk_size_gb,
+        disk_size_gb=disk_size,
     )
-    db.session.add(machine)
-    db.session.commit()
+    session.add(machine)
+    session.flush()
     return machine
 
-def delete_machine(machine_id:int)->bool:
-    machine=get_by_id(machine_id)
+
+def delete_machine(machine_id: int, *, session: Session) -> bool:
+    machine = get_by_id(machine_id, session=session)
     if not machine:
-         return False
-    db.session.delete(machine)
-    db.session.commit()
+        return False
+    session.delete(machine)
+    session.flush()
     return True
 
-def update_machine(machine_id: int, *, commit: bool = True, **fields) -> bool:
-    """
-    部分更新用户字段。
-    使用示例:
-        update_machine(1, machine_name="new_name", cpu_core_number=16)
-    allowed = {"machine_name", "machine_ip", "machine_type", "machine_status", "cpu_core_number", "memory_size", "gpu_number", "gpu_type", "disk_size", "machine_description", "max_shared_gb", "max_memory_gb", "max_gpu_number", "max_cpu_core_number"}
-    """
-    machine = get_by_id(machine_id)
-    if not machine:
-        return None
 
-    allowed = {"machine_name", "machine_ip", "machine_type", "machine_status", "cpu_core_number",
-               "memory_size_gb", "gpu_number", "gpu_type", "disk_size_gb", "machine_description", "shared_size_gb", "max_shared_gb",
-               "max_memory_gb", "max_gpu_number", "max_cpu_core_number"}
+def update_machine(machine_id: int, *, session: Session, **fields) -> bool:
+    machine = get_by_id(machine_id, session=session)
+    if not machine:
+        return False
+
+    allowed = {
+        "machine_name",
+        "machine_ip",
+        "machine_type",
+        "machine_status",
+        "is_maintenance",
+        "collect_error_at",
+        "cpu_core_number",
+        "memory_size_gb",
+        "gpu_number",
+        "gpu_type",
+        "gpu_list",
+        "gpu_allow_list",
+        "disk_size_gb",
+        "machine_description",
+        "shared_size_gb",
+        "max_shared_gb",
+        "max_memory_gb",
+        "max_gpu_number",
+        "max_cpu_core_number",
+        "max_disk_size_gb",
+        "node_uid",
+        "node_cert_fingerprint",
+        "cert_pinned_at",
+    }
     dirty = False
-    for k, v in fields.items():
-        if k not in allowed:
-            continue  # 忽略非法字段（也可选择抛异常）
-        if v is None:
-            continue  # 这里选择忽略 None；若需要可允许置空再改逻辑
-        current = getattr(machine, k, None)
-        if current != v:
-            setattr(machine, k, v)
+    for key, value in fields.items():
+        if key not in allowed or value is None:
+            continue
+        if getattr(machine, key, None) != value:
+            setattr(machine, key, value)
             dirty = True
 
     if dirty:
-       db.session.commit()
+        session.flush()
     return True
 
 
-def get_max_cpu_core_number(machine_id:int) -> int:
-    """用于取数据库里的max_cpu_core_number字段。"""
-    max_val = db.session.query(Machine.max_cpu_core_number).filter(Machine.id == machine_id).scalar()
-    return int(max_val) if max_val is not None else 0
+def set_maintenance(machine_id: int, enabled: bool, *, session: Session) -> bool:
+    """设置机器维护开关，不写入 machine_status。"""
+    machine = get_by_id(machine_id, session=session)
+    if not machine:
+        return False
+    if bool(getattr(machine, "is_maintenance", False)) != bool(enabled):
+        machine.is_maintenance = bool(enabled)
+        session.flush()
+    return True
 
 
-def get_max_gpu_number(machine_id:int) -> int:
-    """用于取数据库里的max_gpu_number字段。"""
-    max_val = db.session.query(Machine.max_gpu_number).filter(Machine.id == machine_id).scalar()
-    return int(max_val) if max_val is not None else 0
+def get_max_cpu_core_number(machine_id: int, *, session: Session) -> int:
+    value = session.scalar(select(Machine.max_cpu_core_number).where(Machine.id == machine_id))
+    return int(value) if value is not None else 0
 
 
-def get_max_memory_gb(machine_id:int) -> int:
-    """用于取数据库里的max_memory_gb字段。"""
-    max_val = db.session.query(Machine.max_memory_gb).filter(Machine.id == machine_id).scalar()
-    return int(max_val) if max_val is not None else 0
+def get_max_gpu_number(machine_id: int, *, session: Session) -> int:
+    value = session.scalar(select(Machine.max_gpu_number).where(Machine.id == machine_id))
+    return int(value) if value is not None else 0
 
 
-def get_max_shared_gb(machine_id:int) -> int:
-    """用于取数据库里的max_shared_gb字段。"""
-    max_val = db.session.query(Machine.max_shared_gb).filter(Machine.id == machine_id).scalar()
-    return int(max_val) if max_val is not None else 0
+def get_max_memory_gb(machine_id: int, *, session: Session) -> int:
+    value = session.scalar(select(Machine.max_memory_gb).where(Machine.id == machine_id))
+    return int(value) if value is not None else 0
+
+
+def get_max_shared_gb(machine_id: int, *, session: Session) -> int:
+    value = session.scalar(select(Machine.max_shared_gb).where(Machine.id == machine_id))
+    return int(value) if value is not None else 0

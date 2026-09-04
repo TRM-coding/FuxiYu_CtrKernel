@@ -1,5 +1,7 @@
 # 公告系统（Announcement）模型契约与实现计划
 
+> 2026-09 ??????????? `CONTAINER_*` / `ANNOUNCEMENT_*` env ??????????????????? `system_settings`??????? `settings_tasks.SETTING_DEFINITIONS` ????????? `settings_tasks.get_*` getter ???`.env.example` ?????? settings ????
+
 > 后端模型契约 + 分阶段实现计划。每阶段自包含：常量 → 文件范围 → 数据流 → 函数收口 → 测试。
 
 ---
@@ -64,7 +66,7 @@ DEFINED（模板 variables JSON）→ PLACED（raw_content 中 {{key}}）→ FIL
 ## 总体架构
 
 ```
-blueprints/announcement_api.py    ← 路由层
+api/announcement_api.py    ← 路由层
 services/announcement_tasks.py    ← 业务逻辑层
 repositories/announcement_repo.py ← 数据访问层
 models/announcement.py            ← ORM 模型（3 张新表）
@@ -322,7 +324,7 @@ create_announcement(
     source_draft_id: int | None = None,
 ) -> Announcement
 ```
-- 内部：构造 `Announcement()` → `db.session.add()` → `commit()` → 返回 ORM 对象。
+- 内部：在 service 事务中调用 repo，repo `session.add()` / `flush()` 后返回 ORM 对象。
 - 仅由 `send_draft_service` 调用，初始 status=SENDING。
 
 ```
@@ -368,7 +370,7 @@ create_template(
     source_announcement_id: int | None = None,
 ) -> AnnouncementTemplate
 ```
-- 内部：构造 → `add()` → `commit()`。
+- 内部：在 service 事务中调用 repo，repo `session.add()` / `flush()`。
 
 ```
 get_template_by_id(template_id: int) -> AnnouncementTemplate | None
@@ -394,7 +396,7 @@ update_template(template_id: int, **fields) -> AnnouncementTemplate | None
 ```
 delete_template(template_id: int) -> bool
 ```
-- 内部：查 template，若 `category == SYSTEM` → 返回 False；否则 `db.session.delete() → commit()` → True。
+- 内部：查 template，若 `category == SYSTEM` → 返回 False；否则 repo 执行 `session.delete()` / `flush()` → True。
 
 #### 3.3 草稿
 
@@ -593,7 +595,7 @@ for entry in targets:
         if u.id not in recipients_map:
             recipients_map[u.id] = RecipientEntry(user_id=u.id, username=u.username, email=u.email)
 
-if len(recipients_map) > current_app.config["ANNOUNCEMENT_MAX_RECIPIENTS"]:
+if len(recipients_map) > AppConfig["ANNOUNCEMENT_MAX_RECIPIENTS"]:
     raise ValueError("too_many_recipients")
 
 return ResolveResult(
@@ -871,7 +873,7 @@ preview_template_service(template_id: int, variables: dict[str, str]) -> dict
 
 ---
 
-## 阶段四：API 路由层（Blueprints）
+## 阶段四：API 路由层（API routers）
 
 ### 0. 新增常量定义
 
@@ -881,8 +883,8 @@ preview_template_service(template_id: int, variables: dict[str, str]) -> dict
 
 | 文件 | 操作 |
 |------|------|
-| `blueprints/announcement_api.py` | **新建** |
-| `blueprints/__init__.py` | **编辑** — `from . import announcement_api` |
+| `api/announcement_api.py` | **新建** |
+| `api/__init__.py` | **编辑** — `from . import announcement_api` |
 
 ### 2. 完整数据流（请求→响应）
 
@@ -1183,3 +1185,5 @@ def batch_send_drafts_api():
    - 左侧：模板名 + 描述 + 主题模板 + 正文模板（`{{key}}` 高亮蓝色）
    - 右侧：变量添加器
    - 底部：`[保存模板]`
+
+
