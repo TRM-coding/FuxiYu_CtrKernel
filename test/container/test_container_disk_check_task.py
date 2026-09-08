@@ -1035,9 +1035,46 @@ class TestHandleFreezeEscalation:
         assert "已被清除" in sent[0]["subject"]
         assert "8 天" in sent[0]["content"]
 
+    def test_escalation_mail_return_false_logs_failed_not_sent(
+        self, app, db_session, monkeypatch, capsys
+    ):
+        """send_mail 返回 ok=False 时不能打印 sent 假成功。"""
+        _root, machine, container = create_container_graph()
+        long_term_container_repo.add(container.id)
+
+        monkeypatch.setattr(
+            container_disk_check_task.container_tasks, "remove_container",
+            lambda cid: True
+        )
+        monkeypatch.setattr(
+            container_disk_check_task.container_tasks,
+            "get_container_root_owner_emails",
+            lambda cid: ["owner@test.com"]
+        )
+        monkeypatch.setattr(
+            "FuxiYu_CtrKernel.utils.mail.send",
+            lambda **kwargs: {"ok": False, "error": "smtp rejected"},
+        )
+        monkeypatch.setitem(app.config, "CONTAINER_DISK_CHECK_ENABLED", True)
+        app._disk_check_cache = {}
+
+        usage = _usage_exceeding_hard_limit()
+        with app.app_context():
+            container_disk_check_task._handle_freeze_escalation(
+                container, usage, app, days_frozen=8
+            )
+
+        out = capsys.readouterr().out
+        assert "escalation email failed to owner@test.com" in out
+        assert "escalation email sent to owner@test.com" not in out
+
     def test_escalation_writes_operation_log(self, app, db_session, monkeypatch):
         """升级时写入操作日志。"""
         _root, machine, container = create_container_graph()
+        container.bind_mount_path = f"/home/{_root.username}/containers/{container.name}"
+        db_session.commit()
+        original_name = container.name
+        mount_path = container.bind_mount_path
         long_term_container_repo.add(container.id)
 
         logs = []
@@ -1068,6 +1105,8 @@ class TestHandleFreezeEscalation:
         assert logs[0]["operation"] == "remove_container"
         assert logs[0]["detail"]["reason"] == "disk_freeze_escalation"
         assert logs[0]["detail"]["days_frozen"] == 8
+        assert logs[0]["detail"]["original_container_name"] == original_name
+        assert logs[0]["detail"]["mount_path"] == mount_path
 
     def test_escalation_email_cooled_down_24h(self, app, db_session, monkeypatch):
         """同一容器 24h 内不重复发升级邮件（验证 cooldown 状态）。"""

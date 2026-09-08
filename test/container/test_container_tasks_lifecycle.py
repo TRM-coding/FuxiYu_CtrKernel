@@ -3,6 +3,7 @@ from sqlalchemy.exc import IntegrityError
 
 from ...constant import ContainerStatus, MachineStatus, PERMISSION, ROLE
 from ...models.containers import Container
+from ...models.operation_log import OperationLog
 from ...repositories import machine_permission_repo
 from ...services import container_tasks
 from ..factories import create_container, create_machine, create_user
@@ -154,12 +155,23 @@ def test_remove_container_success_deletes_bindings_and_container(
     node_response,
 ):
     root, _machine, container = container_graph
+    container.bind_mount_path = f"/home/{root.username}/containers/{container.name}"
+    db_session.commit()
+    original_name = container.name
+    mount_path = container.bind_mount_path
     mock_node_send(node_response)
 
     assert container_tasks.remove_container(container.id, operator_user_id=root.id) is True
 
     assert Container.query.get(container.id) is None
     assert container_tasks.get_container_bindings(container.id) == []
+    op_log = OperationLog.query.filter_by(
+        operation="delete_container",
+        target_type="container",
+        target_id=container.id,
+    ).one()
+    assert op_log.detail["original_container_name"] == original_name
+    assert op_log.detail["mount_path"] == mount_path
 
 
 def test_remove_container_node_failed_raises_and_keeps_local_record(

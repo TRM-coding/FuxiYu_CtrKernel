@@ -729,12 +729,16 @@ def remove_container(container_id:int, debug=False, operator_user_id:int|None=No
         raise NodeServiceError(f'Machine {machine_id} not accessible for user {operator_user_id}', reason='machine_permission_denied')
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
+    try:
+        container = containers_repo.get_by_id(container_id)
+    except Exception:
+        container = None
     # 使得只在机器在线时执行
     _ensure_machine_online_for_operation(machine_id, 'remove')
     machine_ip=get_machine_ip_by_id(machine_id)
     full_url = get_full_url(machine_ip, "/remove_container")
 
-    container_name = get_by_id(container_id).name
+    container_name = getattr(container, 'name', None) or get_by_id(container_id).name
     data={
         "config":{
             "container_name":container_name
@@ -780,17 +784,17 @@ def remove_container(container_id:int, debug=False, operator_user_id:int|None=No
         Key=True
     
     # 记录操作日志（删前写，保留容器名称等信息）
-    try:
-        container = containers_repo.get_by_id(container_id)
-    except Exception:
-        container = None
+    _bind_mount = getattr(container, 'bind_mount_path', None) if container else None
+    _container_name = getattr(container, 'name', '?') if container else '?'
     write_op_log(success=True,
         operator_user_id=operator_user_id,
         operation=OperationType.DELETE_CONTAINER,
         target_type="container",
         target_id=container_id,
         detail={
-            "name": getattr(container, 'name', '?') if container else '?',
+            "name": _container_name,
+            "original_container_name": _container_name,
+            "mount_path": _bind_mount,
             "machine_id": machine_id,
             "trigger": "api" if operator_user_id else "cleanup",
         },
@@ -800,9 +804,6 @@ def remove_container(container_id:int, debug=False, operator_user_id:int|None=No
     remove_binding(0, container_id, all=True)
 
     # 记录 mount 清理信息（删前捕获路径）
-    _bind_mount = getattr(container, 'bind_mount_path', None) if container else None
-    _container_name = getattr(container, 'name', '?') if container else '?'
-
     delete_container(container_id)
 
     # 插入 mount 清理追踪（14 天后由定期任务清理）

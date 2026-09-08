@@ -86,7 +86,7 @@ def _send_cleanup_reminders_if_needed(container_id: int, info: dict, app: Flask)
             f"宿主机：{snapshot.get('machine_name') or '-'} ({snapshot.get('machine_ip') or '-'})\n"
             f"预计清理时间：{info.get('cleanup_at')}\n"
             f"上次 SSH 登录：{info.get('last_ssh_login_time') or '从未登录'}\n\n"
-            f"如需保留，请及时 SSH 登录该容器，或联系管理员设置为长期容器。"
+            f"如需保留，请及时 SSH 登录该容器，或设置为长期容器。"
         )
 
         reminder_key = f"{hours}h"

@@ -190,9 +190,25 @@ def _fmt_bytes(b: int) -> str:
     return f"{b}B"
 
 
+def _send_disk_check_mail(*, to: str, subject: str, content: str, label: str, container_id: int) -> bool:
+    from ..utils.mail import send as send_mail
+
+    try:
+        result = send_mail(to=to, subject=subject, content=content)
+    except Exception as exc:
+        print(f"[disk-check] {label} email failed to {to} for container {container_id}: {exc}")
+        return False
+
+    if result.get("ok"):
+        print(f"[disk-check] {label} email sent to {to} for container {container_id}")
+        return True
+
+    print(f"[disk-check] {label} email failed to {to} for container {container_id}: {result}")
+    return False
+
+
 def _handle_soft_limit(container, usage: dict, app) -> None:
     """快满时发邮件提醒。同一容器 24 小时内不重复。"""
-    from ..utils.mail import send as send_mail
 
     # 冷却: 24 小时
     last_key = f"_soft_limit_last_sent_{container.id}"
@@ -225,11 +241,13 @@ def _handle_soft_limit(container, usage: dict, app) -> None:
         f"或转为短期容器（取消勾选长期容器）。\n"
     )
     for email in emails:
-        try:
-            send_mail(to=email, subject=subject, content=content)
-            print(f"[disk-check] soft limit email sent to {email} for container {container.id}")
-        except Exception as e:
-            print(f"[disk-check] soft limit email failed to {email}: {e}")
+        _send_disk_check_mail(
+            to=email,
+            subject=subject,
+            content=content,
+            label="soft limit",
+            container_id=container.id,
+        )
     last_sent[last_key] = now_ts
     if app:
         app._disk_check_cache = last_sent
@@ -237,8 +255,6 @@ def _handle_soft_limit(container, usage: dict, app) -> None:
 
 def _handle_hard_limit(container, usage: dict, app) -> None:
     """超限时 docker pause 容器 + 发邮件。"""
-    from ..utils.mail import send as send_mail
-
     try:
         emails = container_tasks.get_container_root_owner_emails(container.id)
     except Exception:
@@ -264,14 +280,16 @@ def _handle_hard_limit(container, usage: dict, app) -> None:
             f"容器: {container.name}\n"
             f"磁盘用量: {total_gb:.1f}GB / {limit_gb:.1f}GB ({usage_pct:.0f}%)\n"
             f"\n容器已被冻结（docker pause）。\n"
-            f"请及时清理不必要的文件；或转为短期容器（取消勾选长期容器）。\n"
+            f"请及时联系管理员解冻，并清理不必要的文件；或转为短期容器（取消勾选长期容器）。\n"
         )
         for e in emails:
-            try:
-                send_mail(to=e, subject=subject, content=content)
-                print(f"[disk-check] hard limit email sent to {e} for container {container.id}")
-            except Exception as ex:
-                print(f"[disk-check] hard limit email failed to {e}: {ex}")
+            _send_disk_check_mail(
+                to=e,
+                subject=subject,
+                content=content,
+                label="hard limit",
+                container_id=container.id,
+            )
         last_sent[last_key] = now_ts
         if app:
             app._disk_check_cache = last_sent
@@ -366,7 +384,6 @@ def _log_freeze_state_if_exists(container) -> None:
 
 def _handle_freeze_escalation(container, usage: dict, app, days_frozen: int) -> None:
     """冻结满 N 天仍超限 → remove_container + 通知邮件。"""
-    from ..utils.mail import send as send_mail
 
     container_data = usage.get("container", {})
     total_gb = (container_data.get("total_bytes") or 0) / (1024**3)
@@ -397,11 +414,13 @@ def _handle_freeze_escalation(container, usage: dict, app, days_frozen: int) -> 
                 f"\n容器已被清除。如有疑问请联系管理员。\n"
             )
             for e in emails:
-                try:
-                    send_mail(to=e, subject=subject, content=content)
-                    print(f"[disk-check] escalation email sent to {e} for container {container.id}")
-                except Exception as ex:
-                    print(f"[disk-check] escalation email failed to {e}: {ex}")
+                _send_disk_check_mail(
+                    to=e,
+                    subject=subject,
+                    content=content,
+                    label="escalation",
+                    container_id=container.id,
+                )
             last_sent[last_key] = now_ts
             if app:
                 app._disk_check_cache = last_sent
@@ -422,6 +441,8 @@ def _handle_freeze_escalation(container, usage: dict, app, days_frozen: int) -> 
                 "reason": "disk_freeze_escalation",
                 "days_frozen": days_frozen,
                 "usage": f"{total_gb:.1f}GB/{limit_gb:.1f}GB",
+                "original_container_name": getattr(container, 'name', '?'),
+                "mount_path": getattr(container, 'bind_mount_path', None),
             },
         )
 
