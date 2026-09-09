@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from ...constant import ContainerStatus, MachineStatus, ROLE
 from ...extensions import session_scope
 from ...models.containers import Container
+from ...models.operation_log import OperationLog
 from ...repositories import containers_repo, machine_permission_repo, machine_repo, usercontainer_repo
 from ...services import container_tasks
 from ..factories import create_container, create_machine, create_user
@@ -279,6 +280,12 @@ def test_start_container_success(
     mock_node_send(NODE_SUCCESS_TRUE)
 
     assert container_tasks.start_container(container.id, operator_user_id=root.id) is True
+
+    log = db_session.scalars(select(OperationLog).where(OperationLog.operation == "start_container")).one()
+    assert log.detail["name"] == container.name
+    assert log.detail["container_name"] == container.name
+    assert log.detail["original_container_name"] == container.name
+    assert log.detail["machine_id"] == container.machine_id
 
 
 def test_stop_container_success(

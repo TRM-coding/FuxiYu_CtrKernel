@@ -845,14 +845,22 @@ def apply_disk_usage_snapshot(data: dict, machine_id: int | None = None) -> dict
                     skipped += 1
                     continue
                 total_bytes = usage.get("total_bytes")
+                overlay_rw_bytes = usage.get("overlay_rw_bytes")
+                overlay_rw_source = usage.get("overlay_rw_source")
                 bind_mount_path = usage.get("bind_mount_path")
                 bind_mount_bytes = usage.get("bind_mount_bytes")
-                if total_bytes is None or (bind_mount_path and bind_mount_bytes is None):
+                overlay_incomplete = (
+                    overlay_rw_bytes is None
+                    or overlay_rw_source in {"error", "missing", "not_found"}
+                )
+                if total_bytes is None or overlay_incomplete or (bind_mount_path and bind_mount_bytes is None):
                     logger.warning(
-                        "apply disk snapshot skipped incomplete measurement: machine_id=%s container=%s total=%s bind=%s path=%s",
+                        "apply disk snapshot skipped incomplete measurement: machine_id=%s container=%s total=%s overlay=%s overlay_source=%s bind=%s path=%s",
                         machine_id,
                         name,
                         total_bytes,
+                        overlay_rw_bytes,
+                        overlay_rw_source,
                         bind_mount_bytes,
                         bind_mount_path,
                     )
@@ -860,7 +868,7 @@ def apply_disk_usage_snapshot(data: dict, machine_id: int | None = None) -> dict
                     continue
                 containers_repo.update_container(
                     container.id,
-                    disk_overlay_rw_bytes=usage.get("overlay_rw_bytes"),
+                    disk_overlay_rw_bytes=overlay_rw_bytes,
                     disk_bind_mount_bytes=bind_mount_bytes,
                     disk_total_bytes=total_bytes,
                     bind_mount_path=bind_mount_path,
@@ -1166,8 +1174,13 @@ def _handle_container_deleted(container_name: str, machine_id: int | None = None
                          operation=OperationType.DELETE_CONTAINER,
                          target_type="container",
                          target_id=container_id,
-                         detail={"name": container_name, "machine_id": machine_id,
-                                 "trigger": "node_vanished"})
+                         detail={
+                             "name": container_name,
+                             "container_name": container_name,
+                             "original_container_name": container_name,
+                             "machine_id": machine_id,
+                             "trigger": "node_vanished",
+                         })
         except Exception as le:
             logger.warning("handle_node_ws delete: op-log failed for %r: %s", container_name, le)
     except Exception as e:

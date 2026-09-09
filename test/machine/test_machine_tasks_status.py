@@ -8,6 +8,7 @@ import pytest
 from ...constant import ContainerStatus, MachineStatus, MachineTypes
 from ...models.containers import Container
 from ...models.machine import Machine
+from ...models.operation_log import OperationLog
 from ...repositories import containers_repo, machine_repo
 from ...extensions import session_scope
 from ...services import machine_tasks
@@ -986,6 +987,11 @@ def test_handle_container_deleted_scoped_to_sending_machine(db_session):
 
     assert _exists(ca.id), "机器 A 的容器不应被机器 B 的 delete 帧删除"
     assert not _exists(cb.id), "机器 B 自己的容器应被删除"
+    vanished_log = db_session.query(OperationLog).filter_by(target_id=cb.id).one()
+    assert vanished_log.detail["name"] == "shared_name"
+    assert vanished_log.detail["container_name"] == "shared_name"
+    assert vanished_log.detail["original_container_name"] == "shared_name"
+    assert vanished_log.detail["trigger"] == "node_vanished"
 
     # 无 machine_id → 拒绝删除（不降级全局查找）
     node_comms._handle_container_deleted("shared_name")

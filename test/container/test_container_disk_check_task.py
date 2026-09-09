@@ -83,11 +83,48 @@ class TestDiskUsageSnapshotCompleteness:
         assert current.disk_bind_mount_bytes == 22
         assert current.bind_mount_path == "/home/u/containers/existing/"
 
+    def test_apply_disk_usage_snapshot_skips_missing_overlay_without_clobbering_existing_fields(self, app, db_session):
+        _root, machine, container = create_container_graph()
+        container.disk_overlay_rw_bytes = 11
+        container.disk_bind_mount_bytes = 22
+        container.disk_total_bytes = 33
+        db_session.commit()
+
+        result = node_comms.apply_disk_usage_snapshot(
+            {
+                "containers": {
+                    container.name: {
+                        "overlay_rw_bytes": None,
+                        "overlay_rw_source": "error",
+                        "bind_mount_bytes": 200,
+                        "total_bytes": 200,
+                    }
+                }
+            },
+            machine.id,
+        )
+
+        db_session.expire_all()
+        current = db_session.get(Container, container.id)
+        assert result == {"updated": 0, "skipped": 1}
+        assert current.disk_overlay_rw_bytes == 11
+        assert current.disk_bind_mount_bytes == 22
+        assert current.disk_total_bytes == 33
+
     def test_usage_from_db_skips_incomplete_bind_mount_measurement(self, app, db_session):
         _root, _machine, container = create_container_graph()
         container.disk_total_bytes = 100
         container.disk_bind_mount_bytes = None
         container.bind_mount_path = "/home/u/containers/incomplete/"
+        db_session.commit()
+
+        assert container_disk_check_task._usage_from_db(container) is None
+
+    def test_usage_from_db_skips_incomplete_overlay_measurement(self, app, db_session):
+        _root, _machine, container = create_container_graph()
+        container.disk_total_bytes = 100
+        container.disk_overlay_rw_bytes = None
+        container.disk_bind_mount_bytes = 100
         db_session.commit()
 
         assert container_disk_check_task._usage_from_db(container) is None
@@ -106,6 +143,20 @@ class TestDiskUsageSnapshotCompleteness:
         current = db_session.get(Container, container.id)
         assert current.disk_total_bytes is None
         assert current.bind_mount_path is None
+
+    def test_evaluate_limits_skips_incomplete_overlay_measurement(self, app, db_session, monkeypatch):
+        _root, _machine, container = create_container_graph()
+        monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_check_enabled", lambda: True)
+
+        usage = _usage_below_soft_limit()
+        usage["container"]["overlay_rw_bytes"] = None
+
+        container_disk_check_task._evaluate_limits(container, usage)
+
+        db_session.expire_all()
+        current = db_session.get(Container, container.id)
+        assert current.disk_total_bytes is None
+        assert current.disk_overlay_rw_bytes is None
 
 
 class TestDiskCheckMailResultHandling:

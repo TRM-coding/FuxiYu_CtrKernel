@@ -65,6 +65,17 @@ def _container_effective_status(container: Container) -> str:
     return _derive_effective_status(container.container_status, container.machine_id, container=container)
 
 
+def _container_log_detail(container_name: str | None, **extra) -> dict:
+    name = container_name or "?"
+    detail = {
+        "name": name,
+        "container_name": name,
+        "original_container_name": name,
+    }
+    detail.update(extra)
+    return detail
+
+
 def get_long_term_container_limit() -> int:
     return settings_tasks.get_long_term_container_limit()
 
@@ -329,8 +340,7 @@ def remove_container(container_id:int, operator_user_id:int|None=None)->bool:
         target_type="container",
         target_id=container_id,
         detail={
-            "name": container_name_for_log,
-            "original_container_name": container_name_for_log,
+            **_container_log_detail(container_name_for_log),
             "mount_path": bind_mount_for_log,
             "machine_id": machine_id,
             "trigger": "api" if operator_user_id else "cleanup",
@@ -382,7 +392,7 @@ def pause_container(container_id: int, operator_user_id: int | None = None, extr
         logger.error("pause_container send error: %s", e)
         write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.PAUSE_CONTAINER,
                      target_type="container", target_id=container.id,
-                     detail={"name": container.name, "machine_id": machine_id, **(extra_detail or {})},
+                     detail=_container_log_detail(container.name, machine_id=machine_id, **(extra_detail or {})),
                      error_reason=getattr(e, 'reason', None) or str(e))
         return False
 
@@ -396,7 +406,7 @@ def pause_container(container_id: int, operator_user_id: int | None = None, extr
             logger.warning("pause: failed to update container %s status to PAUSED: %s", container.id, e)
         write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.PAUSE_CONTAINER,
                      target_type="container", target_id=container.id,
-                     detail={"name": container.name, "machine_id": machine_id, **(extra_detail or {})})
+                     detail=_container_log_detail(container.name, machine_id=machine_id, **(extra_detail or {})))
         return True
     return False
 
@@ -429,7 +439,7 @@ def unpause_container(container_id: int, operator_user_id: int | None = None) ->
         logger.error("unpause_container send error: %s", e)
         write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.UNPAUSE_CONTAINER,
                      target_type="container", target_id=container.id,
-                     detail={"name": container.name, "machine_id": machine_id},
+                     detail=_container_log_detail(container.name, machine_id=machine_id),
                      error_reason=getattr(e, 'reason', None) or str(e))
         return False
 
@@ -440,7 +450,7 @@ def unpause_container(container_id: int, operator_user_id: int | None = None) ->
         # 快照是 container_status 权威源，操作路径直写仅作即时回执（pause 保留）。
         write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.UNPAUSE_CONTAINER,
                      target_type="container", target_id=container.id,
-                     detail={"name": container.name, "machine_id": machine_id})
+                     detail=_container_log_detail(container.name, machine_id=machine_id))
 
         # 磁盘超限冻结宽限期：管理员解冻后给予宽限
         try:
@@ -611,7 +621,7 @@ def resurrect_container(deleted_id: int, operator_user_id: int | None = None) ->
             "trigger": "resurrect",
             "deleted_id": deleted_id,
             "original_container_id": snapshot.get("container_id"),
-            "name": container.NAME,
+            **_container_log_detail(container.NAME),
             "machine_id": machine_id,
             "restore_mount_path": mount_path,
             "restored_accounts": len(existing_accounts) + 1,
@@ -646,7 +656,11 @@ def clean_deleted_container_mount(mount_cleanup_id: int, operator_user_id: int |
         operation=OperationType.DELETE_CONTAINER,
         target_type="container_mount_cleanup",
         target_id=mount_cleanup_id,
-        detail={"mount_path": mount_path, "trigger": "manual_clean_mount"},
+        detail={
+            **_container_log_detail(getattr(cleanup, "container_name", None)),
+            "mount_path": mount_path,
+            "trigger": "manual_clean_mount",
+        },
     )
     return {"mount_cleanup_id": int(mount_cleanup_id), "cleaned": True, "already_cleaned": False}
 
@@ -693,8 +707,7 @@ def set_long_term_container(container_id: int, is_long_term: bool, operator_user
     write_op_log(success=True, operator_user_id=operator_user_id,
                  operation=OperationType.SET_LONG_TERM,
                  target_type="container", target_id=container_id,
-                 detail={"name": container_name,
-                         "is_long_term": is_long_term})
+                 detail=_container_log_detail(container_name, is_long_term=is_long_term))
     return {
         "container_id": container_id,
         **long_term_state,
@@ -758,9 +771,12 @@ def add_collaborator(container_id:int,user_id:int,role:ROLE, operator_user_id:in
     
     write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.ADD_COLLABORATOR,
                  target_type="container", target_id=container_id,
-                 detail={"user_id": user_id, "username": user_name,
-                         "role": role.value if hasattr(role, 'value') else str(role),
-                         "container_name": container_name})
+                 detail=_container_log_detail(
+                     container_name,
+                     user_id=user_id,
+                     username=user_name,
+                     role=role.value if hasattr(role, 'value') else str(role),
+                 ))
     return True
 #从container_id中移除user_id对应的用户访问权
 
@@ -823,8 +839,11 @@ def remove_collaborator(container_id:int,user_id:int,operator_user_id:int|None=N
 
     write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.REMOVE_COLLABORATOR,
                  target_type="container", target_id=container_id,
-                 detail={"user_id": user_id, "username": user_name,
-                         "container_name": container_name})
+                 detail=_container_log_detail(
+                     container_name,
+                     user_id=user_id,
+                     username=user_name,
+                 ))
     return True
 
 #修改user_id对container_id的访问权
@@ -892,10 +911,13 @@ def update_role(container_id:int,user_id:int,updated_role:ROLE,operator_user_id:
 
     write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.UPDATE_COLLABORATOR_ROLE,
                  target_type="container", target_id=container_id,
-                 detail={"user_id": user_id, "username": user_name,
-                         "old_role": old_role,
-                         "new_role": updated_role.value if hasattr(updated_role, 'value') else str(updated_role),
-                         "container_name": container_name})
+                 detail=_container_log_detail(
+                     container_name,
+                     user_id=user_id,
+                     username=user_name,
+                     old_role=old_role,
+                     new_role=updated_role.value if hasattr(updated_role, 'value') else str(updated_role),
+                 ))
     return True
 
 
@@ -929,7 +951,7 @@ def start_container(container_id:int, operator_user_id:int|None=None)->bool:
         # 状态推进由 WSS 推送接管（转换态 → Ctrl 落库），心跳轮询已退役
         write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.START_CONTAINER,
                      target_type="container", target_id=container_id,
-                     detail={"name": container_name})
+                     detail=_container_log_detail(container_name, machine_id=machine_id))
         return True
     # Treat other responses as failure
     raise NodeServiceError(f"NODE start returned failure: {res}", reason=res.get('error_reason') or 'start_failed')
@@ -963,7 +985,7 @@ def stop_container(container_id:int, operator_user_id:int|None=None)->bool:
         # 状态推进由 WSS 推送接管，心跳轮询已退役
         write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.STOP_CONTAINER,
                      target_type="container", target_id=container_id,
-                     detail={"name": container_name})
+                     detail=_container_log_detail(container_name, machine_id=machine_id))
         return True
     raise NodeServiceError(f"NODE stop returned failure: {res}", reason=res.get('error_reason') or 'stop_failed')
 
@@ -996,7 +1018,7 @@ def restart_container(container_id:int, operator_user_id:int|None=None)->bool:
         # 状态推进由 WSS 推送接管（转换态 → Ctrl 落库），心跳轮询已退役
         write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.RESTART_CONTAINER,
                      target_type="container", target_id=container_id,
-                     detail={"name": container_name})
+                     detail=_container_log_detail(container_name, machine_id=machine_id))
         return True
     raise NodeServiceError(f"NODE restart returned failure: {res}", reason=res.get('error_reason') or 'restart_failed')
 

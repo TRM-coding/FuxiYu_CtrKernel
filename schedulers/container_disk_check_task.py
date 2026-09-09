@@ -51,6 +51,13 @@ def _usage_from_db(container) -> dict | None:
     total = getattr(container, 'disk_total_bytes', None)
     if total is None:
         return None
+    overlay_rw = getattr(container, 'disk_overlay_rw_bytes', None)
+    if overlay_rw is None:
+        logger.warning(
+            "[disk-check] skip container_id=%s: incomplete overlay disk usage",
+            getattr(container, 'id', '?'),
+        )
+        return None
     bind_mount_path = getattr(container, 'bind_mount_path', None)
     bind_mount = getattr(container, 'disk_bind_mount_bytes', None)
     if bind_mount_path and bind_mount is None:
@@ -61,7 +68,7 @@ def _usage_from_db(container) -> dict | None:
         )
         return None
     return {"container": {
-        "overlay_rw_bytes": getattr(container, 'disk_overlay_rw_bytes', None),
+        "overlay_rw_bytes": overlay_rw,
         "bind_mount_bytes": bind_mount,
         "total_bytes": total,
         "bind_mount_path": bind_mount_path,
@@ -78,6 +85,9 @@ def _evaluate_limits(container, usage: dict) -> None:
     total_bytes = container_data.get("total_bytes", 0)
     if total_bytes is None:
         logger.warning("[disk-check] skip container_id=%s: total_bytes missing", container.id)
+        return
+    if container_data.get("overlay_rw_bytes") is None:
+        logger.warning("[disk-check] skip container_id=%s: overlay_rw_bytes missing", container.id)
         return
     bind_mount_path = container_data.get("bind_mount_path")
     if bind_mount_path and container_data.get("bind_mount_bytes") is None:

@@ -1,6 +1,8 @@
 import pytest
+from sqlalchemy import select
 
 from ...constant import ContainerStatus, ROLE
+from ...models.operation_log import OperationLog
 from ...repositories import usercontainer_repo
 from ...services import container_tasks
 from ..factories import create_user
@@ -27,6 +29,10 @@ def test_add_collaborator_success_adds_binding_after_node_success(
     binding = usercontainer_repo.get_binding(collaborator.id, container.id, session=db_session)
     assert binding["username"] == collaborator.username
     assert getattr(binding["role"], "value", binding["role"]) == ROLE.COLLABORATOR.value
+    log = db_session.scalars(select(OperationLog).where(OperationLog.operation == "add_collaborator")).one()
+    assert log.detail["name"] == container.name
+    assert log.detail["container_name"] == container.name
+    assert log.detail["original_container_name"] == container.name
 
 
 def test_add_collaborator_rejects_root_role_without_node_call(
