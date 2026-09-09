@@ -35,7 +35,7 @@ def check_all_containers_disk_usage_once(page_size: int = 200) -> None:
                 lambda cid=c.id, a=_app: _disk_check_one(cid, a)
                 for c in containers
             ]
-            _raw = parallel_node_calls(_callables, timeout_per_call=22.0)
+            _raw = parallel_node_calls(_callables, timeout_per_call=70.0)
             for c, r in zip(containers, _raw):
                 if isinstance(r, Exception):
                     print(
@@ -85,9 +85,17 @@ def _evaluate_limits(container, usage: dict) -> None:
         return
 
     container_data = usage.get("container", {})
-    total_bytes = container_data.get("total_bytes", 0)
-    if total_bytes is None:
-        total_bytes = 0
+    total_bytes = container_data.get("total_bytes")
+    bind_mount = container_data.get("bind_mount_bytes")
+    bind_mount_path = container_data.get("bind_mount_path")
+    bind_mount_source = container_data.get("bind_mount_source")
+    if total_bytes is None or (bind_mount is None and bind_mount_path):
+        print(
+            f"[disk-check] measurement pending, skip persist/evaluate: "
+            f"container_id={container.id} name={getattr(container, 'name', '?')} "
+            f"bind_src={bind_mount_source} bind_path={bind_mount_path}"
+        )
+        return
 
     # 限额：初期均分 machine.disk_size_gb
     try:
@@ -111,11 +119,10 @@ def _evaluate_limits(container, usage: dict) -> None:
     hard_limit = _app.config.get("CONTAINER_DISK_HARD_LIMIT_PERCENT", 100)
 
     overlay_rw = container_data.get("overlay_rw_bytes") or 0
-    bind_mount = container_data.get("bind_mount_bytes") or 0
+    bind_mount = bind_mount or 0
 
     # 持久化磁盘用量到 DB
     try:
-        bind_mount_path = container_data.get("bind_mount_path")
         containers_repo.update_container(
             container.id,
             commit=True,

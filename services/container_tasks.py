@@ -439,7 +439,7 @@ def unpause_container(container_id: int, operator_user_id: int | None = None) ->
     return False
 
 
-def get_container_disk_usage(container_id: int, timeout: float = 20.0) -> dict | None:
+def get_container_disk_usage(container_id: int, timeout: float = 70.0) -> dict | None:
     """
     通过 Node 查询容器磁盘使用情况（只读）。
     入参: container_id
