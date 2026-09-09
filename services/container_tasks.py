@@ -1074,6 +1074,7 @@ def get_container_detail_information(container_id:int)->container_detail_informa
     cleanup_info = build_cleanup_info(
         ssh_record.last_ssh_login_time if ssh_record else None,
         cleanup_days,
+        (ssh_record.deferral_seconds or 0) if ssh_record else 0,
     )
 
     # 备忘：owners才是系统对应的用户名列表
@@ -1205,6 +1206,7 @@ def list_all_container_bref_information(
         cleanup_info = build_cleanup_info(
             ssh_record.last_ssh_login_time if ssh_record else None,
             cleanup_days,
+            (ssh_record.deferral_seconds or 0) if ssh_record else 0,
         )
         try:
             with session_scope(commit=False) as session:

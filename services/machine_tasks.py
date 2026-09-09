@@ -1,4 +1,5 @@
 from ..extensions import session_scope
+from datetime import datetime
 
 from .rbac_service import _has_entity_direct, _has_resource_manage_direct
 from ..repositories.machine_repo import *
@@ -88,6 +89,38 @@ def _machine_status_value(machine) -> str:
     """返回机器真实连接状态：online/offline。"""
     status = getattr(machine, "machine_status", None)
     return status.value if hasattr(status, "value") else str(status)
+
+
+def refresh_unavailable_window(machine_id: int, *, session) -> None:
+    """按机器当前可用状态刷新不可用窗口（须在状态已更新的同一 session 事务内调用）。
+
+    窗口语义（清理顺延的公共地基）：不可用 = machine_status != ONLINE 或 is_maintenance。
+    - 进入不可用且 unavailable_since 为空 → 置位 now（窗口起点取最早）
+    - 恢复可用（窗口关闭）→ 把整段故障时长批量加到该机器全部 ssh deferral_seconds，
+      再清空 unavailable_since——到期清理计时随之顺延（宕机/维护期不算用户责任）
+    只应在 machine_status / is_maintenance 变化时调用；其它字段更新不触发，
+    否则会把"早已离线"的机器误标成刚进窗。
+    """
+    machine = get_by_id(machine_id, session=session)
+    if machine is None:
+        return
+    available = (
+        _machine_status_value(machine) == MachineStatus.ONLINE.value
+        and not getattr(machine, "is_maintenance", False)
+    )
+    since = getattr(machine, "unavailable_since", None)
+    if not available:
+        if since is None:
+            machine.unavailable_since = datetime.utcnow()
+            session.flush()
+    else:
+        if since is not None:
+            delta = int((datetime.utcnow() - since).total_seconds())
+            if delta > 0:
+                from ..repositories import container_ssh_login_repo
+                container_ssh_login_repo.add_deferral_seconds(machine_id, delta, session=session)
+            machine.unavailable_since = None
+            session.flush()
 
 
 def is_machine_in_maintenance(machine_id: int) -> bool:
@@ -363,9 +396,13 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
         fields['is_maintenance'] = bool(fields['is_maintenance'])
 
     before = {k: str(getattr(machine, k, None)) for k in fields.keys()}
+    # 状态类字段变化 → 同一事务内刷新不可用窗口（离线/维护进窗，恢复出窗顺延清理计时）
+    state_changed = ("machine_status" in fields) or ("is_maintenance" in fields)
     try:
         with session_scope() as session:
             update_machine(machine_id, session=session, **fields)
+            if state_changed:
+                refresh_unavailable_window(machine_id, session=session)
     except Exception as e:
         write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.UPDATE_MACHINE, target_type="machine", target_id=machine_id,
                      detail={"before": before, "after": {k: str(v) for k, v in fields.items()}},
@@ -389,6 +426,9 @@ def Set_maintenance(machine_id: int, is_maintenance: bool, operator_user_id: int
     try:
         with session_scope() as session:
             ok = set_maintenance(machine_id, bool(is_maintenance), session=session)
+            # 维护开关变化 = 可用性变化：同一事务内刷新不可用窗口（开维护进窗 / 关维护出窗顺延）
+            if ok:
+                refresh_unavailable_window(machine_id, session=session)
     except Exception as e:
         write_op_log(
             success=False,

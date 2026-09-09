@@ -151,7 +151,12 @@ def cleanup_expired_containers_once(cleanup_after_days: int) -> None:
         records = container_ssh_login_repo.list_all(session=session)
     for rec in records:
         try:
-            info = container_tasks.build_cleanup_info(rec.last_ssh_login_time, cleanup_after_days)
+            # 顺延口径与详情/提醒一致：有效最后登录 = last_ssh + 机器不可用顺延(deferral)
+            info = container_tasks.build_cleanup_info(
+                rec.last_ssh_login_time,
+                cleanup_after_days,
+                getattr(rec, "deferral_seconds", 0) or 0,
+            )
             cid = int(rec.container_id)
             with session_scope(commit=False) as session:
                 is_long_term = long_term_container_repo.is_long_term(cid, session=session)

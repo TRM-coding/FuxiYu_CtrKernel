@@ -44,6 +44,9 @@ class Machine(db.Model):
     # Node 采集异常（docker 卡死）时由 collect_error 帧置位、正常快照清除。
     # 机器轴条件：DB 容器状态保持最后已知值，展示派生 status_unknown——不写容器诊断。
     collect_error_at: datetime | None = db.Column(db.DateTime, nullable=True)
+    # 不可用窗口起点（离线/维护）：进入不可用（machine_status != ONLINE 或 is_maintenance）
+    # 且为空时置位；恢复可用时关闭并清空。用于清理类计时顺延（见 machine_tasks 窗口逻辑）。
+    unavailable_since: datetime | None = db.Column(db.DateTime, nullable=True)
     # 与 Container 的一对多关系（containers 表里有 machine_id 外键）
     containers = db.relationship(
         "Container", back_populates="machine", cascade="all, delete-orphan"

@@ -71,9 +71,17 @@ def _parse_last_ssh_time(raw: str | None) -> datetime | None:
         return None
 
 
-def build_cleanup_info(last_ssh_login_time: str | None, cleanup_after_days: int) -> dict:
+def build_cleanup_info(
+    last_ssh_login_time: str | None,
+    cleanup_after_days: int,
+    deferral_seconds: int = 0,
+) -> dict:
     """
     基于上次 SSH 登录时间计算清理时间信息（仅计算，不执行清理）。
+
+    deferral_seconds：机器不可用窗口累计顺延（Ctrl 自有列维护，不随 Node 帧回写）。
+    有效最后登录 = 真实 last_ssh + deferral——宕机/维护期用户无法交互，不计入责任，
+    到期时刻（cleanup_at / 倒计时）相应顺延；展示与执行使用同一口径。
     """
     # logger.debug("DEBUG: build_cleanup_info called with last_ssh_login_time='%s' and cleanup_after_days=%s", last_ssh_login_time, cleanup_after_days)
     if cleanup_after_days <= 0:
@@ -88,6 +96,8 @@ def build_cleanup_info(last_ssh_login_time: str | None, cleanup_after_days: int)
             "cleanup_status": "unknown",
         }
 
+    if deferral_seconds:
+        last_dt = last_dt + timedelta(seconds=int(deferral_seconds))
     cleanup_at = last_dt + timedelta(days=cleanup_after_days)
     seconds_left = int((cleanup_at - datetime.utcnow()).total_seconds())
     if seconds_left <= 0:
