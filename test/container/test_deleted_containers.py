@@ -5,6 +5,7 @@ from ...models.container_mount_cleanup import ContainerMountCleanup
 from ...models.deleted_container_restore_snapshot import DeletedContainerRestoreSnapshot
 from ...repositories import container_mount_cleanup_repo, containers_repo, deleted_container_restore_snapshot_repo, usercontainer_repo
 from ...services import container_tasks
+from ...services.container_module import mount_cleanup as mount_cleanup_mod
 from ..factories import create_container_graph, create_machine, create_user
 from .conftest import NODE_REMOVE_SUCCESS
 
@@ -87,7 +88,7 @@ def test_clean_deleted_container_mount_calls_node_and_marks_cleaned(db_session, 
         sent.append((url, payload, timeout))
         return {"success": 1}
 
-    monkeypatch.setattr(container_tasks, "send", _send)
+    monkeypatch.setattr(mount_cleanup_mod, "send", _send)
 
     result = container_tasks.clean_deleted_container_mount(row.id, operator_user_id=1)
 

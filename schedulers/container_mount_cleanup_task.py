@@ -5,15 +5,19 @@
 - escalation=True 的记录已在删除时立刻清理，此处跳过
 """
 
+import time
+import threading
 import logging
 from datetime import datetime, timedelta
 
 from ..extensions import session_scope
-from ..repositories import container_mount_cleanup_repo, machine_repo
+from ..repositories import container_mount_cleanup_repo
 from ..services import settings_tasks
-from ..services.container_tasks import get_full_url, send
+from ..services.machine_tasks import get_machine_reachable
+from ..services.container_module.mount_cleanup import clean_mount_path
 
 logger = logging.getLogger(__name__)
+_SCHEDULER_STATE: dict[str, object] = {}
 
 
 def run_mount_cleanup_once() -> None:
@@ -31,22 +35,51 @@ def run_mount_cleanup_once() -> None:
 
     for row in rows:
         try:
-            with session_scope(commit=False) as session:
-                machine_ip = machine_repo.get_machine_ip_by_id(row.machine_id, session=session)
-            if not machine_ip:
-                logger.warning("[mount-cleanup] skip row %s: machine %s not found", row.id, row.machine_id)
+            # 机器级 gate：机器不可达不发清理请求（清理动作需要 Node 在场；
+            # 否则每轮对宕机机器重复请求，等恢复后的下一轮再清）
+            if not get_machine_reachable(row.machine_id):
+                logger.info("[mount-cleanup] skip row %s: machine %s unreachable", row.id, row.machine_id)
                 continue
-
-            url = get_full_url(machine_ip, "/clean_mount")
-            payload = {"config": {"mount_path": row.mount_path}}
-            res = send(url, payload, timeout=10.0)
-
-            if isinstance(res, dict) and res.get("success") == 1:
-                with session_scope() as session:
-                    container_mount_cleanup_repo.mark_cleaned(row.id, session=session)
+            # 动作逻辑统一在 container_module.mount_cleanup（幂等 / 请求 / mark_cleaned / op-log）
+            result = clean_mount_path(row.id, trigger="auto_mount_cleanup")
+            if result.get("cleaned"):
                 logger.info("[mount-cleanup] cleaned row %s: container=%s path=%s",
                             row.id, row.container_name, row.mount_path)
-            else:
-                logger.error("[mount-cleanup] node rejected row %s: %s", row.id, res)
         except Exception as e:
             logger.error("[mount-cleanup] failed row %s: %s", row.id, e)
+
+
+def start_mount_cleanup_scheduler(interval_seconds: int | None = None) -> threading.Thread | None:
+    """启动后台定期 mount 清理任务（由 create_app 背景任务统一入口调用）。
+    仅在 settings: container.mount_cleanup_enabled=true 时启动。"""
+    if not settings_tasks.get_container_mount_cleanup_enabled():
+        return None
+    if interval_seconds is None:
+        interval_seconds = settings_tasks.get_container_mount_cleanup_interval_seconds()
+
+    key = "container_mount_cleanup_scheduler"
+    existing = _SCHEDULER_STATE.get(key)
+    if existing and isinstance(existing, dict) and existing.get("thread"):
+        t = existing["thread"]
+        if t.is_alive():
+            return t
+
+    stop_event = threading.Event()
+
+    def _worker():
+        run_mount_cleanup_once()
+
+        while not stop_event.is_set():
+            time.sleep(interval_seconds)
+            if stop_event.is_set():
+                break
+            try:
+                run_mount_cleanup_once()
+            except Exception as e:
+                logger.error("[mount-cleanup] periodic run failed: %s", e)
+
+    t = threading.Thread(target=_worker, daemon=True, name="mount-cleanup")
+    t.start()
+
+    _SCHEDULER_STATE[key] = {"thread": t, "stop_event": stop_event}
+    return t

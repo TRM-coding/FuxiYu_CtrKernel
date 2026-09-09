@@ -34,6 +34,7 @@ from .container_module.node_comms import (
     _ensure_machine_online_for_operation,
 )
 from .container_module.exceptions import NodeServiceError, _raise_on_node_error
+from .container_module.mount_cleanup import clean_mount_path
 from .container_module.operation_guard import ensure_container_operation_allowed
 from .container_module.pydantic_models import (
     container_bref_information,
@@ -41,6 +42,7 @@ from .container_module.pydantic_models import (
     _derive_effective_status,
 )
 from .container_module.utils import (
+    _container_log_detail,
     _parse_last_ssh_time,
     build_cleanup_info,
     build_long_term_container_state,
@@ -63,17 +65,6 @@ logger = logging.getLogger(__name__)
 
 def _container_effective_status(container: Container) -> str:
     return _derive_effective_status(container.container_status, container.machine_id, container=container)
-
-
-def _container_log_detail(container_name: str | None, **extra) -> dict:
-    name = container_name or "?"
-    detail = {
-        "name": name,
-        "container_name": name,
-        "original_container_name": name,
-    }
-    detail.update(extra)
-    return detail
 
 
 def get_long_term_container_limit() -> int:
@@ -412,7 +403,15 @@ def pause_container(container_id: int, operator_user_id: int | None = None, extr
 
 
 def unpause_container(container_id: int, operator_user_id: int | None = None) -> bool:
-    """解冻因磁盘超限被 pause 的容器。"""
+    """解冻因磁盘超限被 pause 的容器。
+
+    宽限语义（与磁盘冻结状态机的衔接）：
+    - 成功解冻且容器仍有冻结记录 → 重开 grace 观察窗（宽限期内磁盘评估不动作）
+    - grace 只是"动作暂停键"：first_frozen_at 不重置，升级红线（escalation_days）
+      按真实冻结天数独立走墙钟——宽限过期且仍超限即按红线推进（移除）
+    - 反复 unpause 可反复重开宽限推迟移除：状态机不设重开上限，
+      护栏在 unpause 的操作权限面（管理员放行 = 有意给观察期）
+    """
     try:
         container_id = int(container_id)
     except Exception:
@@ -631,38 +630,16 @@ def resurrect_container(deleted_id: int, operator_user_id: int | None = None) ->
 
 
 def clean_deleted_container_mount(mount_cleanup_id: int, operator_user_id: int | None = None) -> dict:
-    with session_scope(commit=False) as session:
-        cleanup = container_mount_cleanup_repo.get_by_id(mount_cleanup_id, session=session)
-        if cleanup is None:
-            raise NodeServiceError("mount cleanup record not found", reason="not_found")
-        if cleanup.cleaned_at is not None:
-            return {"mount_cleanup_id": cleanup.id, "cleaned": True, "already_cleaned": True}
-        machine_ip = machine_repo.get_machine_ip_by_id(cleanup.machine_id, session=session)
-        mount_path = cleanup.mount_path
+    """手动触发清理单条 mount 记录（管理页入口）——薄壳。
 
-    full_url = get_full_url(machine_ip, "/clean_mount")
-    res = send(full_url, {"config": {"mount_path": mount_path}}, timeout=10.0)
-    _raise_on_node_error(res, "clean_mount")
-    if res.get("success") != 1:
-        raise NodeServiceError(f"NODE clean_mount unexpected response: {res}", reason="clean_mount_failed")
-
-    with session_scope() as session:
-        ok = container_mount_cleanup_repo.mark_cleaned(mount_cleanup_id, session=session)
-        if not ok:
-            raise NodeServiceError("mount cleanup record not found", reason="not_found")
-    write_op_log(
-        success=True,
+    动作逻辑（幂等 / Node 请求 / mark_cleaned / op-log）统一在
+    container_module.mount_cleanup.clean_mount_path；本壳只固定手动 trigger 语义。
+    """
+    return clean_mount_path(
+        mount_cleanup_id,
         operator_user_id=operator_user_id,
-        operation=OperationType.DELETE_CONTAINER,
-        target_type="container_mount_cleanup",
-        target_id=mount_cleanup_id,
-        detail={
-            **_container_log_detail(getattr(cleanup, "container_name", None)),
-            "mount_path": mount_path,
-            "trigger": "manual_clean_mount",
-        },
+        trigger="manual_clean_mount",
     )
-    return {"mount_cleanup_id": int(mount_cleanup_id), "cleaned": True, "already_cleaned": False}
 
 
 def set_long_term_container(container_id: int, is_long_term: bool, operator_user_id: int | None = None) -> dict:

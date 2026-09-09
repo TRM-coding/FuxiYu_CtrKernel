@@ -1,4 +1,6 @@
+import time
 import json
+import threading
 import logging
 from datetime import datetime
 
@@ -10,6 +12,7 @@ from ..services import container_tasks, settings_tasks
 from ..utils.mail import send as send_mail
 
 logger = logging.getLogger(__name__)
+_SCHEDULER_STATE: dict[str, object] = {}
 
 
 def _parse_reminder_hours(raw: str | None) -> list[int]:
@@ -185,3 +188,41 @@ def cleanup_expired_containers_once(cleanup_after_days: int) -> None:
         except Exception as e:
             logger.error("[container-cleanup] failed for machine_id=%s container_id=%s: %s",
                          getattr(rec, 'machine_id', '?'), getattr(rec, 'container_id', '?'), e)
+
+
+def start_container_cleanup_scheduler(interval_seconds: int | None = None) -> threading.Thread:
+    """启动容器定时清理任务（由 create_app 背景任务统一入口调用）：
+    - 默认每 20 分钟扫描一次
+    - 启动后先执行一次，保证历史到期容器可尽快处理
+    - 清理动作只面向到期集合（提醒邮件 / 到期移除），不做逐容器探测请求
+    """
+    key = "container_cleanup_scheduler"
+    existing = _SCHEDULER_STATE.get(key)
+    if existing and isinstance(existing, dict) and existing.get("thread"):
+        t = existing["thread"]
+        if t.is_alive():
+            return t
+
+    if interval_seconds is None:
+        interval_seconds = settings_tasks.get_container_cleanup_interval_seconds()
+
+    stop_event = threading.Event()
+
+    def _worker():
+        days = settings_tasks.get_container_cleanup_after_days()
+        cleanup_expired_containers_once(days)
+
+        while not stop_event.is_set():
+            time.sleep(interval_seconds)
+            if stop_event.is_set():
+                break
+            try:
+                days = settings_tasks.get_container_cleanup_after_days()
+                cleanup_expired_containers_once(days)
+            except Exception as e:
+                logger.error("[container-cleanup] periodic run failed: %s", e)
+
+    t = threading.Thread(target=_worker, daemon=True, name="container-cleanup")
+    t.start()
+    _SCHEDULER_STATE[key] = {"thread": t, "stop_event": stop_event}
+    return t

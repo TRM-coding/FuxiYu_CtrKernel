@@ -1,12 +1,15 @@
 import time
+import threading
 import logging
 from datetime import datetime, timedelta
 
 from ..extensions import session_scope
-from ..repositories import containers_repo, machine_repo
+from ..repositories import containers_repo
 from ..services import container_tasks, settings_tasks
+from ..services.machine_tasks import get_machine_reachable, is_machine_in_maintenance
 
 logger = logging.getLogger(__name__)
+_SCHEDULER_STATE: dict[str, object] = {}
 _DISK_CHECK_CACHE: dict[str, float] = {}
 
 
@@ -81,6 +84,17 @@ def _evaluate_limits(container, usage: dict) -> None:
     if not enabled:
         return
 
+    # 机器级 gate：机器不可达（offline）或维护中 → 跳过评估。
+    # 断线/维护期间磁盘帧停更，DB 值停留最后已知——此时不动状态机
+    # （不 upsert 冻结 / 不推进宽限 / 不发邮件），避免基于过期数据的打扰与不可逆动作；
+    # pause/remove 本就需要 Node 可达，把该前置从动作层提前到判断层。
+    # 机器状态由 WSS 置位 + 探活清除；维护走独立 is_maintenance 标志（machine_status 可能仍 ONLINE）。
+    machine_id = getattr(container, "machine_id", None)
+    if machine_id is None or not get_machine_reachable(machine_id) or is_machine_in_maintenance(machine_id):
+        logger.info("[disk-check] skip container_id=%s: machine unreachable or in maintenance",
+                    getattr(container, "id", "?"))
+        return
+
     container_data = usage.get("container", {})
     total_bytes = container_data.get("total_bytes", 0)
     if total_bytes is None:
@@ -122,21 +136,8 @@ def _evaluate_limits(container, usage: dict) -> None:
     overlay_rw = container_data.get("overlay_rw_bytes") or 0
     bind_mount = container_data.get("bind_mount_bytes") or 0
 
-    # 持久化磁盘用量到 DB
-    try:
-        bind_mount_path = container_data.get("bind_mount_path")
-        with session_scope() as session:
-            containers_repo.update_container(
-                container.id,
-                disk_overlay_rw_bytes=int(overlay_rw),
-                disk_bind_mount_bytes=int(bind_mount),
-                disk_total_bytes=int(total_bytes),
-                disk_checked_at=datetime.utcnow(),
-                bind_mount_path=bind_mount_path,
-                session=session,
-            )
-    except Exception as e:
-        logger.warning("[disk-check] failed to persist disk usage for container %s: %s", container.id, e)
+    # 不再回写 disk_* / disk_checked_at：WSS apply_disk_usage_snapshot 是唯一落库写手，
+    # 调度只读 DB + 评估。旧回写会在评估时盖新时间戳，使 disk_checked_at 失去判龄意义。
 
     log_msg = (
         f"[disk-check] container_id={container.id} name={getattr(container, 'name', '?')} "
@@ -423,10 +424,11 @@ def _handle_freeze_escalation(
 
 
 def _clean_mount_immediately(container) -> None:
-    """冻结升级后立刻清理宿主机 mount 目录。
+    """冻结升级删除后立刻清理宿主机 mount 目录（尽力而为）。
 
-    记录 MountCleanup（escalation=True, cleaned_at=now），
-    并向 NodeKernel 发送清理请求。
+    ensure MountCleanup 记录（escalation=True，不预置 cleaned_at——清理成功由统一
+    逻辑 mark_cleaned），随后动作委托 container_module.mount_cleanup.clean_mount_path
+    （幂等 / Node 请求 / 记录清理 / op-log 一份内聚）。
     """
     bind_mount = getattr(container, 'bind_mount_path', None)
     if not bind_mount:
@@ -434,10 +436,11 @@ def _clean_mount_immediately(container) -> None:
                     getattr(container, 'id', '?'))
         return
 
-    try:
-        from ..repositories import container_mount_cleanup_repo
-        from datetime import datetime as dt
+    from ..repositories import container_mount_cleanup_repo
+    from ..services.container_module.mount_cleanup import clean_mount_path
 
+    mount_cleanup_id = None
+    try:
         with session_scope() as session:
             existing = container_mount_cleanup_repo.get_latest_for_container(
                 container.id,
@@ -445,30 +448,28 @@ def _clean_mount_immediately(container) -> None:
                 session=session,
             )
             if existing is not None:
-                container_mount_cleanup_repo.mark_cleaned(existing.id, escalation=True, session=session)
+                mount_cleanup_id = existing.id
             else:
-                container_mount_cleanup_repo.insert(
+                inserted = container_mount_cleanup_repo.insert(
                     container_id=container.id,
                     container_name=container.name,
                     machine_id=container.machine_id,
                     mount_path=bind_mount,
                     escalation=True,
-                    removed_at=dt.utcnow(),
-                    cleaned_at=dt.utcnow(),
+                    removed_at=datetime.utcnow(),
                     session=session,
                 )
+                mount_cleanup_id = inserted.id
     except Exception as e:
         logger.warning("[disk-check] escalation: failed to record mount cleanup for %s: %s", container.id, e)
+        return
 
     try:
-        with session_scope(commit=False) as session:
-            machine_ip = machine_repo.get_machine_ip_by_id(container.machine_id, session=session)
-        url = container_tasks.get_full_url(machine_ip, "/clean_mount")
-        payload = {"config": {"mount_path": bind_mount}}
-        res = container_tasks.send(url, payload, timeout=10.0)
-        logger.debug("[disk-check] escalation mount cleanup for container %s path=%s: %s",
-                     container.id, bind_mount, res)
+        clean_mount_path(mount_cleanup_id, trigger="disk_escalation", escalation=True)
+        logger.debug("[disk-check] escalation mount cleanup done for container %s path=%s",
+                     container.id, bind_mount)
     except Exception as e:
+        # 尽力而为：失败留 escalation 记录（不再自动重试），供管理面可见
         logger.error("[disk-check] escalation mount cleanup failed for container %s path=%s: %s",
                      container.id, bind_mount, e)
 
@@ -481,3 +482,42 @@ def _get_limit_gb(container) -> float:
     except Exception:
         max_disk_size_gb = 0
     return float(max_disk_size_gb)
+
+
+def start_container_disk_check_scheduler(interval_seconds: int | None = None) -> threading.Thread | None:
+    """启动后台定期磁盘检测任务（由 create_app 背景任务统一入口调用）。
+
+    仅在 settings: container.disk_check_enabled=true 时启动；先跑一次再按 interval 循环，
+    循环异常单次捕获不杀线程；daemon 线程随进程退出。
+    """
+    if not settings_tasks.get_container_disk_check_enabled():
+        return None
+    if interval_seconds is None:
+        interval_seconds = settings_tasks.get_container_disk_check_interval_seconds()
+
+    key = "container_disk_check_scheduler"
+    existing = _SCHEDULER_STATE.get(key)
+    if existing and isinstance(existing, dict) and existing.get("thread"):
+        t = existing["thread"]
+        if t.is_alive():
+            return t
+
+    stop_event = threading.Event()
+
+    def _worker():
+        check_all_containers_disk_usage_once()
+
+        while not stop_event.is_set():
+            time.sleep(interval_seconds)
+            if stop_event.is_set():
+                break
+            try:
+                check_all_containers_disk_usage_once()
+            except Exception as e:
+                logger.error("[disk-check] periodic run failed: %s", e)
+
+    t = threading.Thread(target=_worker, daemon=True, name="container-disk-check")
+    t.start()
+
+    _SCHEDULER_STATE[key] = {"thread": t, "stop_event": stop_event}
+    return t

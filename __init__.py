@@ -220,9 +220,20 @@ def _should_start_background_tasks() -> bool:
 
 
 def _start_background_tasks() -> None:
-    """Start Ctrl background tasks after their DB access is migrated."""
+    """Start Ctrl background tasks after their DB access is migrated.
 
-    return None
+    三个调度器各自按 settings 自门控（disk / mount 有 enabled 开关，未启用时
+    start_* 返回 None 不启动）；任务只做纯 DB 扫描 + 到期集合的低频动作，
+    不发起逐容器探测请求（mount 清理带机器可达 gate）。
+    """
+
+    from .schedulers.container_cleanup_task import start_container_cleanup_scheduler
+    from .schedulers.container_disk_check_task import start_container_disk_check_scheduler
+    from .schedulers.container_mount_cleanup_task import start_mount_cleanup_scheduler
+
+    start_container_cleanup_scheduler()
+    start_container_disk_check_scheduler()
+    start_mount_cleanup_scheduler()
 
 
 def create_app(config: str | None = None, overrides: dict | None = None) -> FastAPI:

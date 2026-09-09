@@ -17,6 +17,19 @@ _MONTH_ABBR_TO_NUM = {
 }
 
 
+def _container_log_detail(container_name: str | None, **extra) -> dict:
+    """op-log detail 标准骨架：name/container_name/original_container_name 三键统一。"""
+
+    name = container_name or "?"
+    detail = {
+        "name": name,
+        "container_name": name,
+        "original_container_name": name,
+    }
+    detail.update(extra)
+    return detail
+
+
 def _parse_last_ssh_time(raw: str | None) -> datetime | None:
     """
     尝试把 Node 返回的 last ssh 时间解析为 datetime。

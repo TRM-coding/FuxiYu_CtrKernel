@@ -11,6 +11,7 @@
 from datetime import datetime, timedelta
 
 from sqlalchemy import select
+from ...constant import ContainerStatus, MachineStatus
 from ...models.containers import Container
 from ...models.container_disk_freeze_state import ContainerDiskFreezeState
 from ...repositories import (
@@ -19,6 +20,7 @@ from ...repositories import (
     long_term_container_repo,
 )
 from ...schedulers import container_disk_check_task
+from ...services.container_module import mount_cleanup as mount_cleanup_mod
 from ...services.container_module import node_comms
 from ..factories import create_container_graph
 
@@ -393,16 +395,23 @@ class TestEvaluateLimitsNonLongTerm:
 
 
 # ---------------------------------------------------------------------------
-# _evaluate_limits — 磁盘用量持久化（两类容器均持久化）
+# _evaluate_limits — 评估不写库（单写手回归）
 # ---------------------------------------------------------------------------
 
-class TestEvaluateLimitsPersistence:
-    """不论是否持久容器，磁盘用量都应写入 DB。"""
+class TestEvaluateLimitsDoesNotWriteDb:
+    """评估是纯读动作：disk_* / disk_checked_at 只由 WSS apply 帧写入（单写手）。
+    _evaluate_limits 不得回写或刷新时间戳——旧回写在评估时盖新章，
+    会让 disk_checked_at 失去判龄意义（无法区分数据新鲜与否）。"""
 
-    def test_long_term_container_persists_disk_usage(self, app, db_session, monkeypatch):
-        """持久容器：磁盘快照写入 DB。"""
+    def test_long_term_evaluate_does_not_clobber_db_fields(self, app, db_session, monkeypatch):
+        """持久容器：评估后 DB 磁盘字段与 checked_at 保持原值。"""
         _root, machine, container = create_container_graph()
         long_term_container_repo.add(container.id, session=db_session)
+        checked_at = datetime.utcnow() - timedelta(hours=1)
+        container.disk_overlay_rw_bytes = 11
+        container.disk_bind_mount_bytes = 22
+        container.disk_total_bytes = 33
+        container.disk_checked_at = checked_at
         db_session.commit()
 
         monkeypatch.setattr(
@@ -420,14 +429,20 @@ class TestEvaluateLimitsPersistence:
         container_disk_check_task._evaluate_limits(container, usage)
         db_session.expire_all()
         c = db_session.get(Container, container.id)
-        assert c.disk_total_bytes == usage["container"]["total_bytes"]
-        assert c.disk_overlay_rw_bytes == usage["container"]["overlay_rw_bytes"]
-        assert c.disk_bind_mount_bytes == usage["container"]["bind_mount_bytes"]
-        assert c.disk_checked_at is not None
+        assert c.disk_total_bytes == 33
+        assert c.disk_overlay_rw_bytes == 11
+        assert c.disk_bind_mount_bytes == 22
+        assert c.disk_checked_at == checked_at
 
-    def test_non_long_term_container_persists_disk_usage(self, app, db_session, monkeypatch):
-        """非持久容器：磁盘快照同样写入 DB。"""
+    def test_non_long_term_evaluate_does_not_clobber_db_fields(self, app, db_session, monkeypatch):
+        """非持久容器：同样不写库。"""
         _root, machine, container = create_container_graph()
+        checked_at = datetime.utcnow() - timedelta(hours=1)
+        container.disk_overlay_rw_bytes = 11
+        container.disk_bind_mount_bytes = 22
+        container.disk_total_bytes = 33
+        container.disk_checked_at = checked_at
+        db_session.commit()
 
         monkeypatch.setattr(
             container_disk_check_task, "_handle_soft_limit",
@@ -444,8 +459,56 @@ class TestEvaluateLimitsPersistence:
         container_disk_check_task._evaluate_limits(container, usage)
         db_session.expire_all()
         c = db_session.get(Container, container.id)
-        assert c.disk_total_bytes == usage["container"]["total_bytes"]
-        assert c.disk_checked_at is not None
+        assert c.disk_total_bytes == 33
+        assert c.disk_checked_at == checked_at
+
+
+# ---------------------------------------------------------------------------
+# _evaluate_limits — 机器级 gate（不可达 / 维护中跳过评估）
+# ---------------------------------------------------------------------------
+
+class TestEvaluateLimitsMachineGate:
+    """机器离线或维护中 → 评估整体跳过：不触发 handler、不动冻结状态机。"""
+
+    def _reachable_long_term(self, db_session, monkeypatch):
+        _root, machine, container = create_container_graph()
+        long_term_container_repo.add(container.id, session=db_session)
+        db_session.commit()
+        monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_check_enabled", lambda: True)
+        monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_response_enabled", lambda: True)
+        return machine, container
+
+    def test_offline_machine_skips_evaluate(self, app, db_session, monkeypatch):
+        """机器 OFFLINE：超 hard limit 也不触发 handler / 冻结 upsert。"""
+        machine, container = self._reachable_long_term(db_session, monkeypatch)
+        machine.machine_status = MachineStatus.OFFLINE
+        db_session.commit()
+
+        calls = []
+        monkeypatch.setattr(container_disk_check_task, "_handle_hard_limit",
+                            lambda c, u, a: calls.append(c.id))
+
+        usage = _usage_exceeding_hard_limit()
+        container_disk_check_task._evaluate_limits(container, usage)
+
+        assert calls == []
+        db_session.expire_all()
+        assert container_disk_freeze_state_repo.get(container.id, session=db_session) is None
+
+    def test_maintenance_machine_skips_evaluate(self, app, db_session, monkeypatch):
+        """维护中（is_maintenance，machine_status 仍 ONLINE）：同样跳过。"""
+        machine, container = self._reachable_long_term(db_session, monkeypatch)
+        machine.is_maintenance = True
+        db_session.commit()
+
+        calls = []
+        monkeypatch.setattr(container_disk_check_task, "_handle_hard_limit",
+                            lambda c, u, a: calls.append(c.id))
+
+        usage = _usage_exceeding_hard_limit()
+        container_disk_check_task._evaluate_limits(container, usage)
+
+        assert calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -1307,11 +1370,13 @@ class TestFreezeObservability:
 # ============================================================================
 
 class TestBindMountPathPersistence:
-    """bind_mount_path 在磁盘检测时持久化到 Container。"""
+    """bind_mount_path 只由 WSS apply 帧落库；磁盘评估不写 Container（单写手回归）。"""
 
-    def test_bind_mount_path_persisted_during_disk_check(self, app, db_session, monkeypatch):
-        """磁盘检测时 NodeKernel 返回 bind_mount_path → Container 表记录更新。"""
+    def test_bind_mount_path_not_written_during_disk_check(self, app, db_session, monkeypatch):
+        """磁盘评估携带 bind_mount_path → Container 表不被 evaluate 改写。"""
         _root, machine, container = create_container_graph()
+        container.bind_mount_path = "/home/alice/containers/from_wss/"
+        db_session.commit()
         monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_check_enabled", lambda: True)
 
         mount_path = "/home/alice/containers/test_mount/"
@@ -1321,7 +1386,7 @@ class TestBindMountPathPersistence:
         container_disk_check_task._evaluate_limits(container, usage)
         db_session.expire_all()
         c = db_session.get(Container, container.id)
-        assert c.bind_mount_path == mount_path
+        assert c.bind_mount_path == "/home/alice/containers/from_wss/"
 
     def test_bind_mount_path_none_persisted(self, app, db_session, monkeypatch):
         """NodeKernel 不返回 bind_mount_path → 不报错，正常跳过。"""
@@ -1358,7 +1423,7 @@ class TestEscalationMountCleanup:
         )
         # mock send to avoid real HTTP
         monkeypatch.setattr(
-            container_disk_check_task.container_tasks, "send",
+            mount_cleanup_mod, "send",
             lambda url, payload, timeout: {"success": 1}
         )
         monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_check_enabled", lambda: True)
@@ -1397,7 +1462,7 @@ class TestEscalationMountCleanup:
 
         sent_calls = []
         monkeypatch.setattr(
-            container_disk_check_task.container_tasks, "send",
+            mount_cleanup_mod, "send",
             lambda url, payload, timeout: sent_calls.append(url) or {"success": 1}
         )
         monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_check_enabled", lambda: True)
@@ -1431,3 +1496,172 @@ class TestEscalationMountCleanup:
         container_disk_check_task._handle_freeze_escalation(
             container, usage, app, days_frozen=8
         )
+
+
+# ============================================================================
+# 冻结宽恕状态机 — 时序模拟（可控时钟）
+# ============================================================================
+
+import datetime as _real_dt_mod
+
+_CLOCK_STATE: dict = {"clock": None}
+
+
+class _ClockedDatetime(_real_dt_mod.datetime):
+    """datetime 子类：utcnow 由活动时钟供给（datetime 类属性不可变，不能直接 patch，
+    故以子类重绑定各消费模块的 datetime 引用）。"""
+
+    @classmethod
+    def utcnow(cls):
+        c = _CLOCK_STATE["clock"]
+        return c.now if c is not None else super().utcnow()
+
+
+class _FakeDtModule:
+    """container_disk_freeze_state_repo 的 dt 命名空间替身（repo 为 import datetime as dt）。"""
+
+    datetime = _ClockedDatetime
+    timedelta = _real_dt_mod.timedelta
+
+
+class _Clock:
+    """测试可控时钟：激活后评估层与 freeze 仓储共享同一时间源，可精确推进验证跨轮状态推进。"""
+
+    def __init__(self):
+        self.now = _real_dt_mod.datetime.utcnow()
+
+    def advance(self, *, days=0, hours=0, minutes=0):
+        self.now += timedelta(days=days, hours=hours, minutes=minutes)
+
+
+class TestFreezeStateMachineTimeline:
+    """冻结宽恕状态机的时序行为模拟。
+
+    验证口径（红线独立、宽限是暂停键）：
+    - 首次超限落 first_frozen_at，后续轮次不刷新锚点（幂等）
+    - 宽限(grace)内完全不动作；宽限只是推迟动作时点，不重置红线
+    - days_frozen 由 first_frozen_at 按墙钟推导，跨轮/跨宽限独立推进
+    - 达 escalation_days 才 remove；paused 状态不豁免
+    - 容量回落(reset)赦免删除记录；再次超限红线重新起算
+    """
+
+    def _setup(self, db_session, monkeypatch, clock):
+        _root, machine, container = create_container_graph()
+        long_term_container_repo.add(container.id, session=db_session)
+        db_session.commit()
+
+        monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_check_enabled", lambda: True)
+        monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_response_enabled", lambda: True)
+        monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_soft_limit_percent", lambda: 80)
+        monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_hard_limit_percent", lambda: 100)
+        monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_freeze_reset_percent", lambda: 95)
+        monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_freeze_escalation_days", lambda: 7)
+        monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_freeze_grace_days", lambda: 3)
+        # 邮件/Node 动作全部替换为记录器：本测试只验证状态机时序
+        monkeypatch.setattr(container_disk_check_task, "_DISK_CHECK_CACHE", {})
+        monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail.send", lambda **kw: {"ok": False})
+        pauses = []
+        removes = []
+        monkeypatch.setattr(container_disk_check_task.container_tasks, "pause_container",
+                            lambda cid, *a, **k: pauses.append(cid))
+        monkeypatch.setattr(container_disk_check_task.container_tasks, "remove_container",
+                            lambda cid, *a, **k: removes.append(cid))
+        monkeypatch.setattr(mount_cleanup_mod, "send",
+                            lambda *a, **k: {"success": 1})
+        # 激活可控时钟：重绑定 task 与 freeze 仓储的 datetime 引用（datetime 类属性不可变）
+        monkeypatch.setitem(_CLOCK_STATE, "clock", clock)
+        monkeypatch.setattr(container_disk_check_task, "datetime", _ClockedDatetime)
+        monkeypatch.setattr(container_disk_freeze_state_repo, "dt", _FakeDtModule())
+        return machine, container, pauses, removes
+
+    @staticmethod
+    def _simulate_node_paused(db_session, container):
+        """pause 后 Node 快照(≤5s)把容器状态推为 paused——时序测试手动推进。"""
+        container.container_status = ContainerStatus.PAUSED
+        db_session.commit()
+
+    def test_first_hard_limit_records_anchor_and_pauses(self, app, db_session, monkeypatch):
+        """T0 超 hard：落 first_frozen_at 并 pause；后续轮次锚点不刷新。"""
+        clock = _Clock()
+        _machine, container, pauses, removes = self._setup(db_session, monkeypatch, clock)
+
+        container_disk_check_task._evaluate_limits(container, _usage_exceeding_hard_limit())
+        fs = container_disk_freeze_state_repo.get(container.id, session=db_session)
+        assert fs is not None and fs.first_frozen_at == clock.now
+        assert len(pauses) == 1
+        assert removes == []
+
+        # pause 已生效（Node 快照推回 paused）；仍超限继续评估
+        self._simulate_node_paused(db_session, container)
+        clock.advance(hours=1)
+        container_disk_check_task._evaluate_limits(container, _usage_exceeding_hard_limit())
+        db_session.expire_all()
+        fs2 = container_disk_freeze_state_repo.get(container.id, session=db_session)
+        assert fs2 is not None
+        assert fs2.first_frozen_at == fs.first_frozen_at  # 锚点幂等，不因每轮重置
+        assert len(pauses) == 1  # paused 状态不再重复 pause
+        assert removes == []  # days=0，远未到红线
+
+    def test_grace_pauses_actions_but_anchor_holds_then_escalation_fires(self, app, db_session, monkeypatch):
+        """宽限=暂停键：宽限内零动作；过期后按旧锚点推进；红线(7d)到即 remove。"""
+        clock = _Clock()
+        _machine, container, pauses, removes = self._setup(db_session, monkeypatch, clock)
+
+        # T0：首次超限 → 锚点 + pause
+        container_disk_check_task._evaluate_limits(container, _usage_exceeding_hard_limit())
+        self._simulate_node_paused(db_session, container)
+        anchor = container_disk_freeze_state_repo.get(container.id, session=db_session).first_frozen_at
+
+        # 管理员 unpause 路径等价：重开 3 天宽限（unpause_container 成功即 set_grace）
+        assert container_disk_freeze_state_repo.set_grace(container.id, 3, session=db_session)
+        db_session.commit()
+
+        # T0+1d：宽限期内 → 完全不动作（即使仍 hard）
+        clock.advance(days=1)
+        container_disk_check_task._evaluate_limits(container, _usage_exceeding_hard_limit())
+        db_session.expire_all()
+        assert removes == []
+        assert len(pauses) == 1  # 无新 pause
+        fs = container_disk_freeze_state_repo.get(container.id, session=db_session)
+        assert fs.grace_until is not None
+        assert fs.first_frozen_at == anchor  # 宽限不重置红线锚点
+
+        # T0+4d：宽限过期、days_frozen=4 < 7 → 仍只停损不删除
+        clock.advance(days=3)
+        container_disk_check_task._evaluate_limits(container, _usage_exceeding_hard_limit())
+        db_session.expire_all()
+        assert removes == []
+        assert len(pauses) == 1  # paused 状态跳过重复 pause
+
+        # T0+8d：days_frozen=8 ≥ 7 → 红线触发 remove（paused 不豁免）
+        clock.advance(days=4)
+        container_disk_check_task._evaluate_limits(container, _usage_exceeding_hard_limit())
+        assert removes == [container.id]
+        db_session.expire_all()
+        fs_last = container_disk_freeze_state_repo.get(container.id, session=db_session)
+        assert fs_last.first_frozen_at == anchor  # 全程锚点未动，红线按墙钟独立走完
+
+    def test_reset_after_reclaim_restarts_anchor(self, app, db_session, monkeypatch):
+        """容量回落赦免(reset)删除记录；再次超限红线重新起算（新锚点）。"""
+        clock = _Clock()
+        _machine, container, pauses, removes = self._setup(db_session, monkeypatch, clock)
+
+        # T0：首次冻结
+        container_disk_check_task._evaluate_limits(container, _usage_exceeding_hard_limit())
+        first_anchor = container_disk_freeze_state_repo.get(container.id, session=db_session).first_frozen_at
+        assert first_anchor == clock.now
+
+        # T0+2d：用户清盘，用量回落 < reset_pct → 赦免
+        clock.advance(days=2)
+        container_disk_check_task._evaluate_limits(container, _usage_below_reset())
+        db_session.expire_all()
+        assert container_disk_freeze_state_repo.get(container.id, session=db_session) is None
+
+        # T0+3d：再次超限 → 新锚点重新起算（红线从头走，且非旧的 T0）
+        self._simulate_node_paused(db_session, container)  # 此前 pause 的模拟状态
+        clock.advance(days=1)
+        container_disk_check_task._evaluate_limits(container, _usage_exceeding_hard_limit())
+        db_session.expire_all()
+        fs = container_disk_freeze_state_repo.get(container.id, session=db_session)
+        assert fs is not None
+        assert fs.first_frozen_at == clock.now == first_anchor + timedelta(days=3)
