@@ -313,9 +313,14 @@ def remove_container(container_id:int, operator_user_id:int|None=None)->bool:
         raise Exception(f"远程调用失败: {res['error']}")
     
     # 记录操作日志（删前写，保留容器名称等信息）
+    container_name_for_log = container_name
+    bind_mount_for_log = getattr(container_obj, 'bind_mount_path', None)
     try:
         with session_scope(commit=False) as session:
             container = containers_repo.get_by_id(container_id, session=session)
+            if container:
+                container_name_for_log = getattr(container, 'name', None) or container_name_for_log
+                bind_mount_for_log = getattr(container, 'bind_mount_path', None)
     except Exception:
         container = None
     write_op_log(success=True,
@@ -324,7 +329,9 @@ def remove_container(container_id:int, operator_user_id:int|None=None)->bool:
         target_type="container",
         target_id=container_id,
         detail={
-            "name": getattr(container, 'name', '?') if container else '?',
+            "name": container_name_for_log,
+            "original_container_name": container_name_for_log,
+            "mount_path": bind_mount_for_log,
             "machine_id": machine_id,
             "trigger": "api" if operator_user_id else "cleanup",
         },

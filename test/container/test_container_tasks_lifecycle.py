@@ -200,6 +200,9 @@ def test_remove_container_success_deletes_bindings_and_container(
 ):
     root, _machine, container = container_graph
     container_id = container.id
+    container_name = container.name
+    container.bind_mount_path = f"/home/{root.username}/containers/{container.name}_data"
+    db_session.commit()
     mock_node_send(node_response)
 
     assert container_tasks.remove_container(container_id, operator_user_id=root.id) is True
@@ -215,6 +218,9 @@ def test_remove_container_success_deletes_bindings_and_container(
     assert len(logs) == 1
     assert logs[0].operation == "delete_container"
     assert logs[0].detail.get("trigger") == "api"
+    assert logs[0].detail.get("name") == container_name
+    assert logs[0].detail.get("original_container_name") == container_name
+    assert logs[0].detail.get("mount_path") == f"/home/{root.username}/containers/{container_name}_data"
 
 
 def test_remove_container_node_failed_raises_and_keeps_local_record(

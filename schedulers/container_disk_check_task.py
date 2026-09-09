@@ -51,11 +51,20 @@ def _usage_from_db(container) -> dict | None:
     total = getattr(container, 'disk_total_bytes', None)
     if total is None:
         return None
+    bind_mount_path = getattr(container, 'bind_mount_path', None)
+    bind_mount = getattr(container, 'disk_bind_mount_bytes', None)
+    if bind_mount_path and bind_mount is None:
+        logger.warning(
+            "[disk-check] skip container_id=%s: incomplete bind mount disk usage path=%s",
+            getattr(container, 'id', '?'),
+            bind_mount_path,
+        )
+        return None
     return {"container": {
         "overlay_rw_bytes": getattr(container, 'disk_overlay_rw_bytes', None),
-        "bind_mount_bytes": getattr(container, 'disk_bind_mount_bytes', None),
+        "bind_mount_bytes": bind_mount,
         "total_bytes": total,
-        "bind_mount_path": getattr(container, 'bind_mount_path', None),
+        "bind_mount_path": bind_mount_path,
     }}
 
 
@@ -68,7 +77,16 @@ def _evaluate_limits(container, usage: dict) -> None:
     container_data = usage.get("container", {})
     total_bytes = container_data.get("total_bytes", 0)
     if total_bytes is None:
-        total_bytes = 0
+        logger.warning("[disk-check] skip container_id=%s: total_bytes missing", container.id)
+        return
+    bind_mount_path = container_data.get("bind_mount_path")
+    if bind_mount_path and container_data.get("bind_mount_bytes") is None:
+        logger.warning(
+            "[disk-check] skip container_id=%s: bind_mount_bytes missing for path=%s",
+            container.id,
+            bind_mount_path,
+        )
+        return
 
     # 限额：容器磁盘可用上限 = machine.max_disk_size_gb（管理员维护，语义收敛 2026-08）
     try:
@@ -203,13 +221,19 @@ def _handle_soft_limit(container, usage: dict, cache: dict[str, float] | None = 
         f"请及时联系管理员。并清理不必要的文件，避免达到上限后被冻结；\n"
         f"或转为短期容器（取消勾选长期容器）。\n"
     )
+    sent_any = False
     for email in emails:
         try:
-            send_mail(to=email, subject=subject, content=content)
-            logger.info("[disk-check] soft limit email sent to %s for container %s", email, container.id)
+            result = send_mail(to=email, subject=subject, content=content)
+            if result.get("ok"):
+                sent_any = True
+                logger.info("[disk-check] soft limit email sent to %s for container %s", email, container.id)
+            else:
+                logger.warning("[disk-check] soft limit email failed to %s: %s", email, result)
         except Exception as e:
             logger.warning("[disk-check] soft limit email failed to %s: %s", email, e)
-    last_sent[last_key] = now_ts
+    if sent_any:
+        last_sent[last_key] = now_ts
 
 
 def _handle_hard_limit(container, usage: dict, cache: dict[str, float] | None = None) -> None:
@@ -242,13 +266,19 @@ def _handle_hard_limit(container, usage: dict, cache: dict[str, float] | None = 
             f"\n容器已被冻结（docker pause）。\n"
             f"请及时清理不必要的文件；或转为短期容器（取消勾选长期容器）。\n"
         )
+        sent_any = False
         for e in emails:
             try:
-                send_mail(to=e, subject=subject, content=content)
-                logger.info("[disk-check] hard limit email sent to %s for container %s", e, container.id)
+                result = send_mail(to=e, subject=subject, content=content)
+                if result.get("ok"):
+                    sent_any = True
+                    logger.info("[disk-check] hard limit email sent to %s for container %s", e, container.id)
+                else:
+                    logger.warning("[disk-check] hard limit email failed to %s: %s", e, result)
             except Exception as ex:
                 logger.warning("[disk-check] hard limit email failed to %s: %s", e, ex)
-        last_sent[last_key] = now_ts
+        if sent_any:
+            last_sent[last_key] = now_ts
 
     # docker pause — 仅在线容器执行
     try:
@@ -356,13 +386,19 @@ def _handle_freeze_escalation(
                 f"已冻结天数: {days_frozen} 天\n"
                 f"\n容器已被清除。如有疑问请联系管理员。\n"
             )
+            sent_any = False
             for e in emails:
                 try:
-                    send_mail(to=e, subject=subject, content=content)
-                    logger.info("[disk-check] escalation email sent to %s for container %s", e, container.id)
+                    result = send_mail(to=e, subject=subject, content=content)
+                    if result.get("ok"):
+                        sent_any = True
+                        logger.info("[disk-check] escalation email sent to %s for container %s", e, container.id)
+                    else:
+                        logger.warning("[disk-check] escalation email failed to %s: %s", e, result)
                 except Exception as ex:
                     logger.warning("[disk-check] escalation email failed to %s: %s", e, ex)
-            last_sent[last_key] = now_ts
+            if sent_any:
+                last_sent[last_key] = now_ts
 
     # ── 删除容器 ──
     try:

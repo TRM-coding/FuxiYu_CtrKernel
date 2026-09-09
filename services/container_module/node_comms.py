@@ -844,12 +844,26 @@ def apply_disk_usage_snapshot(data: dict, machine_id: int | None = None) -> dict
                 if container is None:
                     skipped += 1
                     continue
+                total_bytes = usage.get("total_bytes")
+                bind_mount_path = usage.get("bind_mount_path")
+                bind_mount_bytes = usage.get("bind_mount_bytes")
+                if total_bytes is None or (bind_mount_path and bind_mount_bytes is None):
+                    logger.warning(
+                        "apply disk snapshot skipped incomplete measurement: machine_id=%s container=%s total=%s bind=%s path=%s",
+                        machine_id,
+                        name,
+                        total_bytes,
+                        bind_mount_bytes,
+                        bind_mount_path,
+                    )
+                    skipped += 1
+                    continue
                 containers_repo.update_container(
                     container.id,
                     disk_overlay_rw_bytes=usage.get("overlay_rw_bytes"),
-                    disk_bind_mount_bytes=usage.get("bind_mount_bytes"),
-                    disk_total_bytes=usage.get("total_bytes"),
-                    bind_mount_path=usage.get("bind_mount_path"),
+                    disk_bind_mount_bytes=bind_mount_bytes,
+                    disk_total_bytes=total_bytes,
+                    bind_mount_path=bind_mount_path,
                     disk_checked_at=datetime.datetime.utcnow(),
                     session=session,
                 )

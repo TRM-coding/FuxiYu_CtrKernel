@@ -19,7 +19,162 @@ from ...repositories import (
     long_term_container_repo,
 )
 from ...schedulers import container_disk_check_task
+from ...services.container_module import node_comms
 from ..factories import create_container_graph
+
+
+class TestDiskUsageSnapshotCompleteness:
+    def test_apply_disk_usage_snapshot_skips_missing_total_without_clobbering_existing_fields(self, app, db_session):
+        _root, machine, container = create_container_graph()
+        checked_at = datetime.utcnow() - timedelta(hours=1)
+        container.disk_overlay_rw_bytes = 11
+        container.disk_bind_mount_bytes = 22
+        container.disk_total_bytes = 33
+        container.bind_mount_path = "/home/u/containers/existing/"
+        container.disk_checked_at = checked_at
+        db_session.commit()
+
+        result = node_comms.apply_disk_usage_snapshot(
+            {
+                "containers": {
+                    container.name: {
+                        "overlay_rw_bytes": 100,
+                        "bind_mount_bytes": 200,
+                        "bind_mount_path": "/home/u/containers/new/",
+                    }
+                }
+            },
+            machine.id,
+        )
+
+        db_session.expire_all()
+        current = db_session.get(Container, container.id)
+        assert result == {"updated": 0, "skipped": 1}
+        assert current.disk_overlay_rw_bytes == 11
+        assert current.disk_bind_mount_bytes == 22
+        assert current.disk_total_bytes == 33
+        assert current.bind_mount_path == "/home/u/containers/existing/"
+        assert current.disk_checked_at == checked_at
+
+    def test_apply_disk_usage_snapshot_skips_missing_bind_bytes_when_bind_mount_exists(self, app, db_session):
+        _root, machine, container = create_container_graph()
+        container.disk_total_bytes = 33
+        container.disk_bind_mount_bytes = 22
+        container.bind_mount_path = "/home/u/containers/existing/"
+        db_session.commit()
+
+        result = node_comms.apply_disk_usage_snapshot(
+            {
+                "containers": {
+                    container.name: {
+                        "overlay_rw_bytes": 100,
+                        "total_bytes": 100,
+                        "bind_mount_path": "/home/u/containers/new/",
+                    }
+                }
+            },
+            machine.id,
+        )
+
+        db_session.expire_all()
+        current = db_session.get(Container, container.id)
+        assert result == {"updated": 0, "skipped": 1}
+        assert current.disk_total_bytes == 33
+        assert current.disk_bind_mount_bytes == 22
+        assert current.bind_mount_path == "/home/u/containers/existing/"
+
+    def test_usage_from_db_skips_incomplete_bind_mount_measurement(self, app, db_session):
+        _root, _machine, container = create_container_graph()
+        container.disk_total_bytes = 100
+        container.disk_bind_mount_bytes = None
+        container.bind_mount_path = "/home/u/containers/incomplete/"
+        db_session.commit()
+
+        assert container_disk_check_task._usage_from_db(container) is None
+
+    def test_evaluate_limits_skips_incomplete_bind_mount_measurement(self, app, db_session, monkeypatch):
+        _root, _machine, container = create_container_graph()
+        monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_check_enabled", lambda: True)
+
+        usage = _usage_below_soft_limit()
+        usage["container"]["bind_mount_path"] = "/home/u/containers/incomplete/"
+        usage["container"]["bind_mount_bytes"] = None
+
+        container_disk_check_task._evaluate_limits(container, usage)
+
+        db_session.expire_all()
+        current = db_session.get(Container, container.id)
+        assert current.disk_total_bytes is None
+        assert current.bind_mount_path is None
+
+
+class TestDiskCheckMailResultHandling:
+    def test_soft_limit_mail_failure_is_not_logged_as_sent(self, app, db_session, monkeypatch, caplog):
+        _root, _machine, container = create_container_graph()
+        monkeypatch.setattr(
+            container_disk_check_task.containers_repo,
+            "get_container_root_owner_emails",
+            lambda *args, **kwargs: ["owner@bjtu.edu.cn"],
+        )
+        monkeypatch.setattr(
+            "FuxiYu_CtrKernel.utils.mail.send",
+            lambda **kwargs: {"ok": False, "error": "smtp"},
+        )
+
+        cache = {}
+        caplog.set_level("INFO")
+        container_disk_check_task._handle_soft_limit(container, _usage_exceeding_soft_limit(), cache=cache)
+
+        assert "soft limit email failed" in caplog.text
+        assert "soft limit email sent" not in caplog.text
+        assert f"_soft_limit_last_sent_{container.id}" not in cache
+
+    def test_hard_limit_mail_failure_is_not_logged_as_sent(self, app, db_session, monkeypatch, caplog):
+        _root, _machine, container = create_container_graph()
+        monkeypatch.setattr(
+            container_disk_check_task.containers_repo,
+            "get_container_root_owner_emails",
+            lambda *args, **kwargs: ["owner@bjtu.edu.cn"],
+        )
+        monkeypatch.setattr(
+            "FuxiYu_CtrKernel.utils.mail.send",
+            lambda **kwargs: {"ok": False, "error": "smtp"},
+        )
+        monkeypatch.setattr(container_disk_check_task.container_tasks, "pause_container", lambda *args, **kwargs: True)
+
+        cache = {}
+        caplog.set_level("INFO")
+        container_disk_check_task._handle_hard_limit(container, _usage_exceeding_hard_limit(), cache=cache)
+
+        assert "hard limit email failed" in caplog.text
+        assert "hard limit email sent" not in caplog.text
+        assert f"_hard_limit_last_sent_{container.id}" not in cache
+
+    def test_escalation_mail_failure_is_not_logged_as_sent(self, app, db_session, monkeypatch, caplog):
+        _root, _machine, container = create_container_graph()
+        monkeypatch.setattr(
+            container_disk_check_task.containers_repo,
+            "get_container_root_owner_emails",
+            lambda *args, **kwargs: ["owner@bjtu.edu.cn"],
+        )
+        monkeypatch.setattr(
+            "FuxiYu_CtrKernel.utils.mail.send",
+            lambda **kwargs: {"ok": False, "error": "smtp"},
+        )
+        monkeypatch.setattr(container_disk_check_task.container_tasks, "remove_container", lambda *args, **kwargs: True)
+
+        cache = {}
+        caplog.set_level("INFO")
+        container_disk_check_task._handle_freeze_escalation(
+            container,
+            _usage_exceeding_hard_limit(),
+            cache=cache,
+            days_frozen=8,
+        )
+
+        assert "escalation email failed" in caplog.text
+        assert "escalation email sent" not in caplog.text
+        assert f"_escalation_last_sent_{container.id}" not in cache
 
 
 # ---------------------------------------------------------------------------
