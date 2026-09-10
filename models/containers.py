@@ -1,3 +1,5 @@
+from sqlalchemy import event
+
 from ..extensions import db
 from ..constant import *
 
@@ -8,6 +10,12 @@ class Container(db.Model):
     id: int = db.Column(db.Integer, primary_key=True)
     created_at = db.Column(db.DateTime, nullable=True)
     name: str = db.Column(db.String(120), nullable=False)
+    active_name: str = db.Column(db.String(120), nullable=True)
+    is_valid: bool = db.Column(db.Boolean, nullable=False, default=True, server_default=db.text("1"))
+    deleted_at = db.Column(db.DateTime, nullable=True)
+    deleted_trigger: str = db.Column(db.String(64), nullable=True)
+    deleted_reason: str = db.Column(db.String(255), nullable=True)
+    deleted_by_user_id: int = db.Column(db.Integer, nullable=True)
     image: str = db.Column(db.String(200), nullable=False)
     # 外键列：引用 machines.id
     machine_id: int = db.Column(
@@ -72,5 +80,12 @@ class Container(db.Model):
         return f"<Container {self.name} on machine={self.machine_id}>"
 
     __table_args__ = (
-        db.UniqueConstraint("name", "machine_id", name="uq_container_name_machine"),
+        db.UniqueConstraint("active_name", "machine_id", name="uq_container_active_name_machine"),
+        db.Index("idx_containers_is_valid", "is_valid"),
     )
+
+
+@event.listens_for(Container, "before_insert")
+@event.listens_for(Container, "before_update")
+def _sync_container_active_name(mapper, connection, target) -> None:
+    target.active_name = target.name if getattr(target, "is_valid", True) else None

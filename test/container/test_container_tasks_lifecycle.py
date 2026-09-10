@@ -192,7 +192,7 @@ def test_create_container_success_after_node_ack(
 
 
 @pytest.mark.parametrize("node_response", [NODE_REMOVE_SUCCESS, NODE_REMOVE_NOT_FOUND])
-def test_remove_container_success_deletes_bindings_and_container(
+def test_remove_container_success_marks_container_invalid_and_keeps_bindings(
     db_session,
     container_graph,
     mock_node_send,
@@ -209,9 +209,20 @@ def test_remove_container_success_deletes_bindings_and_container(
     assert container_tasks.remove_container(container_id, operator_user_id=root.id) is True
 
     db_session.expire_all()
-    assert db_session.get(Container, container_id) is None
+    assert containers_repo.get_by_id(container_id, session=db_session) is None
+    retained = containers_repo.get_by_id(container_id, session=db_session, include_invalid=True)
+    assert retained is not None
+    assert retained.is_valid is False
+    assert retained.active_name is None
+    assert retained.deleted_trigger == "api"
     with session_scope(commit=False) as session:
-        assert usercontainer_repo.get_container_bindings(container_id, session=session) == []
+        assert len(
+            usercontainer_repo.get_container_bindings(
+                container_id,
+                session=session,
+                include_invalid=True,
+            )
+        ) == 1
 
     # 审计：删除日志统一 DELETE_CONTAINER（来源由 trigger 区分，operator=系统时为 cleanup）
     from ...models.operation_log import OperationLog
@@ -222,6 +233,28 @@ def test_remove_container_success_deletes_bindings_and_container(
     assert logs[0].detail.get("name") == container_name
     assert logs[0].detail.get("original_container_name") == container_name
     assert logs[0].detail.get("mount_path") == f"/home/{root.username}/containers/{container_name}_data"
+
+
+def test_create_container_allows_reusing_name_after_soft_delete(
+    db_session,
+    container_graph,
+    container_info,
+    mock_node_send,
+):
+    root, machine, container = container_graph
+    container_info.NAME = container.name
+    mock_node_send(NODE_REMOVE_SUCCESS)
+    assert container_tasks.remove_container(container.id, operator_user_id=root.id) is True
+
+    mock_node_send(NODE_SUCCESS_TRUE)
+    assert container_tasks.Create_container(root.id, machine.id, container_info) is True
+
+    db_session.expire_all()
+    rows = db_session.scalars(
+        select(Container).where(Container.name == container_info.NAME, Container.machine_id == machine.id)
+    ).all()
+    assert len(rows) == 2
+    assert sum(1 for row in rows if row.is_valid) == 1
 
 
 def test_remove_container_node_failed_raises_and_keeps_local_record(

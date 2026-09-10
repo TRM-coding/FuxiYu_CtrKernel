@@ -67,6 +67,7 @@ class _DbNamespace:
         raise AttributeError(name)
 
     def create_all(self) -> None:
+        _enable_sqlite_strict_autoincrement()
         Base.metadata.create_all(bind=engine)
 
     def drop_all(self) -> None:
@@ -74,6 +75,19 @@ class _DbNamespace:
 
 
 db = _DbNamespace()
+
+
+def _enable_sqlite_strict_autoincrement() -> None:
+    for table in Base.metadata.tables.values():
+        columns = list(table.primary_key.columns)
+        if len(columns) != 1:
+            continue
+        try:
+            if columns[0].type.python_type is not int:
+                continue
+        except Exception:
+            continue
+        table.dialect_options["sqlite"]["autoincrement"] = True
 
 
 def configure_database(database_url: str) -> None:

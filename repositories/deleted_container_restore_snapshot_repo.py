@@ -14,23 +14,19 @@ def insert(
     *,
     session: Session,
     mount_cleanup_id: int | None = None,
-    mount_path: str | None = None,
     removed_trigger: str = "api",
-    operator_user_id: int | None = None,
     removed_at: dt.datetime | None = None,
+    mount_cleaned: bool = False,
 ) -> DeletedContainerRestoreSnapshot:
     row = DeletedContainerRestoreSnapshot(
         original_container_id=int(snapshot.get("container_id") or 0),
         container_name=str(snapshot.get("container_name") or ""),
         machine_id=snapshot.get("machine_id"),
-        machine_name=snapshot.get("machine_name"),
-        machine_ip=snapshot.get("machine_ip"),
-        mount_path=mount_path or snapshot.get("bind_mount_path"),
         mount_cleanup_id=mount_cleanup_id,
         removed_trigger=str(removed_trigger or "api"),
-        operator_user_id=operator_user_id,
         snapshot=snapshot,
         removed_at=removed_at or dt.datetime.utcnow(),
+        mount_cleaned=bool(mount_cleaned),
     )
     session.add(row)
     session.flush()
@@ -39,6 +35,47 @@ def insert(
 
 def get_by_id(record_id: int, *, session: Session) -> DeletedContainerRestoreSnapshot | None:
     return session.get(DeletedContainerRestoreSnapshot, int(record_id))
+
+
+def get_by_mount_cleanup_id(
+    mount_cleanup_id: int,
+    *,
+    session: Session,
+) -> DeletedContainerRestoreSnapshot | None:
+    stmt = (
+        select(DeletedContainerRestoreSnapshot)
+        .where(DeletedContainerRestoreSnapshot.mount_cleanup_id == int(mount_cleanup_id))
+        .order_by(DeletedContainerRestoreSnapshot.removed_at.desc(), DeletedContainerRestoreSnapshot.id.desc())
+        .limit(1)
+    )
+    return session.scalars(stmt).first()
+
+
+def list_pending_mount_cleanup(
+    cutoff: dt.datetime,
+    limit: int = 100,
+    *,
+    session: Session,
+) -> list[DeletedContainerRestoreSnapshot]:
+    stmt = (
+        select(DeletedContainerRestoreSnapshot)
+        .where(
+            DeletedContainerRestoreSnapshot.mount_cleaned.is_(False),
+            DeletedContainerRestoreSnapshot.removed_at < cutoff,
+        )
+        .order_by(DeletedContainerRestoreSnapshot.removed_at.asc(), DeletedContainerRestoreSnapshot.id.asc())
+        .limit(limit)
+    )
+    return list(session.scalars(stmt).all())
+
+
+def mark_mount_cleaned(record_id: int, *, session: Session) -> bool:
+    row = get_by_id(record_id, session=session)
+    if row is None:
+        return False
+    row.mount_cleaned = True
+    session.flush()
+    return True
 
 
 def list_records(

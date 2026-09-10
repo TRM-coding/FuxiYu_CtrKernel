@@ -10,7 +10,12 @@
 
 from ...constant import OperationType
 from ...extensions import session_scope
-from ...repositories import container_mount_cleanup_repo, machine_repo
+from ...repositories import (
+    container_mount_cleanup_repo,
+    containers_repo,
+    deleted_container_restore_snapshot_repo,
+    machine_repo,
+)
 from ..operation_log_tasks import write_operation_log as write_op_log
 from .exceptions import NodeServiceError, _raise_on_node_error
 from .node_comms import get_full_url, send
@@ -37,11 +42,49 @@ def clean_mount_path(
         cleanup = container_mount_cleanup_repo.get_by_id(int(mount_cleanup_id), session=session)
         if cleanup is None:
             raise NodeServiceError("mount cleanup record not found", reason="not_found")
+        deleted_id = getattr(cleanup, "deleted_id", None)
+        deleted = (
+            deleted_container_restore_snapshot_repo.get_by_id(deleted_id, session=session)
+            if deleted_id is not None
+            else deleted_container_restore_snapshot_repo.get_by_mount_cleanup_id(
+                cleanup.id,
+                session=session,
+            )
+        )
+        if deleted is not None and bool(getattr(deleted, "mount_cleaned", False)):
+            return {
+                "mount_cleanup_id": cleanup.id,
+                "deleted_id": deleted.id,
+                "cleaned": False,
+                "already_cleaned": True,
+            }
         if cleanup.cleaned_at is not None:
-            return {"mount_cleanup_id": cleanup.id, "cleaned": False, "already_cleaned": True}
-        machine_ip = machine_repo.get_machine_ip_by_id(cleanup.machine_id, session=session)
-        mount_path = cleanup.mount_path
-        container_name = cleanup.container_name
+            if deleted is not None:
+                # This read scope intentionally does not commit. Persist the
+                # legacy-state convergence in its own transaction.
+                with session_scope() as write_session:
+                    deleted_container_restore_snapshot_repo.mark_mount_cleaned(
+                        deleted.id,
+                        session=write_session,
+                    )
+            return {
+                "mount_cleanup_id": cleanup.id,
+                "deleted_id": deleted.id if deleted is not None else None,
+                "cleaned": False,
+                "already_cleaned": True,
+            }
+        container = containers_repo.get_by_id(
+            cleanup.container_id,
+            session=session,
+            include_invalid=True,
+        )
+        machine_id = getattr(container, "machine_id", None) or cleanup.machine_id
+        machine_ip = machine_repo.get_machine_ip_by_id(machine_id, session=session)
+        mount_path = (
+            getattr(container, "bind_mount_path", None)
+            or cleanup.mount_path
+        )
+        container_name = getattr(container, "name", None) or cleanup.container_name
 
     full_url = get_full_url(machine_ip, "/clean_mount")
     res = send(full_url, {"config": {"mount_path": mount_path}}, timeout=10.0)
@@ -55,6 +98,21 @@ def clean_mount_path(
         )
         if not ok:
             raise NodeServiceError("mount cleanup record not found", reason="not_found")
+        cleanup = container_mount_cleanup_repo.get_by_id(int(mount_cleanup_id), session=session)
+        deleted_id = getattr(cleanup, "deleted_id", None) if cleanup is not None else None
+        deleted = (
+            deleted_container_restore_snapshot_repo.get_by_id(deleted_id, session=session)
+            if deleted_id is not None
+            else deleted_container_restore_snapshot_repo.get_by_mount_cleanup_id(
+                int(mount_cleanup_id),
+                session=session,
+            )
+        )
+        if deleted is not None:
+            deleted_container_restore_snapshot_repo.mark_mount_cleaned(
+                deleted.id,
+                session=session,
+            )
 
     write_op_log(
         success=True,
@@ -66,6 +124,12 @@ def clean_mount_path(
             **_container_log_detail(container_name),
             "mount_path": mount_path,
             "trigger": trigger,
+            "deleted_id": deleted.id if deleted is not None else None,
         },
     )
-    return {"mount_cleanup_id": int(mount_cleanup_id), "cleaned": True, "already_cleaned": False}
+    return {
+        "mount_cleanup_id": int(mount_cleanup_id),
+        "deleted_id": deleted.id if deleted is not None else None,
+        "cleaned": True,
+        "already_cleaned": False,
+    }

@@ -13,6 +13,7 @@ def insert(
     container_name: str,
     machine_id: int,
     mount_path: str,
+    deleted_id: int | None = None,
     escalation: bool = False,
     removed_at: dt.datetime | None = None,
     cleaned_at: dt.datetime | None = None,
@@ -22,6 +23,7 @@ def insert(
     """插入一条 mount 清理追踪记录。"""
 
     row = ContainerMountCleanup(
+        deleted_id=int(deleted_id) if deleted_id is not None else None,
         container_id=int(container_id),
         container_name=str(container_name),
         machine_id=int(machine_id),
@@ -53,6 +55,16 @@ def list_pending(cutoff: dt.datetime, limit: int = 100, *, session: Session) -> 
 
 def get_by_id(record_id: int, *, session: Session) -> ContainerMountCleanup | None:
     return session.get(ContainerMountCleanup, int(record_id))
+
+
+def get_by_deleted_id(deleted_id: int, *, session: Session) -> ContainerMountCleanup | None:
+    stmt = (
+        select(ContainerMountCleanup)
+        .where(ContainerMountCleanup.deleted_id == int(deleted_id))
+        .order_by(ContainerMountCleanup.removed_at.desc(), ContainerMountCleanup.id.desc())
+        .limit(1)
+    )
+    return session.scalars(stmt).first()
 
 
 def get_latest_for_container(

@@ -196,7 +196,11 @@ def test_apply_container_status_snapshot_removes_db_container_missing_on_node(db
 
     db_session.expire_all()
     assert result["vanished"] == 1
-    assert db_session.get(Container, container_id) is None
+    assert containers_repo.get_by_id(container_id, session=db_session) is None
+    retained = containers_repo.get_by_id(container_id, session=db_session, include_invalid=True)
+    assert retained is not None
+    assert retained.is_valid is False
+    assert retained.deleted_trigger == "node_vanished"
 
 
 def test_apply_container_status_snapshot_ignores_empty_snapshot(db_session):
@@ -978,15 +982,20 @@ def test_handle_container_deleted_scoped_to_sending_machine(db_session):
     cb = create_container(machine=machine_b, name="shared_name")
     db_session.commit()
 
-    def _exists(cid):
+    def _valid(cid):
         with session_scope(commit=False) as session:
-            return session.get(Container, cid) is not None
+            return containers_repo.get_by_id(cid, session=session) is not None
+
+    def _retained(cid):
+        with session_scope(commit=False) as session:
+            return containers_repo.get_by_id(cid, session=session, include_invalid=True)
 
     # 机器 B 报 shared_name 消失 → 只应删机器 B 的容器
     node_comms._handle_container_deleted("shared_name", machine_b.id)
 
-    assert _exists(ca.id), "机器 A 的容器不应被机器 B 的 delete 帧删除"
-    assert not _exists(cb.id), "机器 B 自己的容器应被删除"
+    assert _valid(ca.id), "机器 A 的容器不应被机器 B 的 delete 帧删除"
+    assert not _valid(cb.id), "机器 B 自己的容器应被标记失效"
+    assert _retained(cb.id).is_valid is False
     vanished_log = db_session.query(OperationLog).filter_by(target_id=cb.id).one()
     assert vanished_log.detail["name"] == "shared_name"
     assert vanished_log.detail["container_name"] == "shared_name"
@@ -995,11 +1004,12 @@ def test_handle_container_deleted_scoped_to_sending_machine(db_session):
 
     # 无 machine_id → 拒绝删除（不降级全局查找）
     node_comms._handle_container_deleted("shared_name")
-    assert _exists(ca.id)
+    assert _valid(ca.id)
 
     # 机器 A 自己的 vanished 路径正常删除
     node_comms._handle_container_deleted("shared_name", machine_a.id)
-    assert not _exists(ca.id)
+    assert not _valid(ca.id)
+    assert _retained(ca.id).is_valid is False
 
 
 def test_internal_runtime_api_requires_shared_token(client, monkeypatch):

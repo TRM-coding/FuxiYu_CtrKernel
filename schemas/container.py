@@ -112,8 +112,8 @@ class DeletedContainerRecord(_CompatBaseModel):
     mount_cleanup_id: int | None = None
     removed_at: str | None = None
     removed_trigger: str | None = None
-    operator_user_id: int | None = None
     cleaned_at: str | None = None
+    mount_cleaned: bool = False
     cleanup_escalation: bool = False
     data_recoverable: bool = False
     snapshot: dict[str, Any] = Field(default_factory=dict)
@@ -127,10 +127,12 @@ class ListDeletedContainersResponse(_CompatBaseModel):
 
 
 class CleanDeletedContainerMountRequest(_CompatBaseModel):
-    mount_cleanup_id: int = Field(..., ge=1)
+    deleted_id: int | None = Field(default=None, ge=1)
+    mount_cleanup_id: int | None = Field(default=None, ge=1)
 
 
 class CleanDeletedContainerMountResponse(SuccessMessageResponse):
+    deleted_id: int | None = None
     mount_cleanup_id: int | None = None
 
 

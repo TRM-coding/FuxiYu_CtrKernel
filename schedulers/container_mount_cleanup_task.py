@@ -11,9 +11,13 @@ import logging
 from datetime import datetime, timedelta
 
 from ..extensions import session_scope
-from ..repositories import container_mount_cleanup_repo
+from ..repositories import container_mount_cleanup_repo, deleted_container_restore_snapshot_repo
 from ..services import settings_tasks
 from ..services.machine_tasks import get_machine_reachable
+from ..services.container_module.deleted_containers import (
+    ensure_deleted_record_for_cleanup,
+    ensure_mount_cleanup_record,
+)
 from ..services.container_module.mount_cleanup import clean_mount_path
 
 logger = logging.getLogger(__name__)
@@ -25,28 +29,55 @@ def run_mount_cleanup_once() -> None:
     after_days = settings_tasks.get_container_mount_cleanup_after_days()
 
     cutoff = datetime.utcnow() - timedelta(days=after_days)
+    with session_scope() as session:
+        for legacy in container_mount_cleanup_repo.list_pending(cutoff, session=session):
+            ensure_deleted_record_for_cleanup(legacy, session=session)
     with session_scope(commit=False) as session:
-        rows = container_mount_cleanup_repo.list_pending(cutoff, session=session)
+        rows = deleted_container_restore_snapshot_repo.list_pending_mount_cleanup(
+            cutoff,
+            session=session,
+        )
 
     if not rows:
         return
 
-    logger.info("[mount-cleanup] found %s pending mount(s) older than %s days", len(rows), after_days)
+    logger.info(
+        "[mount-cleanup] found %s pending deleted container(s) older than %s days",
+        len(rows),
+        after_days,
+    )
 
     for row in rows:
         try:
             # 机器级 gate：机器不可达不发清理请求（清理动作需要 Node 在场；
             # 否则每轮对宕机机器重复请求，等恢复后的下一轮再清）
-            if not get_machine_reachable(row.machine_id):
-                logger.info("[mount-cleanup] skip row %s: machine %s unreachable", row.id, row.machine_id)
+            with session_scope() as session:
+                deleted, cleanup = ensure_mount_cleanup_record(row.id, session=session)
+                if cleanup is None:
+                    logger.info("[mount-cleanup] deleted row %s has no mount path", row.id)
+                    continue
+                cleanup_id = cleanup.id
+                machine_id = cleanup.machine_id
+                container_name = cleanup.container_name
+                mount_path = cleanup.mount_path
+            if not get_machine_reachable(machine_id):
+                logger.info(
+                    "[mount-cleanup] skip deleted row %s: machine %s unreachable",
+                    row.id,
+                    machine_id,
+                )
                 continue
             # 动作逻辑统一在 container_module.mount_cleanup（幂等 / 请求 / mark_cleaned / op-log）
-            result = clean_mount_path(row.id, trigger="auto_mount_cleanup")
+            result = clean_mount_path(cleanup_id, trigger="auto_mount_cleanup")
             if result.get("cleaned"):
-                logger.info("[mount-cleanup] cleaned row %s: container=%s path=%s",
-                            row.id, row.container_name, row.mount_path)
+                logger.info(
+                    "[mount-cleanup] cleaned deleted row %s: container=%s path=%s",
+                    row.id,
+                    container_name,
+                    mount_path,
+                )
         except Exception as e:
-            logger.error("[mount-cleanup] failed row %s: %s", row.id, e)
+            logger.error("[mount-cleanup] failed deleted row %s: %s", row.id, e)
 
 
 def start_mount_cleanup_scheduler(interval_seconds: int | None = None) -> threading.Thread | None:

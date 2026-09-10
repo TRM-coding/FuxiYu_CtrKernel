@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from sqlalchemy import select
 
 from ...api import container_api, deps
@@ -6,7 +8,7 @@ from ...models.deleted_container_restore_snapshot import DeletedContainerRestore
 from ...repositories import container_mount_cleanup_repo, containers_repo, deleted_container_restore_snapshot_repo, usercontainer_repo
 from ...services import container_tasks
 from ...services.container_module import mount_cleanup as mount_cleanup_mod
-from ..factories import create_container_graph, create_machine, create_user
+from ..factories import create_container, create_container_graph, create_machine, create_user
 from .conftest import NODE_REMOVE_SUCCESS
 
 
@@ -25,6 +27,22 @@ def test_remove_container_records_deleted_snapshot_and_mount_cleanup(db_session,
     mock_node_send(NODE_REMOVE_SUCCESS)
 
     assert container_tasks.remove_container(container.id, operator_user_id=root.id) is True
+
+    db_session.expire_all()
+    assert containers_repo.get_by_id(container.id, session=db_session) is None
+    retained = containers_repo.get_by_id(container.id, session=db_session, include_invalid=True)
+    assert retained is not None
+    assert retained.is_valid is False
+    assert retained.active_name is None
+    assert retained.deleted_trigger == "api"
+    assert {
+        item["user_id"]
+        for item in usercontainer_repo.get_container_bindings(
+            container.id,
+            session=db_session,
+            include_invalid=True,
+        )
+    } == {root.id}
 
     cleanup_rows = db_session.scalars(select(ContainerMountCleanup)).all()
     snapshot_rows = db_session.scalars(select(DeletedContainerRestoreSnapshot)).all()
@@ -52,7 +70,7 @@ def test_list_deleted_containers_returns_cleanup_state(db_session, mock_node_sen
     assert record["data_recoverable"] is True
 
 
-def test_list_deleted_containers_includes_cleanup_only_records(db_session):
+def test_list_deleted_containers_ignores_cleanup_only_records(db_session):
     machine = create_machine(machine_ip="127.0.0.8")
     row = container_mount_cleanup_repo.insert(
         container_id=21,
@@ -65,11 +83,8 @@ def test_list_deleted_containers_includes_cleanup_only_records(db_session):
 
     result = container_tasks.list_deleted_containers(page_number=1, page_size=20)
 
-    assert result["total_number"] == 1
-    record = result["records"][0]
-    assert record["deleted_id"] == f"mount-{row.id}"
-    assert record["container_name"] == "legacy_deleted"
-    assert record["snapshot"] == {}
+    assert result["total_number"] == 0
+    assert result["records"] == []
 
 
 def test_clean_deleted_container_mount_calls_node_and_marks_cleaned(db_session, monkeypatch):
@@ -97,6 +112,37 @@ def test_clean_deleted_container_mount_calls_node_and_marks_cleaned(db_session, 
     assert sent[0][0].endswith("/clean_mount")
     assert sent[0][1]["config"]["mount_path"] == "/home/u/containers/deleted_c"
     assert db_session.get(ContainerMountCleanup, row.id).cleaned_at is not None
+
+
+def test_clean_mount_path_persists_deleted_state_when_cleanup_is_already_cleaned(
+    db_session,
+    monkeypatch,
+):
+    root, _machine, container = create_container_graph()
+    container.bind_mount_path = f"/home/{root.username}/containers/{container.name}_data"
+    db_session.commit()
+    monkeypatch.setattr(container_tasks, "send", lambda *args, **kwargs: {"success": 1})
+    container_tasks.remove_container(container.id, operator_user_id=root.id)
+    snapshot = db_session.scalars(select(DeletedContainerRestoreSnapshot)).one()
+    cleanup = db_session.get(ContainerMountCleanup, snapshot.mount_cleanup_id)
+    cleanup.cleaned_at = datetime.utcnow()
+    snapshot.mount_cleaned = False
+    db_session.commit()
+
+    sent = []
+    monkeypatch.setattr(
+        mount_cleanup_mod,
+        "send",
+        lambda *args, **kwargs: sent.append((args, kwargs)),
+    )
+
+    result = mount_cleanup_mod.clean_mount_path(cleanup.id)
+
+    db_session.expire_all()
+    refreshed = db_session.get(DeletedContainerRestoreSnapshot, snapshot.id)
+    assert result["already_cleaned"] is True
+    assert sent == []
+    assert refreshed.mount_cleaned is True
 
 
 def test_list_deleted_containers_api(client, monkeypatch):
@@ -150,7 +196,8 @@ def test_resurrect_container_reuses_snapshot_mount_and_restores_bindings(db_sess
 
     monkeypatch.setattr(container_tasks, "send", _send)
 
-    assert container_tasks.remove_container(container.id, operator_user_id=root.id) is True
+    original_container_id = container.id
+    assert container_tasks.remove_container(original_container_id, operator_user_id=root.id) is True
     snapshot = db_session.scalars(select(DeletedContainerRestoreSnapshot)).one()
     snapshot_id = snapshot.id
     cleanup_id = snapshot.mount_cleanup_id
@@ -158,6 +205,7 @@ def test_resurrect_container_reuses_snapshot_mount_and_restores_bindings(db_sess
     result = container_tasks.resurrect_container(snapshot_id, operator_user_id=root.id)
 
     db_session.expire_all()
+    assert result["container_id"] == original_container_id
     restored = containers_repo.get_by_id(result["container_id"], session=db_session)
     assert restored is not None
     assert restored.name == "restore_target"
@@ -175,6 +223,38 @@ def test_resurrect_container_reuses_snapshot_mount_and_restores_bindings(db_sess
     assert container_mount_cleanup_repo.get_by_id(cleanup_id, session=db_session) is None
 
 
+def test_resurrect_container_renames_when_original_name_is_reused(db_session, monkeypatch):
+    root, machine, container = create_container_graph()
+    container.name = "restore_taken"
+    container.bind_mount_path = f"/home/{root.username}/containers/{container.name}_data"
+    db_session.commit()
+    sent = []
+
+    def _send(url, payload, timeout=5.0):
+        sent.append({"url": url, "payload": payload, "timeout": timeout})
+        return {"success": 1}
+
+    monkeypatch.setattr(container_tasks, "send", _send)
+    original_container_id = container.id
+
+    assert container_tasks.remove_container(original_container_id, operator_user_id=root.id) is True
+    snapshot = db_session.scalars(select(DeletedContainerRestoreSnapshot)).one()
+    snapshot.removed_at = datetime(2026, 9, 3, 12, 0, 0)
+    db_session.commit()
+    conflict = create_container(machine=machine, name="restore_taken")
+
+    result = container_tasks.resurrect_container(snapshot.id, operator_user_id=root.id)
+
+    db_session.expire_all()
+    restored = containers_repo.get_by_id(result["container_id"], session=db_session)
+    assert result["container_id"] == original_container_id
+    assert restored.name == f"restore_taken_20260903_{original_container_id}"
+    assert restored.name.endswith(f"_{original_container_id}")
+    assert restored.name != conflict.name
+    create_call = [item for item in sent if item["url"].endswith("/create_container")][-1]
+    assert create_call["payload"]["config"]["name"] == restored.name
+
+
 def test_resurrect_container_rejects_cleaned_mount(db_session, monkeypatch):
     root, _machine, container = create_container_graph()
     container.bind_mount_path = f"/home/{root.username}/containers/{container.name}_data"
@@ -183,6 +263,7 @@ def test_resurrect_container_rejects_cleaned_mount(db_session, monkeypatch):
     container_tasks.remove_container(container.id, operator_user_id=root.id)
     snapshot = db_session.scalars(select(DeletedContainerRestoreSnapshot)).one()
     container_mount_cleanup_repo.mark_cleaned(snapshot.mount_cleanup_id, session=db_session)
+    snapshot.mount_cleaned = True
     db_session.commit()
 
     try:

@@ -6,6 +6,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from ..models.container_ssh_login import ContainerSSHLogin
+from ..models.containers import Container
 
 
 def get_by_machine_container(
@@ -13,21 +14,41 @@ def get_by_machine_container(
     container_id: int,
     *,
     session: Session,
+    include_invalid: bool = False,
 ) -> ContainerSSHLogin | None:
     stmt = select(ContainerSSHLogin).where(
         ContainerSSHLogin.machine_id == int(machine_id),
         ContainerSSHLogin.container_id == int(container_id),
     )
+    if not include_invalid:
+        stmt = stmt.join(Container, Container.id == ContainerSSHLogin.container_id).where(
+            Container.is_valid.is_(True)
+        )
     return session.scalars(stmt).first()
 
 
-def get_by_container(container_id: int, *, session: Session) -> ContainerSSHLogin | None:
+def get_by_container(
+    container_id: int,
+    *,
+    session: Session,
+    include_invalid: bool = False,
+) -> ContainerSSHLogin | None:
     stmt = select(ContainerSSHLogin).where(ContainerSSHLogin.container_id == int(container_id))
+    if not include_invalid:
+        stmt = stmt.join(Container, Container.id == ContainerSSHLogin.container_id).where(
+            Container.is_valid.is_(True)
+        )
     return session.scalars(stmt).first()
 
 
-def list_all(*, session: Session) -> list[ContainerSSHLogin]:
-    return list(session.scalars(select(ContainerSSHLogin)).all())
+def list_all(*, session: Session, include_invalid: bool = False) -> list[ContainerSSHLogin]:
+    stmt = select(ContainerSSHLogin)
+    if not include_invalid:
+        stmt = (
+            stmt.join(Container, Container.id == ContainerSSHLogin.container_id)
+            .where(Container.is_valid.is_(True))
+        )
+    return list(session.scalars(stmt).all())
 
 
 def upsert_last_ssh_login_time(
@@ -37,7 +58,7 @@ def upsert_last_ssh_login_time(
     *,
     session: Session,
 ) -> ContainerSSHLogin:
-    record = get_by_machine_container(machine_id, container_id, session=session)
+    record = get_by_machine_container(machine_id, container_id, session=session, include_invalid=True)
     if record is None:
         record = ContainerSSHLogin(machine_id=machine_id, container_id=container_id)
         session.add(record)

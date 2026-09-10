@@ -1143,7 +1143,6 @@ def _handle_container_deleted(container_name: str, machine_id: int | None = None
     machine_id 缺失或名字不属于该机器 → 拒绝，避免跨机器重名误删他人容器记录。
     """
     try:
-        from ...repositories.usercontainer_repo import remove_binding
         with session_scope() as session:
             if machine_id is None:
                 logger.warning("handle_node_ws delete: machine_id missing for %r (refuse)", container_name)
@@ -1157,12 +1156,15 @@ def _handle_container_deleted(container_name: str, machine_id: int | None = None
             container_tasks.record_deleted_container_artifacts(
                 container_id,
                 removed_trigger="node_vanished",
-                operator_user_id=None,
                 cleanup_context={"trigger": "node_vanished"},
                 session=session,
             )
-            remove_binding(0, container_id, all=True, session=session)
-            containers_repo.delete_container(container_id, session=session)
+            containers_repo.delete_container(
+                container_id,
+                deleted_trigger="node_vanished",
+                deleted_reason="vanished on node",
+                session=session,
+            )
         logger.warning("handle_node_ws delete: container %r (id=%s) removed from DB (vanished on node)",
                        container_name, container_id)
         # 审计：外部消失是删除的另一条路径（trigger=node_vanished），与 api/cleanup 一致入 op-log

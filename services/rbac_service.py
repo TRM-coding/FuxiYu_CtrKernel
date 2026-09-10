@@ -10,7 +10,7 @@ import logging
 import re
 
 from ..extensions import session_scope
-from ..repositories import auth_repo, machine_permission_repo, usercontainer_repo
+from ..repositories import auth_repo, containers_repo, machine_permission_repo, usercontainer_repo
 
 logger = logging.getLogger(__name__)
 
@@ -327,6 +327,10 @@ def user_has_resource(user_id: int, resource_type: str, resource_id: int) -> boo
     （角色层级 ROOT > ADMIN > COLLABORATOR，高角色满足低角色要求；operator 特权由 deps 显式表达）
     """
     try:
+        if resource_type == "container" or resource_type.startswith("container:"):
+            with session_scope(commit=False) as session:
+                if containers_repo.get_by_id(resource_id, session=session) is None:
+                    return False
         # 0) 资源通配：bypass_resource（全类型）或 {type}:manage（单类型管理面 = 该类型通配）
         if _has_entity_direct(user_id, "bypass_resource") or _has_resource_manage_direct(user_id, resource_type):
             return True

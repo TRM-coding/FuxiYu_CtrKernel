@@ -43,8 +43,13 @@ def get_max_memory_gb(machine_id: int, *, session: Session) -> int:
 # 基础 CRUD
 
 
-def get_by_id(container_id: int, *, session: Session) -> Container | None:
-    return session.get(Container, int(container_id))
+def get_by_id(container_id: int, *, session: Session, include_invalid: bool = False) -> Container | None:
+    container = session.get(Container, int(container_id))
+    if container is None:
+        return None
+    if not include_invalid and not bool(getattr(container, "is_valid", True)):
+        return None
+    return container
 
 
 def get_status(container_id: int, *, session: Session):
@@ -54,20 +59,35 @@ def get_status(container_id: int, *, session: Session):
     return getattr(container, "container_status", None) if container else None
 
 
-def get_id_by_name_machine(container_name: str, machine_id: int, *, session: Session) -> int | None:
-    container = session.scalars(
-        select(Container).where(
-            Container.name == container_name,
-            Container.machine_id == int(machine_id),
-        )
-    ).first()
+def get_id_by_name_machine(
+    container_name: str,
+    machine_id: int,
+    *,
+    session: Session,
+    include_invalid: bool = False,
+) -> int | None:
+    conditions = [
+        Container.name == container_name,
+        Container.machine_id == int(machine_id),
+    ]
+    if not include_invalid:
+        conditions.append(Container.is_valid.is_(True))
+    container = session.scalars(select(Container).where(*conditions)).first()
     return container.id if container else None
 
 
-def get_by_container_name(container_name: str, *, session: Session) -> Container | None:
+def get_by_container_name(
+    container_name: str,
+    *,
+    session: Session,
+    include_invalid: bool = False,
+) -> Container | None:
     """按容器名查询。Node 侧快照以 name 为键，解析层按名归位。"""
 
-    return session.scalars(select(Container).where(Container.name == container_name)).first()
+    stmt = select(Container).where(Container.name == container_name)
+    if not include_invalid:
+        stmt = stmt.where(Container.is_valid.is_(True))
+    return session.scalars(stmt).first()
 
 
 def get_machine_id_by_container_id(container_id: int, *, session: Session) -> int | None:
@@ -84,8 +104,11 @@ def list_containers(
     visible_container_ids: set[int] | None = None,
     *,
     session: Session,
+    include_invalid: bool = False,
 ) -> Sequence[Container]:
     stmt = select(Container)
+    if not include_invalid:
+        stmt = stmt.where(Container.is_valid.is_(True))
     if machine_id is not None:
         stmt = stmt.where(Container.machine_id == int(machine_id))
     if user_id is not None:
@@ -114,8 +137,11 @@ def count_containers(
     visible_container_ids: set[int] | None = None,
     *,
     session: Session,
+    include_invalid: bool = False,
 ) -> int:
     stmt = select(func.count()).select_from(Container)
+    if not include_invalid:
+        stmt = stmt.where(Container.is_valid.is_(True))
     if machine_id is not None:
         stmt = stmt.where(Container.machine_id == int(machine_id))
     if user_id is not None:
@@ -154,6 +180,8 @@ def create_container(
 ) -> Container:
     container = Container(
         name=name,
+        active_name=name,
+        is_valid=True,
         image=image,
         machine_id=int(machine_id),
         memory_gb=memory_gb,
@@ -174,12 +202,19 @@ def create_container(
 
 
 def update_container(container_id: int, *, session: Session, **fields) -> Container | None:
-    container = get_by_id(container_id, session=session)
+    include_invalid = bool(fields.pop("include_invalid", False))
+    container = get_by_id(container_id, session=session, include_invalid=include_invalid)
     if not container:
         return None
 
     allowed = {
         "name",
+        "active_name",
+        "is_valid",
+        "deleted_at",
+        "deleted_trigger",
+        "deleted_reason",
+        "deleted_by_user_id",
         "image",
         "machine_id",
         "container_status",
@@ -196,25 +231,103 @@ def update_container(container_id: int, *, session: Session, **fields) -> Contai
         "port_mappings",
     }
     dirty = False
-    nullable_clear_fields = {"failed_reason", "failed_detail", "status_unknown_since", "status_source"}
+    nullable_clear_fields = {
+        "failed_reason",
+        "failed_detail",
+        "status_unknown_since",
+        "status_source",
+        "active_name",
+        "deleted_at",
+        "deleted_trigger",
+        "deleted_reason",
+        "deleted_by_user_id",
+    }
     for key, value in fields.items():
         if key not in allowed or (value is None and key not in nullable_clear_fields):
             continue
         if getattr(container, key) != value:
             setattr(container, key, value)
             dirty = True
+    if "name" in fields or "is_valid" in fields:
+        expected_active_name = container.name if bool(getattr(container, "is_valid", True)) else None
+        if container.active_name != expected_active_name:
+            container.active_name = expected_active_name
+            dirty = True
     if dirty:
         session.flush()
     return container
 
 
-def delete_container(container_id: int, *, session: Session) -> bool:
-    container = get_by_id(container_id, session=session)
+def delete_container(
+    container_id: int,
+    *,
+    session: Session,
+    deleted_trigger: str | None = None,
+    deleted_reason: str | None = None,
+    deleted_by_user_id: int | None = None,
+) -> bool:
+    container = get_by_id(container_id, session=session, include_invalid=True)
     if not container:
         return False
-    session.delete(container)
+    if bool(getattr(container, "is_valid", True)):
+        container.is_valid = False
+        container.active_name = None
+        container.deleted_at = datetime.utcnow()
+    if deleted_trigger is not None:
+        container.deleted_trigger = deleted_trigger
+    if deleted_reason is not None:
+        container.deleted_reason = deleted_reason
+    if deleted_by_user_id is not None:
+        container.deleted_by_user_id = int(deleted_by_user_id)
     session.flush()
     return True
+
+
+def restore_container_record(
+    container_id: int,
+    *,
+    session: Session,
+    name: str,
+    image: str,
+    machine_id: int,
+    memory_gb: int,
+    shared_gb: int,
+    gpu_number: int,
+    cpu_number: int,
+    port: int = 0,
+    status=None,
+    gpu_chosen_list: list | None = None,
+    bind_mount_path: str | None = None,
+    port_mappings: list | None = None,
+) -> Container | None:
+    container = get_by_id(container_id, session=session, include_invalid=True)
+    if not container:
+        return None
+    container.name = name
+    container.active_name = name
+    container.is_valid = True
+    container.deleted_at = None
+    container.deleted_trigger = None
+    container.deleted_reason = None
+    container.deleted_by_user_id = None
+    container.image = image
+    container.machine_id = int(machine_id)
+    container.memory_gb = memory_gb
+    container.shared_gb = shared_gb
+    container.gpu_number = gpu_number
+    container.cpu_number = cpu_number
+    container.port = port
+    if status is not None:
+        container.container_status = status
+    container.gpu_chosen_list = gpu_chosen_list
+    container.bind_mount_path = bind_mount_path
+    container.port_mappings = port_mappings
+    container.failed_reason = None
+    container.failed_detail = None
+    container.status_unknown_since = None
+    container.status_source = None
+    session.flush()
+    return container
 
 
 def attach_user(container_id: int, user_id: int, *, session: Session) -> bool:

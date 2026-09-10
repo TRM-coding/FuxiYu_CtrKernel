@@ -1,4 +1,4 @@
-from ...repositories import container_ssh_login_repo
+from ...repositories import container_ssh_login_repo, containers_repo
 from ..factories import create_container_graph
 
 
@@ -16,3 +16,18 @@ def test_container_ssh_login_repo_upsert_insert_and_update(db_session):
 
 def test_container_ssh_login_repo_get_missing_returns_none(db_session):
     assert container_ssh_login_repo.get_by_container(999999, session=db_session) is None
+
+
+def test_container_ssh_login_repo_list_all_filters_invalid_containers(db_session):
+    _root, machine, container = create_container_graph()
+    container_ssh_login_repo.upsert_last_ssh_login_time(
+        machine.id,
+        container.id,
+        "2026-05-25T10:00:00",
+        session=db_session,
+    )
+    containers_repo.delete_container(container.id, session=db_session)
+    db_session.commit()
+
+    assert container_ssh_login_repo.list_all(session=db_session) == []
+    assert [row.container_id for row in container_ssh_login_repo.list_all(session=db_session, include_invalid=True)] == [container.id]

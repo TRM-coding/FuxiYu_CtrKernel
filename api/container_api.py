@@ -349,6 +349,9 @@ def delete_container_api(
     return {"success": 1, "message": "Container deleted successfully"}
 
 
+# Deleted-container management is a method-level admin surface.
+# These records are not live container resources, so keep these endpoints on
+# container:manage and do not add require_resource("container...", "container_id").
 @router.post("/list_deleted_containers", response_model=ListDeletedContainersResponse)
 def list_deleted_containers_api(
     payload: ListDeletedContainersRequest = Body(default_factory=ListDeletedContainersRequest),
@@ -371,9 +374,11 @@ def clean_deleted_container_mount_api(
     operator_user_id: int = Depends(require_permission("container:manage")),
 ):
     data = _payload_data(payload)
+    deleted_id = int(data.get("deleted_id", 0) or 0) or None
     mount_cleanup_id = int(data.get("mount_cleanup_id", 0) or 0)
     try:
         result = container_service.clean_deleted_container_mount(
+            deleted_id=deleted_id,
             mount_cleanup_id=mount_cleanup_id,
             operator_user_id=operator_user_id,
         )
@@ -383,7 +388,12 @@ def clean_deleted_container_mount_api(
     except Exception as e:
         reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
         return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
-    return {"success": 1, "message": "mount cleaned", "mount_cleanup_id": result.get("mount_cleanup_id")}
+    return {
+        "success": 1,
+        "message": "mount cleaned",
+        "deleted_id": result.get("deleted_id"),
+        "mount_cleanup_id": result.get("mount_cleanup_id"),
+    }
 
 
 @router.post("/resurrect_container", response_model=ResurrectContainerResponse)

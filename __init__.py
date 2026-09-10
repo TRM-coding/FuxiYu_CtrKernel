@@ -32,6 +32,8 @@ def _init_database() -> None:
     from . import models  # noqa: F401
 
     db.create_all()
+    _ensure_container_lifecycle_schema()
+    _ensure_deleted_container_schema()
     _ensure_image_template_schema()
     _ensure_container_failure_schema()
     _ensure_gpu_columns()
@@ -131,6 +133,140 @@ def _ensure_container_failure_schema() -> None:
         for name in missing:
             conn.execute(text(required[name]))
     logging.getLogger(__name__).warning("container schema upgraded: added columns %s", ", ".join(missing))
+
+
+def _ensure_container_lifecycle_schema() -> None:
+    """Backfill soft-delete lifecycle columns for old containers tables."""
+
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    current_engine = extensions.engine
+    inspector = inspect(current_engine)
+    if not inspector.has_table("containers"):
+        return
+
+    logger = logging.getLogger(__name__)
+    existing = {column["name"] for column in inspector.get_columns("containers")}
+    required_sqlite = {
+        "active_name": "ALTER TABLE containers ADD COLUMN active_name VARCHAR(120) NULL",
+        "is_valid": "ALTER TABLE containers ADD COLUMN is_valid BOOLEAN NOT NULL DEFAULT 1",
+        "deleted_at": "ALTER TABLE containers ADD COLUMN deleted_at DATETIME NULL",
+        "deleted_trigger": "ALTER TABLE containers ADD COLUMN deleted_trigger VARCHAR(64) NULL",
+        "deleted_reason": "ALTER TABLE containers ADD COLUMN deleted_reason VARCHAR(255) NULL",
+        "deleted_by_user_id": "ALTER TABLE containers ADD COLUMN deleted_by_user_id INTEGER NULL",
+    }
+    required_mysql = {
+        "active_name": "ALTER TABLE containers ADD COLUMN active_name VARCHAR(120) NULL",
+        "is_valid": "ALTER TABLE containers ADD COLUMN is_valid BOOLEAN NOT NULL DEFAULT TRUE",
+        "deleted_at": "ALTER TABLE containers ADD COLUMN deleted_at DATETIME NULL",
+        "deleted_trigger": "ALTER TABLE containers ADD COLUMN deleted_trigger VARCHAR(64) NULL",
+        "deleted_reason": "ALTER TABLE containers ADD COLUMN deleted_reason VARCHAR(255) NULL",
+        "deleted_by_user_id": "ALTER TABLE containers ADD COLUMN deleted_by_user_id INTEGER NULL",
+    }
+    required = required_sqlite if current_engine.dialect.name == "sqlite" else required_mysql
+    missing = [name for name in required if name not in existing]
+
+    index_names = {index["name"] for index in inspector.get_indexes("containers") if index.get("name")}
+    constraint_names = {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints("containers")
+        if constraint.get("name")
+    }
+    schema_names = index_names | constraint_names
+    indexes_to_create = {
+        "uq_container_active_name_machine": (
+            "CREATE UNIQUE INDEX uq_container_active_name_machine "
+            "ON containers(active_name, machine_id)"
+        ),
+        "idx_containers_is_valid": "CREATE INDEX idx_containers_is_valid ON containers(is_valid)",
+    }
+
+    with current_engine.begin() as conn:
+        for name in missing:
+            conn.execute(text(required[name]))
+        conn.execute(text("UPDATE containers SET is_valid = 1 WHERE is_valid IS NULL"))
+        conn.execute(text("UPDATE containers SET active_name = name WHERE is_valid = 1 AND active_name IS NULL"))
+        for name, ddl in indexes_to_create.items():
+            if name in schema_names:
+                continue
+            try:
+                conn.execute(text(ddl))
+            except Exception as e:
+                logger.warning("container lifecycle schema index %s create failed: %s", name, e)
+    if missing:
+        logger.warning("container lifecycle schema upgraded: added columns %s", ", ".join(missing))
+
+
+def _ensure_deleted_container_schema() -> None:
+    """Add deleted-owned mount state and cleanup linkage to existing databases."""
+
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    current_engine = extensions.engine
+    inspector = inspect(current_engine)
+    if not inspector.has_table("deleted_container_restore_snapshot"):
+        return
+
+    logger = logging.getLogger(__name__)
+    deleted_columns = {
+        column["name"]
+        for column in inspector.get_columns("deleted_container_restore_snapshot")
+    }
+    cleanup_columns = (
+        {
+            column["name"]
+            for column in inspector.get_columns("container_mount_cleanup")
+        }
+        if inspector.has_table("container_mount_cleanup")
+        else set()
+    )
+    deleted_missing = "mount_cleaned" not in deleted_columns
+    cleanup_missing = "deleted_id" not in cleanup_columns
+
+    with current_engine.begin() as conn:
+        if deleted_missing:
+            conn.execute(text(
+                "ALTER TABLE deleted_container_restore_snapshot "
+                "ADD COLUMN mount_cleaned BOOLEAN NOT NULL DEFAULT 0"
+            ))
+        if cleanup_missing and inspector.has_table("container_mount_cleanup"):
+            conn.execute(text(
+                "ALTER TABLE container_mount_cleanup ADD COLUMN deleted_id INTEGER NULL"
+            ))
+
+        if deleted_missing:
+            if "mount_path" in deleted_columns:
+                conn.execute(text(
+                    "UPDATE deleted_container_restore_snapshot "
+                    "SET mount_cleaned = 1 WHERE mount_path IS NULL"
+                ))
+            if inspector.has_table("container_mount_cleanup"):
+                conn.execute(text(
+                    "UPDATE deleted_container_restore_snapshot "
+                    "SET mount_cleaned = 1 "
+                    "WHERE mount_cleanup_id IN ("
+                    "  SELECT id FROM container_mount_cleanup "
+                    "  WHERE cleaned_at IS NOT NULL"
+                    ")"
+                ))
+        if cleanup_missing and inspector.has_table("container_mount_cleanup"):
+            conn.execute(text(
+                "UPDATE container_mount_cleanup "
+                "SET deleted_id = ("
+                "  SELECT id FROM deleted_container_restore_snapshot "
+                "  WHERE mount_cleanup_id = container_mount_cleanup.id"
+                ") "
+                "WHERE deleted_id IS NULL"
+            ))
+
+    if deleted_missing:
+        logger.warning("deleted container schema upgraded: added mount_cleaned")
+    if cleanup_missing and inspector.has_table("container_mount_cleanup"):
+        logger.warning("container mount cleanup schema upgraded: added deleted_id")
 
 
 def _ensure_gpu_columns() -> None:

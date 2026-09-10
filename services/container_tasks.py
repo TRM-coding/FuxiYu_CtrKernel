@@ -54,6 +54,8 @@ from .container_module.deleted_containers import (
     build_container_restore_snapshot,
     build_deleted_container_page,
     delete_restore_artifacts,
+    ensure_deleted_record_for_cleanup,
+    ensure_mount_cleanup_record,
     record_deleted_container_artifacts,
     restore_accounts_from_snapshot,
     restore_role_api_value,
@@ -107,6 +109,7 @@ def Create_container(
     image_build: dict | None = None,
     restore_mount_path: str | None = None,
     restore_accounts: list[dict] | None = None,
+    reuse_container_id: int | None = None,
 ) -> bool:
     # ensure machine is online before attempting creation
     _ensure_machine_online_for_operation(machine_id, 'create')
@@ -117,6 +120,17 @@ def Create_container(
         owner_name = user_repo.get_name_by_id(owner_user_id, session=session)
     if not owner_name:
         raise NodeServiceError(f"owner user {owner_user_id} not found", reason="invalid_payload")
+    if reuse_container_id is not None:
+        with session_scope(commit=False) as session:
+            restore_target = containers_repo.get_by_id(
+                int(reuse_container_id),
+                session=session,
+                include_invalid=True,
+            )
+        if restore_target is None:
+            raise NodeServiceError("container record to restore not found", reason="data_not_recoverable")
+        if bool(getattr(restore_target, "is_valid", True)):
+            raise NodeServiceError("container record to restore is already valid", reason="container_exists")
 
     # 端口发布交给 docker（2026-08 决策）：22 与 EXPOSE 端口由 docker 自动分配宿主端口，
     # 创建后经 WSS 快照回填 container.port / port_mappings——Ctrl 不再分配端口（free_port 退役）。
@@ -198,19 +212,40 @@ def Create_container(
     gpu_count = len(gpu_list) if gpu_list else 0
     # 写入容器记录（gpu_chosen_list：allow_list 内选定的物理卡，创建锁定；
     # port 先占位 0，docker 自动分配的宿主端口由 WSS 快照回填）
+    shared_gb = int(getattr(container, 'SHARED_MEMORY', getattr(container, 'shared_memory', 0)) or 0)
+    target_status = ContainerStatus.BUILDING if image_build else ContainerStatus.CREATING
     with session_scope() as session:
-        containers_repo.create_container(name=container.NAME,
-                                         image=container.image,
-                                         machine_id=machine_id,
-                                         memory_gb=container.MEMORY,
-                                         shared_gb=int(getattr(container, 'SHARED_MEMORY', getattr(container, 'shared_memory', 0)) or 0),
-                                         gpu_number=gpu_count,
-                                         cpu_number=container.CPU_NUMBER,
-                                          port=0,
-                                          status=ContainerStatus.BUILDING if image_build else ContainerStatus.CREATING,
-                                          gpu_chosen_list=list(gpu_list) if gpu_list else None,
-                                          bind_mount_path=restore_mount_path,
-                                          session=session)
+        if reuse_container_id is not None:
+            restored = containers_repo.restore_container_record(
+                int(reuse_container_id),
+                name=container.NAME,
+                image=container.image,
+                machine_id=machine_id,
+                memory_gb=container.MEMORY,
+                shared_gb=shared_gb,
+                gpu_number=gpu_count,
+                cpu_number=container.CPU_NUMBER,
+                port=0,
+                status=target_status,
+                gpu_chosen_list=list(gpu_list) if gpu_list else None,
+                bind_mount_path=restore_mount_path,
+                session=session,
+            )
+            if restored is None:
+                raise NodeServiceError("container record to restore not found", reason="not_found")
+        else:
+            containers_repo.create_container(name=container.NAME,
+                                             image=container.image,
+                                             machine_id=machine_id,
+                                             memory_gb=container.MEMORY,
+                                             shared_gb=shared_gb,
+                                             gpu_number=gpu_count,
+                                             cpu_number=container.CPU_NUMBER,
+                                             port=0,
+                                             status=target_status,
+                                             gpu_chosen_list=list(gpu_list) if gpu_list else None,
+                                             bind_mount_path=restore_mount_path,
+                                             session=session)
 
     # 建立用户绑定（包含必须的 role/username/public_key）
     with session_scope(commit=False) as session:
@@ -343,11 +378,14 @@ def remove_container(container_id:int, operator_user_id:int|None=None)->bool:
         record_deleted_container_artifacts(
             container_id,
             removed_trigger="api" if operator_user_id else "cleanup",
-            operator_user_id=operator_user_id,
             session=session,
         )
-        usercontainer_repo.remove_binding(0, container_id, all=True, session=session)
-        containers_repo.delete_container(container_id, session=session)
+        containers_repo.delete_container(
+            container_id,
+            deleted_trigger="api" if operator_user_id else "cleanup",
+            deleted_by_user_id=operator_user_id,
+            session=session,
+        )
 
     # 记录 mount 清理信息（删前捕获路径）
     return True
@@ -510,6 +548,36 @@ def list_deleted_containers(page_number: int = 1, page_size: int = 20) -> dict:
     return build_deleted_container_page(page_number=page_number, page_size=page_size)
 
 
+def _resolve_restore_container_name(
+    name: str,
+    machine_id: int,
+    original_container_id: int,
+    removed_at: datetime | None,
+) -> tuple[str, bool]:
+    """Return the restore name; append deletion-date _YYYYMMDD_{id} when the old name is active."""
+
+    with session_scope(commit=False) as session:
+        existing_id = containers_repo.get_id_by_name_machine(name, machine_id, session=session)
+    if not existing_id or int(existing_id) == int(original_container_id):
+        return name, False
+
+    suffix_date = (removed_at or datetime.utcnow()).strftime("%Y%m%d")
+    for attempt in range(1, 100):
+        suffix = (
+            f"_{suffix_date}_{original_container_id}"
+            if attempt == 1
+            else f"_{suffix_date}_{original_container_id}_{attempt}"
+        )
+        stem = (name or "container")[: max(2, 115 - len(suffix))]
+        candidate = f"{stem}{suffix}"[:115]
+        with session_scope(commit=False) as session:
+            candidate_id = containers_repo.get_id_by_name_machine(candidate, machine_id, session=session)
+        if not candidate_id or int(candidate_id) == int(original_container_id):
+            return candidate, True
+
+    raise NodeServiceError("failed to allocate restore container name", reason="container_exists")
+
+
 def resurrect_container(deleted_id: int, operator_user_id: int | None = None) -> dict:
     try:
         deleted_id = int(deleted_id)
@@ -526,18 +594,33 @@ def resurrect_container(deleted_id: int, operator_user_id: int | None = None) ->
             else None
         )
         snapshot = dict(deleted.snapshot or {})
-        mount_path = deleted.mount_path or snapshot.get("bind_mount_path")
         if not snapshot:
             raise NodeServiceError("deleted container snapshot is empty", reason="data_not_recoverable")
+        original_container_id = int(snapshot.get("container_id") or deleted.original_container_id or 0)
+        container_record = (
+            containers_repo.get_by_id(original_container_id, session=session, include_invalid=True)
+            if original_container_id
+            else None
+        )
+        mount_path = (
+            getattr(container_record, "bind_mount_path", None)
+            or (getattr(cleanup, "mount_path", None) if cleanup else None)
+            or snapshot.get("bind_mount_path")
+        )
         if not mount_path:
             raise NodeServiceError("deleted container has no retained mount path", reason="data_not_recoverable")
-        if cleanup is not None and cleanup.cleaned_at is not None:
+        if bool(getattr(deleted, "mount_cleaned", False)):
             raise NodeServiceError("deleted container mount has been cleaned", reason="data_not_recoverable")
         machine_id = int(deleted.machine_id or snapshot.get("machine_id") or 0)
+        if container_record is not None:
+            machine_id = int(container_record.machine_id)
         mount_cleanup_id = deleted.mount_cleanup_id
+        removed_at = deleted.removed_at
 
     if not machine_id:
         raise NodeServiceError("deleted container snapshot has no machine_id", reason="invalid_payload")
+    if not original_container_id:
+        raise NodeServiceError("deleted container snapshot has no original container id", reason="data_not_recoverable")
 
     root_account, restored_accounts = restore_accounts_from_snapshot(snapshot)
     owner_user_id = root_account.get("user_id")
@@ -571,13 +654,20 @@ def resurrect_container(deleted_id: int, operator_user_id: int | None = None) ->
         }
         existing_accounts.append(restored)
 
+    original_container_name = str(snapshot.get("container_name") or "")
+    restore_name, restore_renamed = _resolve_restore_container_name(
+        original_container_name,
+        machine_id,
+        original_container_id,
+        removed_at,
+    )
     gpu_list = snapshot.get("gpu_chosen_list") or []
     container = Container_info(
         gpu_list=list(gpu_list),
         cpu_number=int(snapshot.get("cpu_number") or 0),
         memory=int(snapshot.get("memory_gb") or 0),
         shared_memory=int(snapshot.get("shared_gb") or 0),
-        name=str(snapshot.get("container_name") or ""),
+        name=restore_name,
         image=str(snapshot.get("image") or ""),
         port=0,
     )
@@ -592,6 +682,7 @@ def resurrect_container(deleted_id: int, operator_user_id: int | None = None) ->
         operator_user_id=operator_user_id,
         restore_mount_path=mount_path,
         restore_accounts=existing_accounts,
+        reuse_container_id=original_container_id,
     )
 
     with session_scope(commit=False) as session:
@@ -620,6 +711,8 @@ def resurrect_container(deleted_id: int, operator_user_id: int | None = None) ->
             "trigger": "resurrect",
             "deleted_id": deleted_id,
             "original_container_id": snapshot.get("container_id"),
+            "restore_original_name": original_container_name,
+            "restore_renamed": restore_renamed,
             **_container_log_detail(container.NAME),
             "machine_id": machine_id,
             "restore_mount_path": mount_path,
@@ -629,14 +722,67 @@ def resurrect_container(deleted_id: int, operator_user_id: int | None = None) ->
     return {"container_id": int(container_id)}
 
 
-def clean_deleted_container_mount(mount_cleanup_id: int, operator_user_id: int | None = None) -> dict:
-    """手动触发清理单条 mount 记录（管理页入口）——薄壳。
+def clean_deleted_container_mount(
+    deleted_id: int | None = None,
+    operator_user_id: int | None = None,
+    *,
+    mount_cleanup_id: int | None = None,
+) -> dict:
+    """手动触发 deleted 记录对应的 mount 清理。
 
     动作逻辑（幂等 / Node 请求 / mark_cleaned / op-log）统一在
-    container_module.mount_cleanup.clean_mount_path；本壳只固定手动 trigger 语义。
+    container_module.mount_cleanup.clean_mount_path；mount_cleanup_id 仅保留为旧调用兼容。
     """
+    if deleted_id is not None and mount_cleanup_id is None:
+        with session_scope(commit=False) as session:
+            deleted_exists = deleted_container_restore_snapshot_repo.get_by_id(
+                int(deleted_id),
+                session=session,
+            )
+            cleanup_exists = container_mount_cleanup_repo.get_by_id(
+                int(deleted_id),
+                session=session,
+            )
+        if deleted_exists is None and cleanup_exists is not None:
+            mount_cleanup_id = int(deleted_id)
+            deleted_id = None
+
+    if deleted_id is None and mount_cleanup_id is not None:
+        with session_scope(commit=False) as session:
+            cleanup = container_mount_cleanup_repo.get_by_id(int(mount_cleanup_id), session=session)
+            if cleanup is None:
+                raise NodeServiceError("mount cleanup record not found", reason="not_found")
+            deleted_id = getattr(cleanup, "deleted_id", None)
+            if deleted_id is None:
+                deleted = deleted_container_restore_snapshot_repo.get_by_mount_cleanup_id(
+                    int(mount_cleanup_id),
+                    session=session,
+                )
+                deleted_id = deleted.id if deleted else None
+        if deleted_id is None:
+            with session_scope() as session:
+                cleanup = container_mount_cleanup_repo.get_by_id(
+                    int(mount_cleanup_id),
+                    session=session,
+                )
+                if cleanup is None:
+                    raise NodeServiceError("mount cleanup record not found", reason="not_found")
+                deleted = ensure_deleted_record_for_cleanup(cleanup, session=session)
+                deleted_id = deleted.id
+
+    if deleted_id is None:
+        raise NodeServiceError("deleted_id is required", reason="invalid_payload")
+    with session_scope() as session:
+        _deleted, cleanup = ensure_mount_cleanup_record(int(deleted_id), session=session)
+    if cleanup is None:
+        return {
+            "deleted_id": int(deleted_id),
+            "mount_cleanup_id": None,
+            "cleaned": False,
+            "already_cleaned": True,
+        }
     return clean_mount_path(
-        mount_cleanup_id,
+        cleanup.id,
         operator_user_id=operator_user_id,
         trigger="manual_clean_mount",
     )

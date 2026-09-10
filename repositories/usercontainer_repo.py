@@ -31,27 +31,45 @@ def _binding_dict(row) -> dict:
     }
 
 
-def get_binding(user_id: int, container_id: int, *, session: Session) -> dict | None:
-    row = session.scalars(
-        select(UserContainer).where(
-            UserContainer.user_id == int(user_id),
-            UserContainer.container_id == int(container_id),
-        )
-    ).first()
+def get_binding(
+    user_id: int,
+    container_id: int,
+    *,
+    session: Session,
+    include_invalid: bool = False,
+) -> dict | None:
+    stmt = select(UserContainer).where(
+        UserContainer.user_id == int(user_id),
+        UserContainer.container_id == int(container_id),
+    )
+    if not include_invalid:
+        stmt = stmt.join(Container, Container.id == UserContainer.container_id).where(Container.is_valid.is_(True))
+    row = session.scalars(stmt).first()
     return _binding_dict(row) if row else None
 
 
-def get_user_bindings(user_id: int, *, session: Session) -> Sequence[dict]:
-    rows = session.scalars(
-        select(UserContainer).where(UserContainer.user_id == int(user_id))
-    ).all()
+def get_user_bindings(user_id: int, *, session: Session, include_invalid: bool = False) -> Sequence[dict]:
+    stmt = select(UserContainer).where(UserContainer.user_id == int(user_id))
+    if not include_invalid:
+        stmt = stmt.join(Container, Container.id == UserContainer.container_id).where(Container.is_valid.is_(True))
+    rows = session.scalars(stmt).all()
     return [_binding_dict(row) for row in rows]
 
 
-def get_container_bindings(container_id: int, *, session: Session) -> Sequence[dict]:
-    rows = session.scalars(
-        select(UserContainer).where(UserContainer.container_id == int(container_id))
-    ).all()
+def get_container_bindings(
+    container_id: int,
+    *,
+    session: Session,
+    include_invalid: bool = False,
+) -> Sequence[dict]:
+    """容器维度的绑定列表。默认只对有效容器可见（软删行不可见）。"""
+
+    stmt = select(UserContainer).where(UserContainer.container_id == int(container_id))
+    if not include_invalid:
+        stmt = stmt.join(Container, Container.id == UserContainer.container_id).where(
+            Container.is_valid.is_(True)
+        )
+    rows = session.scalars(stmt).all()
     return [_binding_dict(row) for row in rows]
 
 
@@ -69,16 +87,19 @@ def add_binding(
     if session.get(User, int(user_id)) is None or session.get(Container, int(container_id)) is None:
         return False
 
-    existing = get_binding(user_id, container_id, session=session)
+    existing = get_binding(user_id, container_id, session=session, include_invalid=True)
     if existing:
-        if (public_key and public_key != existing.get("public_key")) or (
-            username and username != existing.get("username")
+        if (
+            (public_key and public_key != existing.get("public_key"))
+            or (username and username != existing.get("username"))
+            or (role is not None and role.value != existing.get("role"))
         ):
             update_binding(
                 user_id,
                 container_id,
                 public_key=public_key or existing.get("public_key"),
                 username=username or existing.get("username"),
+                role=role,
                 session=session,
             )
         return True
@@ -118,19 +139,30 @@ def list_containers_by_user(user_id: int, *, session: Session) -> Sequence[Conta
     stmt = (
         select(Container)
         .join(UserContainer, Container.id == UserContainer.container_id)
-        .where(UserContainer.user_id == int(user_id))
+        .where(UserContainer.user_id == int(user_id), Container.is_valid.is_(True))
         .order_by(Container.id)
     )
     return list(session.scalars(stmt).all())
 
 
-def list_users_by_container(container_id: int, *, session: Session) -> Sequence[User]:
+def list_users_by_container(
+    container_id: int,
+    *,
+    session: Session,
+    include_invalid: bool = False,
+) -> Sequence[User]:
+    """容器下的用户列表。默认只对有效容器可见（软删行不可见）。"""
+
     stmt = (
         select(User)
         .join(UserContainer, User.id == UserContainer.user_id)
         .where(UserContainer.container_id == int(container_id))
-        .order_by(User.id)
     )
+    if not include_invalid:
+        stmt = stmt.join(Container, Container.id == UserContainer.container_id).where(
+            Container.is_valid.is_(True)
+        )
+    stmt = stmt.order_by(User.id)
     return list(session.scalars(stmt).all())
 
 
@@ -186,7 +218,7 @@ def compute_user_container_counts(user_id: int, *, session: Session) -> dict:
                 Container.container_status,
             )
             .join(Container, Container.id == UserContainer.container_id)
-            .where(UserContainer.user_id == int(user_id))
+            .where(UserContainer.user_id == int(user_id), Container.is_valid.is_(True))
         ).all()
     )
     container_ids = [row.container_id for row in rows]
