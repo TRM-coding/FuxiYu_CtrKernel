@@ -2,7 +2,6 @@
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
-from sqlalchemy.exc import IntegrityError
 
 from ..constant import OperationType
 from ..extensions import session_scope
@@ -10,8 +9,6 @@ from ..repositories import machine_repo
 from ..schemas.machine import (
     AddMachinePermissionRequest,
     AddMachinePermissionResponse,
-    AddMachineRequest,
-    AddMachineResponse,
     ListMachineBriefRequest,
     ListMachineBriefResponse,
     ListMachinePermissionsResponse,
@@ -62,47 +59,6 @@ def _error(status_code: int, message: str, error_reason: str | None = None) -> J
     return JSONResponse(status_code=status_code, content=payload)
 
 
-#####################
-# 添加机器
-
-
-@router.post("/add_machine", response_model=AddMachineResponse, status_code=201)
-def add_machine_api(
-    message: AddMachineRequest,
-    operator_user_id: int = Depends(require_permission("machine:manage")),
-):
-    """人工添加机器；后续主建档入口会收敛到 register_machine。"""
-
-    data = _model_data(message)
-    try:
-        success = machine_service.Add_machine(
-            machine_name=data.get("machine_name", ""),
-            machine_ip=data.get("machine_ip", ""),
-            machine_type=data.get("machine_type", ""),
-            machine_description=data.get("machine_description", ""),
-            cpu_core_number=data.get("cpu_core_number", 0),
-            gpu_number=data.get("gpu_number", 0),
-            gpu_type=data.get("gpu_type", ""),
-            memory_size=data.get("memory_size", 0),
-            max_shared_gb=data.get("max_shared_gb", 2),
-            disk_size=data.get("disk_size", 0),
-            max_memory_gb=data.get("max_memory_gb", 0),
-            max_gpu_number=data.get("max_gpu_number", 0),
-            max_cpu_core_number=data.get("max_cpu_core_number", 0),
-            operator_user_id=operator_user_id,
-        )
-    except IntegrityError as e:
-        detail = str(e.orig) if hasattr(e, "orig") else str(e)
-        return _error(409, f"Duplicate entry: {detail}", "duplicate_entry")
-    except Exception as e:
-        err_reason = getattr(e, "error_reason", None)
-        if err_reason:
-            return _error(422, str(e), err_reason)
-        return _error(500, f"Internal error: {e}", "internal_error")
-
-    if success:
-        return {"success": 1, "message": "Machine created successfully"}
-    return _error(500, "Failed to create machine", "create_failed")
 
 
 #####################
@@ -119,13 +75,13 @@ def register_machine_api(
 
     detail = {"name": message.machine_name, "ip": message.machine_ip, "trigger": "tofu_register"}
     try:
-        result = node_comms.register_machine(
+        result = machine_service.Register_machine(
             message.machine_name,
             message.machine_ip,
             message.machine_description,
         )
     except Exception as e:
-        err_reason = getattr(e, "error_reason", None)
+        err_reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
         log_failure(operator_user_id=operator_user_id,
             operation=OperationType.ADD_MACHINE,
             target_type="machine",

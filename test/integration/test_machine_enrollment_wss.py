@@ -26,7 +26,9 @@ from FuxiYu_CtrKernel.config import CommsConfig
 from FuxiYu_CtrKernel.constant import ContainerStatus, MachineTypes
 from FuxiYu_CtrKernel.extensions import session_scope
 from FuxiYu_CtrKernel.repositories import machine_repo
+from FuxiYu_CtrKernel.services import machine_tasks
 from FuxiYu_CtrKernel.services.container_module import node_comms
+from FuxiYu_CtrKernel.services.container_module.node_comms_modules import transport
 from FuxiYu_CtrKernel.test.factories import create_container, create_machine
 from FuxiYu_CtrKernel.test.conftest import TEST_CONFIG_OVERRIDES
 from FuxiYu_CtrKernel.utils.cert_utils import certificate_sha256_fingerprint, ensure_ctrl_certificates
@@ -165,13 +167,14 @@ def test_register_machine_builds_record_pin_chain_and_wss_reload_request(app, tm
 
     monkeypatch.setenv("CTRL_CERTS_DIR", str(ctrl_certs_dir))
     monkeypatch.setattr(node_comms, "PINNED_CERTS_DIR", str(pin_dir))
+    monkeypatch.setattr(transport, "PINNED_CERTS_DIR", str(pin_dir))
     monkeypatch.setattr(node_comms, "WSS_RELOAD_MARKER", str(marker))
     monkeypatch.setattr(CommsConfig, "NODE_PORT", port)
     monkeypatch.setattr(CommsConfig, "NODE_URL_MIDDLE", f":{port}/api")
     ctrl_certs = ensure_ctrl_certificates()
 
     with _node_https_server(tmp_path, port, ctrl_certs.ca_cert):
-        result = node_comms.register_machine(
+        result = machine_tasks.Register_machine(
             machine_name="node-it-01",
             machine_ip="127.0.0.1",
             machine_description="integration node",
@@ -223,6 +226,7 @@ def _ctrl_wss_server(app, tmp_path: Path, node_cert: Path, port: int, monkeypatc
 
     monkeypatch.setenv("CTRL_CERTS_DIR", str(ctrl_certs_dir))
     monkeypatch.setattr(node_comms, "PINNED_CERTS_DIR", str(pin_dir))
+    monkeypatch.setattr(transport, "PINNED_CERTS_DIR", str(pin_dir))
     ctrl_certs = ensure_ctrl_certificates()
 
     wss_app = FastAPI(title="FuxiYu CtrlKernel WSS Receiver Test")

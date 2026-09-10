@@ -3,7 +3,7 @@ import pytest
 from ...constant import ROLE
 from ...extensions import session_scope
 from ...repositories import usercontainer_repo
-from ...services import container_tasks
+from ...services.container_module import node_comms
 from ..factories import bind_user_container, create_container, create_machine, create_user
 
 
@@ -21,7 +21,7 @@ def test_node_send_mock_records_url_and_payload(mock_node_send):
     calls = mock_node_send({"success": 1})
     payload = {"config": {"container_name": "c1"}}
 
-    res = container_tasks.send("http://127.0.0.1:5789/api/demo", payload, timeout=3)
+    res = node_comms.send("http://127.0.0.1:5789/api/demo", payload, timeout=3)
 
     assert res == {"success": 1}
     assert calls[0]["url"].endswith("/demo")
@@ -30,13 +30,13 @@ def test_node_send_mock_records_url_and_payload(mock_node_send):
 
 
 def test_default_container_tests_do_not_call_requests_post():
+    # 经真实门户 send 断言安全网：conftest 的 requests.post 守卫抛 AssertionError，
+    # 而 send 只捕 requests.RequestException → 必炸穿（测试不直接引入 requests 模块）
     with pytest.raises(AssertionError, match="Real HTTP requests are blocked"):
-        container_tasks.requests.post("http://127.0.0.1")
+        node_comms.send("http://127.0.0.1", {"config": {}})
 
 
 def test_machine_online_check_is_mocked_by_default(container_graph):
-    from ...services.container_module import node_comms
-
     _root, machine, _container = container_graph
 
     assert node_comms.is_machine_online_remote(machine.id) is True

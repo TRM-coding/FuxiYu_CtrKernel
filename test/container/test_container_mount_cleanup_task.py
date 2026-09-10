@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from ...repositories import container_mount_cleanup_repo
 from ...schedulers import container_mount_cleanup_task
 from ...services.container_module import mount_cleanup as mount_cleanup_mod
+from ...services.container_module import node_comms
 
 
 class TestMountCleanupTask:
@@ -16,7 +17,7 @@ class TestMountCleanupTask:
 
         sent = []
         monkeypatch.setattr(
-            mount_cleanup_mod, "send",
+            node_comms, "send",
             lambda *a, **kw: sent.append(a) or {"success": 1}
         )
         monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
@@ -43,7 +44,7 @@ class TestMountCleanupTask:
 
         sent_payloads = []
         monkeypatch.setattr(
-            mount_cleanup_mod, "send",
+            node_comms, "send",
             lambda url, payload, timeout: sent_payloads.append(url) or {"success": 1}
         )
         # mock machine_repo to return a valid IP
@@ -87,7 +88,7 @@ class TestMountCleanupTask:
 
         sent = []
         monkeypatch.setattr(
-            mount_cleanup_mod, "send",
+            node_comms, "send",
             lambda *a, **kw: sent.append(a) or {"success": 1}
         )
         monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
@@ -126,7 +127,7 @@ class TestMountCleanupTask:
             return {"success": 1}
 
         monkeypatch.setattr(
-            mount_cleanup_mod, "send", _fail_first
+            node_comms, "send", _fail_first
         )
         monkeypatch.setattr(
             mount_cleanup_mod.machine_repo,
@@ -186,7 +187,7 @@ class TestMountCleanupTask:
 
         sent = []
         monkeypatch.setattr(
-            mount_cleanup_mod, "send",
+            node_comms, "send",
             lambda url, payload, timeout: sent.append(url) or {"success": 1}
         )
         monkeypatch.setattr(

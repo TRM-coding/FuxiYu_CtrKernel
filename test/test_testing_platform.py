@@ -6,7 +6,7 @@ from .factories import create_container_graph, create_machine, create_user
 from ..constant import MachineStatus, ROLE
 from ..extensions import session_scope
 from ..repositories import authentications_repo, usercontainer_repo
-from ..services import container_tasks
+from ..services.container_module import node_comms
 
 
 def test_user_factory_creates_unique_users(db_session):
@@ -56,9 +56,9 @@ def test_auth_token_factory_can_create_expired_token(db_session):
 
 
 def test_mock_node_response_records_calls(monkeypatch):
-    calls = mocks.mock_node_response(monkeypatch, container_tasks, {"success": 1})
+    calls = mocks.mock_node_response(monkeypatch, node_comms, {"success": 1})
 
-    result = container_tasks.send("http://node", {"config": {}})
+    result = node_comms.send("http://node", {"config": {}})
 
     assert result == {"success": 1}
     assert calls[0]["args"] == ("http://node", {"config": {}})

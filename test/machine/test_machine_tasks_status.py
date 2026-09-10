@@ -13,6 +13,7 @@ from ...repositories import containers_repo, machine_repo
 from ...extensions import session_scope
 from ...services import machine_tasks
 from ...services.container_module import node_comms
+from ...services.container_module.node_comms_modules import websocket
 from ..factories import bind_user_container, create_container, create_machine, create_user
 
 # 枚举对齐测试（契约 C8）需要跨仓库导入 NodeKernel（同 test_machine_enrollment_wss 模式）
@@ -432,7 +433,7 @@ def test_consume_frames_applies_snapshot_and_delete(monkeypatch):
     # 契约 C7：单消费者串行处理（快照落库线程化，事件循环只 receive）
     applied = []
     monkeypatch.setattr(node_comms, "apply_snapshot_batch", lambda batch: applied.append(batch))
-    monkeypatch.setattr(node_comms, "_handle_container_deleted", lambda name, machine_id=None: applied.append(("del", name)))
+    monkeypatch.setattr(websocket, "_handle_container_deleted", lambda name, machine_id=None: applied.append(("del", name)))
     q = asyncio.Queue()
     q.put_nowait({"type": "snapshot_batch", "payload": [1]})
     q.put_nowait({"type": "delete", "container_name": "ghost_c"})
@@ -496,7 +497,7 @@ def test_node_emittable_statuses_covered_by_ctrl_mapping():
 def test_apply_container_status_snapshot_ignores_unknown_node_container(db_session, monkeypatch):
     machine = create_machine()
     published = []
-    monkeypatch.setattr(node_comms, "_publish_container_runtime_snapshot", lambda machine_id, snapshot: published.append((machine_id, snapshot)))
+    monkeypatch.setattr(node_comms, "_post_runtime_buffer", lambda endpoint, payload: published.append((payload["machine_id"], payload["snapshot"])))
 
     result = node_comms.apply_container_status_snapshot(
         {"unknown_on_ctrl": {"status": "online", "runtime_metrics": {"cpu_usage_percent": 50}}},
@@ -514,7 +515,7 @@ def test_apply_container_status_snapshot_caches_known_container_runtime_metrics(
     machine = create_machine()
     create_container(machine=machine, name="metrics_on_ctrl", status=ContainerStatus.ONLINE)
     published = []
-    monkeypatch.setattr(node_comms, "_publish_container_runtime_snapshot", lambda machine_id, snapshot: published.append((machine_id, snapshot)))
+    monkeypatch.setattr(node_comms, "_post_runtime_buffer", lambda endpoint, payload: published.append((payload["machine_id"], payload["snapshot"])))
 
     result = node_comms.apply_container_status_snapshot(
         {
@@ -562,7 +563,7 @@ def test_apply_container_status_snapshot_suppresses_runtime_metrics_when_machine
     machine = create_machine(machine_status=MachineStatus.OFFLINE)
     create_container(machine=machine, name="offline_metrics_on_ctrl", status=ContainerStatus.ONLINE)
     published = []
-    monkeypatch.setattr(node_comms, "_publish_container_runtime_snapshot", lambda machine_id, snapshot: published.append((machine_id, snapshot)))
+    monkeypatch.setattr(node_comms, "_post_runtime_buffer", lambda endpoint, payload: published.append((payload["machine_id"], payload["snapshot"])))
 
     result = node_comms.apply_container_status_snapshot(
         {
@@ -847,7 +848,7 @@ def test_apply_sys_snapshot_drift_updates_db_and_trims_limits(db_session, monkey
         cpu_core_number=8, memory_size_gb=16, gpu_number=2,
         max_cpu_core_number=8, max_memory_gb=16, max_gpu_number=2,
     )
-    monkeypatch.setattr(node_comms, "_publish_machine_runtime_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr(node_comms, "_post_runtime_buffer", lambda *a, **k: None)
 
     result = node_comms.apply_sys_snapshot({
         "cpu": {"cores": 8, "usage_percent": 10},
@@ -887,7 +888,7 @@ def test_alloc_cascade_drift_then_container_trim(db_session, monkeypatch):
         max_cpu_core_number=5, max_memory_gb=5, max_gpu_number=1,
     )
     container = create_container(machine=machine, name="cascade_c", status=ContainerStatus.ONLINE)
-    monkeypatch.setattr(node_comms, "_publish_machine_runtime_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr(node_comms, "_post_runtime_buffer", lambda *a, **k: None)
 
     # 层 1：机器真值降级 5 → 3，drift 将 max_* trim 到 3
     result = node_comms.apply_sys_snapshot({
@@ -920,7 +921,7 @@ def test_apply_sys_snapshot_gpu_enum_updates_gpu_list_not_allow(db_session, monk
         max_cpu_core_number=8, max_memory_gb=16, max_gpu_number=2,
         gpu_allow_list=[0, 1],
     )
-    monkeypatch.setattr(node_comms, "_publish_machine_runtime_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr(node_comms, "_post_runtime_buffer", lambda *a, **k: None)
 
     result = node_comms.apply_sys_snapshot({
         "cpu": {"cores": 8},

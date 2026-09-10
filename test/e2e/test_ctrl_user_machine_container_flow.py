@@ -5,7 +5,6 @@ from ..factories import create_auth, create_container_graph, create_machine, cre
 from ...api import container_api, deps
 from ...extensions import session_scope
 from ...repositories import containers_repo, machine_permission_repo
-from ...services import container_tasks
 from ...services.container_module import node_comms
 
 
@@ -26,7 +25,7 @@ def test_ctrl_e2e_user_login_machine_permission_container_create_and_list(
     assert login_resp.status_code == 200
     auth = create_auth(user, token="e2e-user-token")
     client.cookies.set("auth_token", auth.token)
-    mocks.mock_node_response(monkeypatch, container_tasks, {"success": 1})
+    mocks.mock_node_response(monkeypatch, node_comms, {"success": 1})
     monkeypatch.setattr(node_comms, "is_machine_online_remote", lambda machine_id: True)
 
     create_resp = client.post(

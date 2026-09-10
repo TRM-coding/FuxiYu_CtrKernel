@@ -18,9 +18,16 @@ from ...repositories import (
 )
 from ..operation_log_tasks import log_failure, log_success
 from .exceptions import NodeServiceError, _raise_on_node_error
-from .node_comms import get_full_url, send
+from . import node_comms
+from .node_comms import get_full_url
 from .utils import _container_log_detail
 
+####################################################
+# mount 清理工具族
+# 结构：clean_mount_path 是对外门户（含失败留痕包装），_clean_mount_path_impl 是真正的动作序列。
+# 门户被三类调用方共用：手动（manual_clean_mount）、定时（auto_mount_cleanup）、
+# 磁盘升级即时清理（disk_escalation）；trigger 由调用方传入，operator_user_id 为 None 即系统动作。
+####################################################
 
 def clean_mount_path(
     mount_cleanup_id: int,
@@ -29,6 +36,7 @@ def clean_mount_path(
     trigger: str = "auto_mount_cleanup",
     escalation: bool | None = None,
 ) -> dict:
+    """门户：执行清理并保证"抛错必留档"——失败时尽力回捞容器身份写一条失败 op-log，再原样上抛。"""
     try:
         return _clean_mount_path_impl(
             mount_cleanup_id,
@@ -146,7 +154,7 @@ def _clean_mount_path_impl(
         container_name = getattr(container, "name", None) or cleanup.container_name
 
     full_url = get_full_url(machine_ip, "/clean_mount")
-    res = send(full_url, {"config": {"mount_path": mount_path}}, timeout=10.0)
+    res = node_comms.send(full_url, {"config": {"mount_path": mount_path}}, timeout=10.0)
     _raise_on_node_error(res, "clean_mount")
     if res.get("success") != 1:
         raise NodeServiceError(f"NODE clean_mount unexpected response: {res}", reason="clean_mount_failed")

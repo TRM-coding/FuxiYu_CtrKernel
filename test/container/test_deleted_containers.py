@@ -10,6 +10,7 @@ from ...models.deleted_container_restore_snapshot import DeletedContainerRestore
 from ...models.operation_log import OperationLog
 from ...repositories import container_mount_cleanup_repo, containers_repo, deleted_container_restore_snapshot_repo, usercontainer_repo
 from ...services import container_tasks
+from ...services.container_module import node_comms
 from ...services.container_module import mount_cleanup as mount_cleanup_mod
 from ..factories import create_container, create_container_graph, create_machine, create_user
 from .conftest import NODE_REMOVE_SUCCESS
@@ -71,7 +72,7 @@ def test_each_automatic_and_manual_mount_failure_is_audited(db_session, monkeypa
         attempts.append(args)
         raise RuntimeError("node unavailable")
 
-    monkeypatch.setattr(mount_cleanup_mod, "send", fail_send)
+    monkeypatch.setattr(node_comms, "send", fail_send)
     for _ in range(3):
         with pytest.raises(RuntimeError, match="node unavailable"):
             mount_cleanup_mod.clean_mount_path(cleanup.id)
@@ -180,7 +181,7 @@ def test_clean_deleted_container_mount_calls_node_and_marks_cleaned(db_session, 
         sent.append((url, payload, timeout))
         return {"success": 1}
 
-    monkeypatch.setattr(mount_cleanup_mod, "send", _send)
+    monkeypatch.setattr(node_comms, "send", _send)
 
     result = container_tasks.clean_deleted_container_mount(row.id, operator_user_id=1)
 
@@ -198,7 +199,7 @@ def test_clean_mount_path_persists_deleted_state_when_cleanup_is_already_cleaned
     root, _machine, container = create_container_graph()
     container.bind_mount_path = f"/home/{root.username}/containers/{container.name}_data"
     db_session.commit()
-    monkeypatch.setattr(container_tasks, "send", lambda *args, **kwargs: {"success": 1})
+    monkeypatch.setattr(node_comms, "send", lambda *args, **kwargs: {"success": 1})
     container_tasks.remove_container(container.id, operator_user_id=root.id)
     snapshot = db_session.scalars(select(DeletedContainerRestoreSnapshot)).one()
     cleanup = db_session.get(ContainerMountCleanup, snapshot.mount_cleanup_id)
@@ -208,7 +209,7 @@ def test_clean_mount_path_persists_deleted_state_when_cleanup_is_already_cleaned
 
     sent = []
     monkeypatch.setattr(
-        mount_cleanup_mod,
+        node_comms,
         "send",
         lambda *args, **kwargs: sent.append((args, kwargs)),
     )
@@ -271,7 +272,7 @@ def test_resurrect_container_reuses_snapshot_mount_and_restores_bindings(db_sess
             return {"success": 1}
         return {"success": 1}
 
-    monkeypatch.setattr(container_tasks, "send", _send)
+    monkeypatch.setattr(node_comms, "send", _send)
 
     original_container_id = container.id
     assert container_tasks.remove_container(original_container_id, operator_user_id=root.id) is True
@@ -311,7 +312,7 @@ def test_resurrect_container_renames_when_original_name_is_reused(db_session, mo
         sent.append({"url": url, "payload": payload, "timeout": timeout})
         return {"success": 1}
 
-    monkeypatch.setattr(container_tasks, "send", _send)
+    monkeypatch.setattr(node_comms, "send", _send)
     original_container_id = container.id
 
     assert container_tasks.remove_container(original_container_id, operator_user_id=root.id) is True
@@ -336,7 +337,7 @@ def test_resurrect_container_rejects_cleaned_mount(db_session, monkeypatch):
     root, _machine, container = create_container_graph()
     container.bind_mount_path = f"/home/{root.username}/containers/{container.name}_data"
     db_session.commit()
-    monkeypatch.setattr(container_tasks, "send", lambda url, payload, timeout=5.0: {"success": 1})
+    monkeypatch.setattr(node_comms, "send", lambda url, payload, timeout=5.0: {"success": 1})
     container_tasks.remove_container(container.id, operator_user_id=root.id)
     snapshot = db_session.scalars(select(DeletedContainerRestoreSnapshot)).one()
     container_mount_cleanup_repo.mark_cleaned(snapshot.mount_cleanup_id, session=db_session)

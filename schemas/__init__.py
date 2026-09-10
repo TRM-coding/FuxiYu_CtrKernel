@@ -25,8 +25,6 @@ from .container import (
 from .machine import (
     AddMachinePermissionRequest,
     AddMachinePermissionResponse,
-    AddMachineRequest,
-    AddMachineResponse,
     ListMachineBriefRequest,
     ListMachineBriefResponse,
     ListMachinePermissionsResponse,
@@ -40,7 +38,6 @@ from .machine import (
     MachineUpdateFields,
     NodeHardwareProfile,
     RegisterMachineByTrustAnchorRequest,
-    RegisterMachineRequest,
     RegisterMachineResponse,
     RegisterMachineWithProfileResponse,
     RemoveMachineRequest,
@@ -83,8 +80,6 @@ from .user import (
 __all__ = [
     "AddMachinePermissionRequest",
     "AddMachinePermissionResponse",
-    "AddMachineRequest",
-    "AddMachineResponse",
     "ApiErrorResponse",
     "ChangePasswordRequest",
     "CollaboratorRequest",
@@ -135,7 +130,6 @@ __all__ = [
     "RefreshLastSshLoginTimeRequest",
     "RefreshLastSshLoginTimeResponse",
     "RegisterMachineByTrustAnchorRequest",
-    "RegisterMachineRequest",
     "RegisterMachineResponse",
     "RegisterMachineWithProfileResponse",
     "RegisterRequest",

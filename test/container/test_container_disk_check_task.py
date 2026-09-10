@@ -1434,7 +1434,7 @@ class TestEscalationMountCleanup:
         )
         # mock send to avoid real HTTP
         monkeypatch.setattr(
-            mount_cleanup_mod, "send",
+            node_comms, "send",
             lambda url, payload, timeout: {"success": 1}
         )
         monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_check_enabled", lambda: True)
@@ -1473,7 +1473,7 @@ class TestEscalationMountCleanup:
 
         sent_calls = []
         monkeypatch.setattr(
-            mount_cleanup_mod, "send",
+            node_comms, "send",
             lambda url, payload, timeout: sent_calls.append(url) or {"success": 1}
         )
         monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_check_enabled", lambda: True)
@@ -1577,7 +1577,7 @@ class TestFreezeStateMachineTimeline:
                             lambda cid, *a, **k: pauses.append(cid))
         monkeypatch.setattr(container_disk_check_task.container_tasks, "remove_container",
                             lambda cid, *a, **k: removes.append(cid))
-        monkeypatch.setattr(mount_cleanup_mod, "send",
+        monkeypatch.setattr(node_comms, "send",
                             lambda *a, **k: {"success": 1})
         # 激活可控时钟：重绑定 task 与 freeze 仓储的 datetime 引用（datetime 类属性不可变）
         monkeypatch.setitem(_CLOCK_STATE, "clock", clock)

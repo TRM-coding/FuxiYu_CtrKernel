@@ -9,11 +9,8 @@ from ..factories import create_container_graph, create_user
 
 TEST_CONTAINER_NAME = "test_container_1"
 TEST_CONTAINER_IMAGE = "ubuntu:22.04"
-TEST_CONTAINER_PORT = 22001
-TEST_MACHINE_IP = "127.0.0.1"
 VALID_PUBLIC_KEY = "ssh-rsa AAAATEST"
 NODE_SUCCESS_TRUE = {"success": 1}
-NODE_SUCCESS_BOOL = {"success": True}
 # remove_container 的真实 wire（Node network/api.py）：docker 已删除 → 200 {"success": 1}；
 # docker 中不存在 → HTTP 404 {"success": 0, error_reason: not_found}；删除失败 → HTTP 500 remove_failed
 NODE_REMOVE_SUCCESS = {"success": 1}
@@ -22,9 +19,6 @@ NODE_REMOVE_FAILED = {"success": 0, "error": "failed to remove container", "erro
 NODE_STATUS_ONLINE = {"success": 1, "container_status": "online"}
 NODE_STATUS_OFFLINE = {"success": 1, "container_status": "offline"}
 NODE_STATUS_404 = {"status_code": 404, "error": "not found", "text": "not found"}
-NODE_ENDPOINT_404_HTML = {"status_code": 404, "text": "<!doctype html> not found"}
-NODE_LAST_SSH_FOUND = {"success": 1, "last_ssh_connect_time": "2026-05-25T10:00:00"}
-NODE_LAST_SSH_NOT_FOUND = {"success": 0, "error_reason": "not_found"}
 
 
 @pytest.fixture(autouse=True)
@@ -77,7 +71,7 @@ def mock_node_send(monkeypatch):
             })
             return dict(response)
 
-        monkeypatch.setattr("FuxiYu_CtrKernel.services.container_tasks.send", _send)
+        monkeypatch.setattr("FuxiYu_CtrKernel.services.container_module.node_comms.send", _send)
         return calls
 
     return _install

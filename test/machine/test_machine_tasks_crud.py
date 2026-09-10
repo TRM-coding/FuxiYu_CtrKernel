@@ -11,77 +11,56 @@ from ...services import machine_tasks
 from ..factories import create_container, create_machine
 
 
-def _machine_kwargs(**overrides):
-    data = {
-        "machine_name": "task_machine",
-        "machine_ip": "10.0.0.1",
-        "machine_type": MachineTypes.GPU,
-        "machine_description": "desc",
-        "cpu_core_number": 16,
-        "gpu_number": 2,
-        "gpu_type": "A100",
-        "memory_size": 128,
-        "max_shared_gb": 4,
-        "disk_size": 512,
-        "max_memory_gb": 128,
-        "max_gpu_number": 2,
-        "max_cpu_core_number": 16,
-    }
-    data.update(overrides)
-    return data
+@pytest.fixture
+def enrollment_transport(monkeypatch):
+    from ...services.container_module import node_comms
+    from ...services.container_module.node_comms_modules import enrollment
+
+    hardware = {"cpu": {"cores": 16}, "memory": {"total_gb": 128}, "disk": {"total_gb": 512}, "gpu": [{"name": "A100"}]}
+    monkeypatch.setattr(enrollment, "DEFAULT_RESOURCE_RATIO", 0.5)
+    monkeypatch.setattr(machine_tasks, "_get_enrollment_client_cert", lambda: None)
+    monkeypatch.setattr(machine_tasks, "_fetch_peer_cert", lambda ip, timeout: ("fingerprint", b"certificate"))
+    monkeypatch.setattr(machine_tasks, "_request_enrollment_profile", lambda *args: hardware)
+    monkeypatch.setattr(machine_tasks, "_issue_node_uid", lambda *args: None)
+    monkeypatch.setattr(machine_tasks, "_persist_peer_pin", lambda *args: None)
+    monkeypatch.setattr(node_comms, "request_wss_restart", lambda **kwargs: {"wss_restart_requested": True})
+    return hardware
 
 
-def test_add_machine_success_creates_machine(db_session):
-    assert machine_tasks.Add_machine(**_machine_kwargs()) is True
-
+def test_register_machine_persists_identity_hardware_and_limits(db_session, enrollment_transport):
+    result = machine_tasks.Register_machine("task_machine", "10.0.0.1", "registered host")
     machine = machine_repo.get_by_name("task_machine", session=db_session)
-    assert machine is not None
-    assert machine.machine_ip == "10.0.0.1"
+    assert result["success"] is True
+    assert machine.id == result["machine_id"]
+    assert machine.node_uid == result["uid"]
+    assert machine.node_cert_fingerprint == "fingerprint"
+    assert machine.machine_type == MachineTypes.GPU
+    assert machine.cpu_core_number == 16
+    assert machine.max_cpu_core_number == 8
+    assert machine.memory_size_gb == 128
+    assert machine.max_memory_gb == 64
+    assert machine.machine_description == "registered host"
+    assert result["hardware"] == enrollment_transport
+    assert result["wss_restart_requested"] is True
 
 
-def test_add_machine_with_null_max_shared_creates_machine(db_session):
-    """回归：max_shared_gb=None（前端表单未填）时也必须真实入库。
-
-    历史 bug：create_machine 调用曾被误缩进到 max_shared_gb 验证块内，
-    None 时整段创建被跳过，Add_machine 返回 True 但库为空。
-    """
-    assert machine_tasks.Add_machine(**_machine_kwargs(max_shared_gb=None)) is True
-
-    machine = machine_repo.get_by_name("task_machine", session=db_session)
-    assert machine is not None
-    assert machine.machine_ip == "10.0.0.1"
+@pytest.mark.parametrize(("name", "ip"), [("", "10.0.0.1"), ("node", "")])
+def test_register_machine_rejects_missing_trust_anchor(db_session, name, ip):
+    with pytest.raises(machine_tasks.NodeServiceError) as exc:
+        machine_tasks.Register_machine(name, ip)
+    assert exc.value.reason == "invalid_trust_anchor"
+    assert db_session.scalars(select(Machine)).all() == []
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("machine_name", "m" * 116),
-        ("gpu_type", "g" * 116),
-        ("machine_type", "t" * 256),
-    ],
-)
-def test_add_machine_rejects_long_string_fields(db_session, field, value):
-    with pytest.raises(ValueError):
-        machine_tasks.Add_machine(**_machine_kwargs(**{field: value}))
+def test_register_machine_failed_uid_issue_does_not_create_record(db_session, enrollment_transport, monkeypatch):
+    def fail(*args):
+        raise machine_tasks.NodeServiceError("rejected", reason="issue_uid_rejected")
 
-
-@pytest.mark.parametrize(
-    ("field", "value", "message"),
-    [
-        ("max_shared_gb", "bad", "max_shared_gb must be an integer"),
-        ("max_shared_gb", 0, "shared size out of range"),
-        ("max_memory_gb", "bad", "max_memory_gb must be an integer"),
-        ("max_shared_gb", 9, "cannot be greater than max_memory_gb"),
-    ],
-)
-def test_add_machine_rejects_invalid_shared_memory_config(db_session, field, value, message):
-    kwargs = _machine_kwargs(max_memory_gb=8)
-    kwargs[field] = value
-
-    with pytest.raises(ValueError, match=message) as excinfo:
-        machine_tasks.Add_machine(**kwargs)
-
-    assert getattr(excinfo.value, "error_reason") == "create_failed"
+    monkeypatch.setattr(machine_tasks, "_issue_node_uid", fail)
+    with pytest.raises(machine_tasks.NodeServiceError) as exc:
+        machine_tasks.Register_machine("task_machine", "10.0.0.1")
+    assert exc.value.reason == "issue_uid_rejected"
+    assert machine_repo.get_by_name("task_machine", session=db_session) is None
 
 
 def test_remove_machine_deletes_each_id(db_session):

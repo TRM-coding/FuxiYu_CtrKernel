@@ -1,33 +1,11 @@
-from ...constant import MachineStatus, MachineTypes
+from ...constant import MachineStatus
 from ...repositories import machine_permission_repo, machine_repo
 from ...services import machine_tasks
 from ..factories import create_container, create_machine, create_user
 
 
-def _machine_kwargs(**overrides):
-    data = {
-        "machine_name": "repo_machine",
-        "machine_ip": "10.0.0.10",
-        "machine_type": MachineTypes.GPU,
-        "machine_description": "repository-backed test machine",
-        "cpu_core_number": 16,
-        "gpu_number": 2,
-        "gpu_type": "A100",
-        "memory_size": 128,
-        "max_shared_gb": 4,
-        "disk_size": 512,
-        "max_memory_gb": 128,
-        "max_gpu_number": 2,
-        "max_cpu_core_number": 16,
-    }
-    data.update(overrides)
-    return data
-
-
-def test_add_and_update_machine_with_real_repository(db_session):
-    assert machine_tasks.Add_machine(**_machine_kwargs()) is True
-    machine = machine_repo.get_by_name("repo_machine", session=db_session)
-    assert machine is not None
+def test_update_machine_with_real_repository(db_session):
+    machine = create_machine(machine_name="repo_machine")
 
     assert machine_tasks.Update_machine(machine.id, machine_name="repo_machine_updated") is True
 

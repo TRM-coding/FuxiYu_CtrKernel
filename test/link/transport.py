@@ -11,7 +11,7 @@
 """
 import json
 
-from FuxiYu_CtrKernel.services import container_tasks
+from FuxiYu_CtrKernel.services.container_module import node_comms
 
 
 class HttpNodeLinkTransport:
@@ -21,7 +21,7 @@ class HttpNodeLinkTransport:
         self.base_url = base_url.rstrip("/")
 
     def post(self, endpoint: str, payload: dict, timeout: float = 5.0) -> dict:
-        return container_tasks.send(f"{self.base_url}{endpoint}", payload, timeout=timeout)
+        return node_comms.send(f"{self.base_url}{endpoint}", payload, timeout=timeout)
 
 
 # WSS 迁移占位：届时实现

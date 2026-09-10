@@ -1,4 +1,4 @@
-from ...services.container_tasks import _derive_effective_status
+from ...services.container_module.pydantic_models import _derive_effective_status
 from ...services.container_module import pydantic_models
 from ...constant import ContainerStatus, ContainerEffectiveStatus
 

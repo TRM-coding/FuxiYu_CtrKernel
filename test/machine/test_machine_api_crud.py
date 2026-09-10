@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from sqlalchemy.exc import IntegrityError
+from ...services.container_module.exceptions import NodeServiceError
 
 from ...api import machine_api, deps
 
@@ -11,55 +11,62 @@ def _auth(monkeypatch, *, valid=True, operator=True):
     monkeypatch.setattr(rbac_service, "_has_entity_direct", lambda uid, entity: operator)
 
 
-def test_add_machine_requires_token(client, monkeypatch):
+def test_manual_machine_creation_route_is_removed(client):
+    response = client.post("/api/machines/add_machine", json={})
+    assert response.status_code == 404
+
+
+def test_register_machine_requires_token(client, monkeypatch):
     _auth(monkeypatch, valid=False)
-
-    resp = client.post("/api/machines/add_machine", json={})
-
-    assert resp.status_code == 401
+    response = client.post("/api/machines/register_machine", json={"machine_name": "node", "machine_ip": "10.0.0.1"})
+    assert response.status_code == 401
 
 
-def test_add_machine_requires_operator(client, monkeypatch):
+def test_register_machine_requires_operator(client, monkeypatch):
     _auth(monkeypatch, operator=False)
-
-    resp = client.post("/api/machines/add_machine", json={} )
-
-    assert resp.status_code == 403
+    response = client.post("/api/machines/register_machine", json={"machine_name": "node", "machine_ip": "10.0.0.1"})
+    assert response.status_code == 403
 
 
-def test_add_machine_success(client, monkeypatch):
+def test_register_machine_requires_registration_permission(client, monkeypatch):
     _auth(monkeypatch)
-    monkeypatch.setattr(machine_api.machine_service, "Add_machine", lambda **kwargs: True)
+    monkeypatch.setattr(
+        "FuxiYu_CtrKernel.services.rbac_service.user_has_entity",
+        lambda user_id, code: code == "machine:manage",
+    )
+    response = client.post("/api/machines/register_machine", json={"machine_name": "node", "machine_ip": "10.0.0.1"})
+    assert response.status_code == 403
 
-    resp = client.post("/api/machines/add_machine", json={"machine_name": "m"} )
 
-    assert resp.status_code == 201
-
-
-def test_add_machine_duplicate_entry_returns_409(client, monkeypatch):
+def test_register_machine_success_calls_machine_task(client, monkeypatch):
     _auth(monkeypatch)
-    err = IntegrityError("duplicate", params=None, orig="duplicate")
-    monkeypatch.setattr(machine_api.machine_service, "Add_machine", lambda **kwargs: (_ for _ in ()).throw(err))
+    calls = []
 
-    resp = client.post("/api/machines/add_machine", json={"machine_name": "m"} )
+    def register(name, ip, description):
+        calls.append((name, ip, description))
+        return {"machine_id": 1, "uid": "node-uid", "certificate_fingerprint": "fingerprint", "hardware": {}}
 
-    assert resp.status_code == 409
-    assert resp.json()["error_reason"] == "duplicate_entry"
+    monkeypatch.setattr(machine_api.machine_service, "Register_machine", register)
+    response = client.post(
+        "/api/machines/register_machine",
+        json={"machine_name": "node", "machine_ip": "10.0.0.1", "machine_description": "GPU host"},
+    )
+    assert response.status_code == 200
+    assert response.json()["machine_id"] == 1
+    assert response.json()["uid"] == "node-uid"
+    assert calls == [("node", "10.0.0.1", "GPU host")]
 
 
-def test_add_machine_validation_error_returns_422(client, monkeypatch):
+def test_register_machine_error_reason_returns_422(client, monkeypatch):
     _auth(monkeypatch)
 
-    def _raise(**kwargs):
-        exc = ValueError("bad")
-        exc.error_reason = "create_failed"
-        raise exc
+    def fail(*args):
+        raise NodeServiceError("unreachable", reason="machine_unreachable")
 
-    monkeypatch.setattr(machine_api.machine_service, "Add_machine", _raise)
-
-    resp = client.post("/api/machines/add_machine", json={"machine_name": "m"} )
-
-    assert resp.status_code == 422
+    monkeypatch.setattr(machine_api.machine_service, "Register_machine", fail)
+    response = client.post("/api/machines/register_machine", json={"machine_name": "node", "machine_ip": "10.0.0.1"})
+    assert response.status_code == 422
+    assert response.json()["error_reason"] == "machine_unreachable"
 
 
 def test_remove_machine_requires_token(client, monkeypatch):

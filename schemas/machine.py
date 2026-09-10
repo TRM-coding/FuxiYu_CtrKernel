@@ -38,44 +38,11 @@ class MachineAllocationLimit(BaseModel):
 
 
 #####################
-# 添加机器（迁移期兼容入口）
-
-
-class AddMachineRequest(MachineAllocationLimit):
-    """人工添加机器。
-
-    后续 register_machine 会成为主建档入口；该请求保留给预登记/兼容流程。
-    """
-
-    machine_name: str = ""
-    machine_ip: str = ""
-    machine_type: MachineType = "CPU"
-    machine_description: str = ""
-    cpu_core_number: int = Field(default=0, ge=0)
-    gpu_number: int = Field(default=0, ge=0)
-    gpu_type: str | None = None
-    memory_size: int = Field(default=0, ge=0)
-    disk_size: int = Field(default=0, ge=0)
-
-
-class AddMachineResponse(SuccessMessageResponse):
-    """添加机器响应。"""
-
-    pass
-
-
-#####################
 # 注册机器（TOFU 接入）
 
 
-class RegisterMachineRequest(BaseModel):
-    """当前实现：对已有 machine_id 执行 TLS pin + UID 下发。"""
-
-    machine_id: int = Field(..., ge=1)
-
-
 class RegisterMachineByTrustAnchorRequest(BaseModel):
-    """后续目标：管理员只填最小信任锚，由注册流程完成建档。"""
+    """管理员只填最小信任锚，由注册流程完成建档。"""
 
     machine_name: str
     machine_ip: str

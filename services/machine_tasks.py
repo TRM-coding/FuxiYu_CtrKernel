@@ -1,3 +1,6 @@
+import logging
+import secrets
+
 from ..extensions import session_scope
 from datetime import datetime
 
@@ -10,6 +13,20 @@ from ..repositories import containers_repo, machine_permission_repo, user_repo
 from .operation_log_tasks import log_failure, log_result, log_success
 from ..constant import MachineStatus, OperationType
 from ..models.machine import Machine
+from .container_module.exceptions import NodeServiceError
+from .container_module.node_comms_modules.enrollment import (
+    _default_resource_limits,
+    _fetch_peer_cert,
+    _validate_trust_anchor,
+    _get_enrollment_client_cert,
+    _request_enrollment_profile,
+    _issue_node_uid,
+    _persist_peer_pin,
+    _persist_enrolled_machine,
+)
+
+logger = logging.getLogger(__name__)
+
 #######################################
 #API Definition
 class machine_bref_information(BaseModel):
@@ -257,81 +274,43 @@ def get_machine_reachable(machine_id: int, timeout: float = 2.0) -> bool:
 
 #######################################
 #######################################
-# 添加一个新的机器到集群
-def Add_machine(machine_name:str,
-                   machine_ip:str,
-                   machine_type:MachineTypes,
-                   machine_description:str,
-                   cpu_core_number:int,
-                   gpu_number:int,
-                   gpu_type:str,
-                   memory_size:int,
-                   max_shared_gb:int,
-                   disk_size:int,
-                   max_memory_gb:int,
-                   max_gpu_number:int,
-                   max_cpu_core_number:int,
-                   operator_user_id: int | None = None)->bool:
-    # 防御性检查：限制字段长度，防止过长输入导致数据库异常
-    if machine_name and len(machine_name) > 115:
-        raise ValueError(f"machine_name too long (max 115): length={len(machine_name)}")
-    if gpu_type and len(str(gpu_type)) > 115:
-        raise ValueError(f"gpu_type too long (max 115): length={len(str(gpu_type))}")
-    if machine_type and len(str(machine_type)) > 255:
-        raise ValueError(f"machine_type too long (max 255): length={len(str(machine_type))}")
+# 注册机器（TOFU 接入并建档）
+def Register_machine(
+    machine_name: str, machine_ip: str, machine_description: str = "", timeout: float = 8.0,
+) -> dict:
+    """Enroll a Node from the administrator's trust anchor, then reload WSS trust."""
+    from .container_module.node_comms import get_full_url, request_wss_restart
 
-    # max_shared_gb defensive check: must be non-negative integer and <= 8 (GB)
-    if max_shared_gb is not None:
-        try:
-            ss = int(max_shared_gb)
-        except Exception:
-            e = ValueError(f"max_shared_gb must be an integer: {max_shared_gb}")
-            setattr(e, 'error_reason', 'create_failed')
-            raise e
-        if ss <= 0:
-            e = ValueError(f"shared size out of range (0-8 GB): {ss}")
-            setattr(e, 'error_reason', 'create_failed')
-            raise e
-
-        # ensure machine max_shared does not exceed machine max_memory
-        try:
-            mm = int(max_memory_gb) if max_memory_gb is not None else None
-        except Exception:
-            e = ValueError(f"max_memory_gb must be an integer: {max_memory_gb}")
-            setattr(e, 'error_reason', 'create_failed')
-            raise e
-        if mm is not None and ss > mm:
-            e = ValueError(f"max_shared_gb ({ss}) cannot be greater than max_memory_gb ({mm})")
-            setattr(e, 'error_reason', 'create_failed')
-            raise e
-
+    _validate_trust_anchor(machine_name, machine_ip)
+    client_cert = _get_enrollment_client_cert()
     try:
-        with session_scope() as session:
-            machine = create_machine(
-                machinename=machine_name,
-                machine_ip=machine_ip,
-                machine_type=machine_type,
-                machine_description=machine_description,
-                cpu_core_number=cpu_core_number,
-                gpu_number=gpu_number,
-                gpu_type=gpu_type,
-                memory_size=memory_size,
-                max_shared_gb=max_shared_gb,
-                disk_size=disk_size,
-                max_memory_gb=max_memory_gb,
-                max_gpu_number=max_gpu_number,
-                max_cpu_core_number=max_cpu_core_number,
-                max_disk_size_gb=disk_size,
-                session=session,
-            )
-    except Exception as e:
-        log_failure(operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE, target_type="machine", target_id=0,
-                     detail=_machine_log_detail(machine_name=machine_name, machine_ip=machine_ip),
-                     error_reason=getattr(e, 'error_reason', None) or str(e))
-        raise
-    log_success(operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE, target_type="machine", target_id=machine.id,
-                 detail=_machine_log_detail(machine, machine_name=machine_name, machine_ip=machine_ip))
-    return True
+        fingerprint, cert_der = _fetch_peer_cert(machine_ip, timeout=timeout)
+    except Exception as exc:
+        raise NodeServiceError(
+            f"register_machine failed: cannot reach {machine_ip} over TLS: {exc}", reason="machine_unreachable",
+        ) from exc
+    hardware = _request_enrollment_profile(
+        get_full_url(machine_ip, "/node_identity/enrollment_profile"), machine_ip, client_cert, timeout,
+    )
+    uid = secrets.token_urlsafe(24)
+    _issue_node_uid(get_full_url(machine_ip, "/node_identity/issue_uid"), machine_ip, uid, client_cert, timeout)
+    _persist_peer_pin(machine_ip, cert_der)
+    machine_id = _persist_enrolled_machine(
+        machine_name, machine_ip, machine_description, _default_resource_limits(hardware), uid, fingerprint,
+    )
+    try:
+        wss_reload = request_wss_restart(reason=f"node_enrolled:{machine_id}")
+    except Exception as exc:
+        logger.warning("register_machine: failed to request WSS restart for %s: %s", machine_ip, exc)
+        wss_reload = {"wss_reload_required": True, "wss_restart_requested": False, "wss_restart_error": str(exc)}
+    logger.info(
+        "machine %s (%s) enrolled: id=%s uid=%s fingerprint=%s hardware=%s",
+        machine_name, machine_ip, machine_id, uid, fingerprint, hardware,
+    )
+    return {
+        "success": True, "uid": uid, "certificate_fingerprint": fingerprint,
+        "machine_id": machine_id, "hardware": hardware, **wss_reload,
+    }
 
 #######################################
 

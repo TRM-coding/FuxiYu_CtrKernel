@@ -1,51 +1,49 @@
 from datetime import datetime, timedelta
 
-import pytest
-
 from ...repositories import container_ssh_login_repo
 from ...services import container_tasks
-from .conftest import NODE_ENDPOINT_404_HTML, NODE_LAST_SSH_FOUND, NODE_LAST_SSH_NOT_FOUND
+from ...services.container_module.utils import _parse_last_ssh_time
 
 
 # ── _parse_last_ssh_time ──────────────────────────────────────────────
 
 class TestParseLastSSHTime:
     def test_iso_8601(self):
-        dt = container_tasks._parse_last_ssh_time("2026-06-17T03:40:00")
+        dt = _parse_last_ssh_time("2026-06-17T03:40:00")
         assert dt == datetime(2026, 6, 17, 3, 40, 0)
 
     def test_iso_with_Z(self):
         from datetime import timezone
-        dt = container_tasks._parse_last_ssh_time("2026-06-17T03:40:00Z")
+        dt = _parse_last_ssh_time("2026-06-17T03:40:00Z")
         assert dt == datetime(2026, 6, 17, 3, 40, 0, tzinfo=timezone.utc)
 
     def test_iso_with_microseconds(self):
-        dt = container_tasks._parse_last_ssh_time("2026-06-17T03:40:00.123456")
+        dt = _parse_last_ssh_time("2026-06-17T03:40:00.123456")
         assert dt == datetime(2026, 6, 17, 3, 40, 0, 123456)
 
     def test_raw_last_output(self):
         raw = "root     pts/9        10.60.4.87       Wed Jun 17 11:40   still logged in"
-        dt = container_tasks._parse_last_ssh_time(raw)
+        dt = _parse_last_ssh_time(raw)
         assert dt == datetime(datetime.utcnow().year, 6, 17, 11, 40, 0)
 
     def test_raw_last_gone_no_logout(self):
         raw = "root     pts/1        202.205.102.121  Mon Jun 15 13:29    gone - no logout"
-        dt = container_tasks._parse_last_ssh_time(raw)
+        dt = _parse_last_ssh_time(raw)
         assert dt == datetime(datetime.utcnow().year, 6, 15, 13, 29, 0)
 
     def test_none_input(self):
-        assert container_tasks._parse_last_ssh_time(None) is None
+        assert _parse_last_ssh_time(None) is None
 
     def test_empty_string(self):
-        assert container_tasks._parse_last_ssh_time("") is None
-        assert container_tasks._parse_last_ssh_time("   ") is None
+        assert _parse_last_ssh_time("") is None
+        assert _parse_last_ssh_time("   ") is None
 
     def test_malformed_iso(self):
         # "June" 是 4 字母，不是有效月份
-        assert container_tasks._parse_last_ssh_time("2026-06-13T18:June:23") is None
+        assert _parse_last_ssh_time("2026-06-13T18:June:23") is None
 
     def test_unrecognizable_text(self):
-        assert container_tasks._parse_last_ssh_time("some random text") is None
+        assert _parse_last_ssh_time("some random text") is None
 
 
 # ── build_cleanup_info ────────────────────────────────────────────────
