@@ -125,7 +125,7 @@ def test_delete_user_success(client, monkeypatch):
     monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
 
     _valid_token(monkeypatch)
-    monkeypatch.setattr(user_api.user_tasks, "Delete_user", lambda user_id: True)
+    monkeypatch.setattr(user_api.user_tasks, "Delete_user", lambda user_id, **kwargs: True)
 
     resp = client.post("/api/users/delete_user", json={"user_id": 1} )
 
@@ -137,7 +137,7 @@ def test_delete_user_wild_containers(client, monkeypatch):
 
     _valid_token(monkeypatch)
 
-    def _raise(user_id):
+    def _raise(user_id, **kwargs):
         exc = Exception("wild")
         exc.wild_containers = [144]
         raise exc

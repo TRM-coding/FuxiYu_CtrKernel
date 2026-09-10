@@ -16,13 +16,14 @@ import traceback
 from urllib3.exceptions import InsecureRequestWarning
 
 from ...config import AppConfig, CommsConfig, NetConfig
-from ...constant import ContainerStatus, MachineStatus
+from ...constant import ContainerStatus, MachineStatus, OperationType
 from ...extensions import session_scope
 from ...repositories import machine_repo, containers_repo
 from ...repositories.container_ssh_login_repo import upsert_last_ssh_login_time
 from ..machine_tasks import Update_machine, is_machine_in_maintenance, is_machine_online_remote
 from .exceptions import NodeServiceError
 from .utils import _parse_last_ssh_time
+from ..operation_log_tasks import log_failure, log_success
 
 logger = logging.getLogger(__name__)
 
@@ -1142,10 +1143,25 @@ def _handle_container_deleted(container_name: str, machine_id: int | None = None
     machine_id 由连接 uid 归位（apply_snapshot_batch / _consume_frames 传入）；
     machine_id 缺失或名字不属于该机器 → 拒绝，避免跨机器重名误删他人容器记录。
     """
+    container_id = None
     try:
         with session_scope() as session:
             if machine_id is None:
                 logger.warning("handle_node_ws delete: machine_id missing for %r (refuse)", container_name)
+                log_failure(
+                    operator_user_id=None,
+                    operation=OperationType.DELETE_CONTAINER,
+                    target_type="container",
+                    target_id=0,
+                    detail={
+                        "name": container_name,
+                        "container_name": container_name,
+                        "original_container_name": container_name,
+                        "machine_id": None,
+                        "trigger": "node_vanished",
+                    },
+                    error_reason="machine_id_missing",
+                )
                 return
             container_id = containers_repo.get_id_by_name_machine(container_name, machine_id, session=session)
             if container_id is None:
@@ -1169,9 +1185,7 @@ def _handle_container_deleted(container_name: str, machine_id: int | None = None
                        container_name, container_id)
         # 审计：外部消失是删除的另一条路径（trigger=node_vanished），与 api/cleanup 一致入 op-log
         try:
-            from ...services.operation_log_tasks import write_operation_log as write_op_log
-            from ...constant import OperationType
-            write_op_log(success=True,
+            log_success(
                          operator_user_id=None,
                          operation=OperationType.DELETE_CONTAINER,
                          target_type="container",
@@ -1187,6 +1201,20 @@ def _handle_container_deleted(container_name: str, machine_id: int | None = None
             logger.warning("handle_node_ws delete: op-log failed for %r: %s", container_name, le)
     except Exception as e:
         logger.warning("handle_node_ws delete: failed to remove container %r: %s", container_name, e)
+        log_failure(
+            operator_user_id=None,
+            operation=OperationType.DELETE_CONTAINER,
+            target_type="container",
+            target_id=int(container_id or 0),
+            detail={
+                "name": container_name,
+                "container_name": container_name,
+                "original_container_name": container_name,
+                "machine_id": machine_id,
+                "trigger": "node_vanished",
+            },
+            error_reason=str(e),
+        )
 
 
 def rebuild_pinned_chain() -> Path | None:

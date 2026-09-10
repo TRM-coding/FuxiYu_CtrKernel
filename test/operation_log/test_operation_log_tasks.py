@@ -2,10 +2,51 @@
 
 from datetime import datetime
 
+from sqlalchemy import select
+
 from ...repositories import operation_log_repo
 from ...services.operation_log_tasks import list_operation_logs, operation_log_stats
 from ...constant import OperationType
 from ..factories import create_user, create_machine, create_container, bind_user_container
+from ...models.operation_log import OperationLog
+from ...services.operation_log_tasks import log_failure, log_success
+
+
+def test_deleted_container_keeps_owner_without_navigation(db_session):
+    user = create_user(username="retained_owner")
+    container = create_container(machine=create_machine(), name="retained")
+    bind_user_container(user, container, role="ROOT")
+    container.is_valid = False
+    container.active_name = None
+    db_session.commit()
+    log_success(operation=OperationType.DELETE_CONTAINER, target_type="container", target_id=container.id)
+    log = list_operation_logs()["logs"][0]
+    assert log["target_name"] is None
+    assert log["target_display_name"] == "retained"
+    assert log["root_owner"] == "retained_owner"
+
+
+def test_each_repeated_failure_is_audited(db_session, monkeypatch, caplog):
+    from ...services import operation_log_tasks
+
+    alerts = []
+    monkeypatch.setattr(operation_log_tasks, "_maybe_raise_alert", lambda **kwargs: alerts.append(kwargs))
+    args = dict(operation=OperationType.SEND_CLEANUP_REMINDER, target_type="container", target_id=999)
+    detail = {"recipient": "owner@example.test", "cleanup_at": "2026-09-12T00:00:00"}
+    for _ in range(3):
+        log_failure(**args, detail=detail, error_reason="smtp")
+    logs = db_session.scalars(select(OperationLog).order_by(OperationLog.id)).all()
+    assert len(logs) == 3
+    assert all(not log.success and log.error_reason == "smtp" for log in logs)
+    assert len(alerts) == 3
+    assert sum("op failed:" in record.message for record in caplog.records) == 3
+
+
+def test_manual_failures_are_not_suppressed(db_session):
+    for _ in range(2):
+        log_failure(operation=OperationType.DELETE_CONTAINER, target_type="container_mount_cleanup",
+                    target_id=999, error_reason="not_found")
+    assert len(db_session.scalars(select(OperationLog)).all()) == 2
 
 
 def test_list_enriches_container_name_and_root_owner(db_session):
@@ -61,7 +102,7 @@ def test_list_enriches_user_name_and_tolerates_deleted_target(db_session):
         detail={},
         success=True,
     )
-    # 目标已删除：查不到也不报错，target_name 保持 None
+    # 目标已删除：查不到也不报错，优先使用日志中保存的资源名称
     operation_log_repo.write(
         session=db_session,
         operator_user_id=None,
@@ -77,6 +118,7 @@ def test_list_enriches_user_name_and_tolerates_deleted_target(db_session):
     by_target_id = {str(r["target_id"]): r for r in result["logs"]}
     assert by_target_id[str(user.id)]["target_name"] == "bob"
     assert by_target_id["999999"]["target_name"] is None
+    assert by_target_id["999999"]["target_display_name"] == "ghost"
 
 
 def test_list_window_accepts_local_times_with_offset(db_session):

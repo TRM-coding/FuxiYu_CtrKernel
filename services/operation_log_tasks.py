@@ -8,7 +8,7 @@ from sqlalchemy import select
 from ..extensions import session_scope
 from ..models.containers import Container
 from ..models.usercontainer import UserContainer
-from ..repositories import machine_repo, user_repo
+from ..repositories import auth_repo, image_repo, machine_repo, user_repo
 from ..repositories.operation_log_repo import (
     list_logs as _repo_list,
     serialize,
@@ -94,6 +94,133 @@ def write_operation_log(
     return result
 
 
+def _enrich_write_detail(
+    *,
+    target_type: str,
+    target_id: int,
+    detail: dict | None,
+    container_name: str | None = None,
+    machine_id: int | None = None,
+) -> dict:
+    """补齐写入时可确定的资源信息，保留调用方显式传入的字段。"""
+    merged_detail = dict(detail or {})
+    if container_name:
+        merged_detail.setdefault("name", container_name)
+        merged_detail.setdefault("container_name", container_name)
+        merged_detail.setdefault("original_container_name", container_name)
+    if machine_id is not None:
+        merged_detail.setdefault("machine_id", machine_id)
+
+    if target_type != "container":
+        return merged_detail
+
+    container_id = target_id or merged_detail.get("container_id")
+    if not container_id:
+        return merged_detail
+
+    try:
+        with session_scope(commit=False) as session:
+            container = session.get(Container, int(container_id))
+        if container is not None:
+            name = getattr(container, "name", None)
+            merged_detail.setdefault("name", name)
+            merged_detail.setdefault("container_name", name)
+            merged_detail.setdefault("original_container_name", name)
+            merged_detail.setdefault("machine_id", getattr(container, "machine_id", None))
+    except Exception:
+        # 日志补充信息失败不应影响主操作或日志本身的写入。
+        pass
+    return merged_detail
+
+
+def log_success(
+    *,
+    operator_user_id: int | None = None,
+    operation: str,
+    target_type: str,
+    target_id: int,
+    detail: dict | None = None,
+    container_name: str | None = None,
+    machine_id: int | None = None,
+):
+    return write_operation_log(
+        success=True,
+        operator_user_id=operator_user_id,
+        operation=operation,
+        target_type=target_type,
+        target_id=target_id,
+        detail=_enrich_write_detail(
+            target_type=target_type,
+            target_id=target_id,
+            detail=detail,
+            container_name=container_name,
+            machine_id=machine_id,
+        ),
+    )
+
+
+def log_failure(
+    operation: str,
+    target_id: int,
+    *,
+    operator_user_id: int | None = None,
+    target_type: str,
+    error_reason: str,
+    detail: dict | None = None,
+    container_name: str | None = None,
+    machine_id: int | None = None,
+):
+    return write_operation_log(
+        success=False,
+        operator_user_id=operator_user_id,
+        operation=operation,
+        target_type=target_type,
+        target_id=target_id,
+        detail=_enrich_write_detail(
+            target_type=target_type,
+            target_id=target_id,
+            detail=detail,
+            container_name=container_name,
+            machine_id=machine_id,
+        ),
+        error_reason=error_reason,
+    )
+
+
+def log_result(
+    *,
+    success: bool,
+    operator_user_id: int | None = None,
+    operation: str,
+    target_type: str,
+    target_id: int,
+    detail: dict | None = None,
+    error_reason: str | None = None,
+    container_name: str | None = None,
+    machine_id: int | None = None,
+):
+    if success:
+        return log_success(
+            operator_user_id=operator_user_id,
+            operation=operation,
+            target_type=target_type,
+            target_id=target_id,
+            detail=detail,
+            container_name=container_name,
+            machine_id=machine_id,
+        )
+    return log_failure(
+        operator_user_id=operator_user_id,
+        operation=operation,
+        target_type=target_type,
+        target_id=target_id,
+        detail=detail,
+        error_reason=error_reason or "operation_failed",
+        container_name=container_name,
+        machine_id=machine_id,
+    )
+
+
 def list_operation_logs(
     *,
     page: int = 1,
@@ -132,32 +259,47 @@ def list_operation_logs(
 
 
 def _enrich_targets(logs: list[dict]) -> None:
-    """给每条日志附加目标的可读信息（target_name；容器额外带 root_owner）。
+    """给每条日志附加目标的可读信息（target_name/target_display_name；容器额外带 root_owner）。
 
     批量取目标 id 后逐条查名（单页最多 page_size 条，N+1 可接受）。
-    目标已被删除时保持 None，前端回退显示 ID。
+    target_name 仅用于当前仍可导航的目标；目标已删除时保留 detail 中的历史名称到
+    target_display_name，前端展示名称但不提供错误导航。
     """
     for r in logs:
         r["target_name"] = None
+        r["target_display_name"] = None
         r["root_owner"] = None
 
     for r in logs:
         try:
+            detail = r.get("detail") or {}
             tid = r.get("target_id")
+            tt = r.get("target_type")
+            if isinstance(detail, dict):
+                if tt in {"machine", "container", "image", "rbac_group", "container_mount_cleanup", "mail", "announcement"}:
+                    r["target_display_name"] = detail.get("name") or detail.get("container_name")
+                elif tt == "user":
+                    r["target_display_name"] = detail.get("username") or detail.get("name")
+                elif tt == "system_setting":
+                    r["target_display_name"] = detail.get("name")
+                    if not r["target_display_name"]:
+                        keys = detail.get("setting_keys") or []
+                        if keys:
+                            r["target_display_name"] = ", ".join(str(key) for key in keys)
             if tid is None:
                 continue
-            tt = r.get("target_type")
             if tt == "machine":
                 with session_scope(commit=False) as session:
                     m = machine_repo.get_by_id(tid, session=session)
                 if m:
                     r["target_name"] = getattr(m, "machine_name", None)
+                    r["target_display_name"] = r["target_display_name"] or r["target_name"]
             elif tt == "container":
                 with session_scope(commit=False) as session:
                     c = session.get(Container, int(tid))
                     if c:
                         # 身份校验（id 复用 2026-09）：日志早于容器创建 = 上一代容器日志，
-                        # 不映射名称/超管，前端回退显示 #id、不做错误导航。
+                        # 不映射名称/超管，前端回退显示保存的历史名称、不做错误导航。
                         log_dt = None
                         if r.get("created_at"):
                             try:
@@ -169,7 +311,11 @@ def _enrich_targets(logs: list[dict]) -> None:
                             r["target_name"] = None
                             r["root_owner"] = None
                             continue
-                        r["target_name"] = getattr(c, "name", None)
+                        r["target_display_name"] = r["target_display_name"] or getattr(c, "name", None)
+                        if getattr(c, "is_valid", True):
+                            r["target_name"] = getattr(c, "name", None)
+                        else:
+                            r["target_name"] = None
                     binding = session.scalars(
                         select(UserContainer).where(
                             UserContainer.container_id == int(tid),
@@ -180,7 +326,25 @@ def _enrich_targets(logs: list[dict]) -> None:
                         r["root_owner"] = user_repo.get_name_by_id(binding.user_id, session=session)
             elif tt == "user":
                 with session_scope(commit=False) as session:
-                    r["target_name"] = user_repo.get_name_by_id(tid, session=session)
+                    if user_repo.get_by_id(tid, session=session) is not None:
+                        r["target_name"] = r["target_display_name"] or user_repo.get_name_by_id(tid, session=session)
+            elif tt == "image":
+                with session_scope(commit=False) as session:
+                    image = image_repo.get_by_id(tid, session=session)
+                if image:
+                    r["target_name"] = r["target_display_name"] or getattr(image, "name", None)
+            elif tt == "rbac_group":
+                with session_scope(commit=False) as session:
+                    group = auth_repo.get_group_by_id(tid, session=session)
+                if group:
+                    r["target_name"] = r["target_display_name"] or getattr(group, "name", None)
+            elif tt in {"container_mount_cleanup", "system_setting"}:
+                if isinstance(detail, dict):
+                    r["target_name"] = r["target_display_name"]
+                    if not r["target_name"] and tt == "system_setting":
+                        keys = detail.get("setting_keys") or []
+                        if keys:
+                            r["target_name"] = ", ".join(str(key) for key in keys)
         except Exception:
             # 目标关联失败不影响日志主流程
             continue

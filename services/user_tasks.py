@@ -6,7 +6,7 @@ from ..repositories.user_repo import *
 from ..repositories import authentications_repo
 from ..repositories import registration_code_repo
 from ..repositories import usercontainer_repo, containers_repo, long_term_container_repo
-from .operation_log_tasks import write_operation_log as write_op_log
+from .operation_log_tasks import log_failure, log_success
 from ..utils.mail import send as send_mail
 from ..constant import ROLE, ContainerStatus, OperationType
 from pydantic import BaseModel
@@ -145,13 +145,13 @@ def Register(username: str, email: str, password: str, graduation_year):
                 session=session,
             )
         except Exception as e:
-            write_op_log(success=False, operation=OperationType.REGISTER_USER, target_type="user", target_id=0,
+            log_failure(operation=OperationType.REGISTER_USER, target_type="user", target_id=0,
                          detail={"username": username, "email": email}, error_reason=str(e))
             raise
     # RBAC 建号组绑定：新用户默认 user 组（operator 建号由 seed 显式绑 operator 组）
     from .rbac_service import bind_user_default_group
     bind_user_default_group(new_user.id)
-    write_op_log(success=True, operation=OperationType.REGISTER_USER, target_type="user", target_id=new_user.id,
+    log_success(operation=OperationType.REGISTER_USER, target_type="user", target_id=new_user.id,
                  detail={"username": username, "email": email})
     return True, new_user, None
 #####################################
@@ -175,75 +175,134 @@ def Change_password(user: User, old_password: str, new_password: str) -> bool:
     try:
         if not check_password_hash(user.password_hash, old_password):
             print("Old password does not match.")
-            write_op_log(success=False, operator_user_id=user.id, operation=OperationType.CHANGE_PASSWORD,
-                         target_type="user", target_id=user.id, detail={}, error_reason="old_password_incorrect")
+            log_failure(operator_user_id=user.id, operation=OperationType.CHANGE_PASSWORD,
+                         target_type="user", target_id=user.id,
+                         detail={"username": user.username}, error_reason="old_password_incorrect")
             return False
     except Exception as e:
         print(f"Error checking old password hash: {e}")
-        write_op_log(success=False, operator_user_id=user.id, operation=OperationType.CHANGE_PASSWORD,
-                     target_type="user", target_id=user.id, detail={}, error_reason=str(e))
+        log_failure(operator_user_id=user.id, operation=OperationType.CHANGE_PASSWORD,
+                     target_type="user", target_id=user.id,
+                     detail={"username": user.username}, error_reason=str(e))
         return False
     try:
         with session_scope() as session:
             update_user(user.id, password_hash=generate_password_hash(new_password), session=session)
     except Exception as e:
         print(f"Error updating password in database: {e}")
-        write_op_log(success=False, operator_user_id=user.id, operation=OperationType.CHANGE_PASSWORD,
-                     target_type="user", target_id=user.id, detail={}, error_reason=str(e))
+        log_failure(operator_user_id=user.id, operation=OperationType.CHANGE_PASSWORD,
+                     target_type="user", target_id=user.id,
+                     detail={"username": user.username}, error_reason=str(e))
         return False
     print("Password changed successfully.")
-    write_op_log(success=True, operator_user_id=user.id, operation=OperationType.CHANGE_PASSWORD,
-                 target_type="user", target_id=user.id, detail={})
+    log_success(operator_user_id=user.id, operation=OperationType.CHANGE_PASSWORD,
+                 target_type="user", target_id=user.id,
+                 detail={"username": user.username})
     return True
 
 #####################################
 #注销用户
-def Delete_user(user_id: int) -> bool:
-    # 先移除用户与所有容器的绑定关系
-    with session_scope(commit=False) as session:
-        res = usercontainer_repo.remove_user_from_all_containers(user_id, session=session)
-
-    # 检查返回结果
-
-    if not res.get('ok', False):
-        wild = res.get('wild_containers')
-        if wild:
-            e = Exception("Wild container NOT allowed. Must remove all affected containers first.")
-            setattr(e, 'wild_containers', wild)
-            raise e
-        return False
-
+def Delete_user(user_id: int, operator_user_id: int | None = None) -> bool:
+    username = None
     try:
+        with session_scope(commit=False) as session:
+            user = get_by_id(user_id, session=session)
+            username = getattr(user, "username", None)
+
+        # 先移除用户与所有容器的绑定关系
+        with session_scope(commit=False) as session:
+            res = usercontainer_repo.remove_user_from_all_containers(user_id, session=session)
+
+        if not res.get('ok', False):
+            wild = res.get('wild_containers')
+            if wild:
+                e = Exception("Wild container NOT allowed. Must remove all affected containers first.")
+                setattr(e, 'wild_containers', wild)
+                raise e
+            log_failure(operator_user_id=operator_user_id,
+                operation=OperationType.DELETE_USER,
+                target_type="user",
+                target_id=user_id,
+                detail={"username": username},
+                error_reason="remove_bindings_failed",
+            )
+            return False
+
         from . import container_tasks
+
+        def _role_step_failed(reason: str) -> bool:
+            log_failure(operator_user_id=operator_user_id,
+                operation=OperationType.DELETE_USER,
+                target_type="user",
+                target_id=user_id,
+                detail={"username": username},
+                error_reason=reason,
+            )
+            return False
 
         for item in res.get("transfer_required", []) or []:
             cid = item.get("container_id")
             new_root_uid = item.get("new_root_user_id")
-            if not container_tasks.update_role(container_id=cid, user_id=new_root_uid, updated_role=ROLE.ROOT):
-                return False
-            if not container_tasks.update_role(container_id=cid, user_id=user_id, updated_role=ROLE.COLLABORATOR):
-                return False
-            if not container_tasks.remove_collaborator(container_id=cid, user_id=user_id):
-                return False
+            if not container_tasks.update_role(
+                container_id=cid,
+                user_id=new_root_uid,
+                updated_role=ROLE.ROOT,
+                operator_user_id=operator_user_id,
+            ):
+                return _role_step_failed(f"transfer_root_role_failed:container:{cid}")
+            if not container_tasks.update_role(
+                container_id=cid,
+                user_id=user_id,
+                updated_role=ROLE.COLLABORATOR,
+                operator_user_id=operator_user_id,
+            ):
+                return _role_step_failed(f"demote_user_failed:container:{cid}")
+            if not container_tasks.remove_collaborator(
+                container_id=cid,
+                user_id=user_id,
+                operator_user_id=operator_user_id,
+            ):
+                return _role_step_failed(f"remove_user_binding_failed:container:{cid}")
 
         for cid in res.get("removable", []) or []:
-            if not container_tasks.remove_collaborator(container_id=cid, user_id=user_id):
-                return False
-    except Exception:
+            if not container_tasks.remove_collaborator(
+                container_id=cid,
+                user_id=user_id,
+                operator_user_id=operator_user_id,
+            ):
+                return _role_step_failed(f"remove_user_binding_failed:container:{cid}")
+
+        # 最终删除用户
+        with session_scope() as session:
+            user = get_by_id(user_id, session=session)
+            username = getattr(user, "username", username)
+            ok = delete_user(user_id=user_id, session=session)
+        if ok:
+            log_success(operator_user_id=operator_user_id,
+                operation=OperationType.DELETE_USER,
+                target_type="user",
+                target_id=user_id,
+                detail={"username": username},
+            )
+            return True
+
+        log_failure(operator_user_id=operator_user_id,
+            operation=OperationType.DELETE_USER,
+            target_type="user",
+            target_id=user_id,
+            detail={"username": username},
+            error_reason="delete_failed",
+        )
+        return False
+    except Exception as exc:
+        log_failure(operator_user_id=operator_user_id,
+            operation=OperationType.DELETE_USER,
+            target_type="user",
+            target_id=user_id,
+            detail={"username": username},
+            error_reason=getattr(exc, "error_reason", None) or str(exc),
+        )
         raise
-
-    # 最终删除用户
-    with session_scope() as session:
-        user = get_by_id(user_id, session=session)
-        ok = delete_user(user_id=user_id, session=session)
-    if ok:
-        write_op_log(success=True, operation=OperationType.DELETE_USER, target_type="user", target_id=user_id,
-                     detail={"username": getattr(user, 'username', None)})
-        return True
-
-    write_op_log(success=False, operation=OperationType.DELETE_USER, target_type="user", target_id=user_id,
-                 detail={"username": getattr(user, 'username', None)}, error_reason="delete_failed")
-    return False
     
 #####################################
 
@@ -383,19 +442,28 @@ def Update_user(user_id:int,**fields)->User|None:
 #####################################
 #忘记密码
 # 重置为随机密码，明文仅在本次响应中返回（管理员转交本人后应由其改密）
-def Reset_password(user_id:int)->str|None:
+def Reset_password(user_id: int, operator_user_id: int | None = None) -> str | None:
     with session_scope() as session:
         user = get_by_id(user_id, session=session)
         if not user:
+            log_failure(operator_user_id=operator_user_id,
+                operation=OperationType.RESET_PASSWORD,
+                target_type="user",
+                target_id=user_id,
+                detail={"username": None},
+                error_reason="user_not_found",
+            )
             return None
         new_password = secrets.token_urlsafe(12)
         try:
             update_user(user_id,password_hash=generate_password_hash(new_password), session=session)
         except Exception as e:
-            write_op_log(success=False, operation=OperationType.RESET_PASSWORD, target_type="user", target_id=user_id,
+            log_failure(operator_user_id=operator_user_id,
+                         operation=OperationType.RESET_PASSWORD, target_type="user", target_id=user_id,
                          detail={"username": user.username}, error_reason=str(e))
             raise
-    write_op_log(success=True, operation=OperationType.RESET_PASSWORD, target_type="user", target_id=user_id,
+    log_success(operator_user_id=operator_user_id,
+                 operation=OperationType.RESET_PASSWORD, target_type="user", target_id=user_id,
                  detail={"username": user.username})
     return new_password
 #####################################
@@ -430,7 +498,11 @@ def Request_register_code(email: str):
     except Exception as exc:
         print(f"Failed to create registration code for {email}: {exc}")
         return False, 'code_creation_failed'
-    result = send_mail(to=email, subject='伏羲系统注册验证码', content=f'你的注册验证码是：{code}\n验证码有效期为3分钟。请勿泄露给他人。')
+    result = send_mail(
+        to=email, subject='伏羲系统注册验证码',
+        content=f'你的注册验证码是：{code}\n验证码有效期为3分钟。请勿泄露给他人。',
+        detail={"mail_type": "registration_code", "name": email},
+    )
     if not result.get('ok'):
         return False, 'mail_send_failed'
     return True, 'code_sent'

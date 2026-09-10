@@ -15,7 +15,7 @@ from ..extensions import session_scope
 from ..repositories import containers_repo
 from ..services import container_tasks as container_service
 from ..services import settings_tasks
-from ..services.operation_log_tasks import write_operation_log as write_op_log
+from ..services.operation_log_tasks import log_failure
 from ..utils.Container import Container_info
 from ..utils.parsers import parse_bool
 from ..schemas.container import (
@@ -101,18 +101,6 @@ def _payload_data(payload: Any) -> dict[str, Any]:
     if hasattr(payload, "dict"):
         return payload.dict(exclude_none=True)
     return dict(payload)
-
-
-def _log_failure(*, operation, target_type, target_id, operator_user_id, error_reason, detail=None):
-    write_op_log(
-        success=False,
-        operator_user_id=operator_user_id,
-        operation=operation,
-        target_type=target_type,
-        target_id=target_id,
-        detail=detail or {},
-        error_reason=error_reason,
-    )
 
 
 def _machine_id_or_none(value: Any) -> int | None:
@@ -255,7 +243,7 @@ def create_container_api(
             operator_user_id=operator_user_id,
             image_build=image_build,
         ):
-            _log_failure(
+            log_failure(
                 operation=OperationType.CREATE_CONTAINER,
                 target_type="container",
                 target_id=0,
@@ -266,7 +254,7 @@ def create_container_api(
             return _error(500, "Failed to create container", "create_failed")
     except IntegrityError as e:
         detail = str(e.orig) if hasattr(e, "orig") else str(e)
-        _log_failure(
+        log_failure(
             operation=OperationType.CREATE_CONTAINER,
             target_type="container",
             target_id=0,
@@ -277,7 +265,7 @@ def create_container_api(
         return _error(409, f"Duplicate entry: {detail}", "duplicate_entry")
     except container_service.NodeServiceError as e:
         reason = getattr(e, "reason", None)
-        _log_failure(
+        log_failure(
             operation=OperationType.CREATE_CONTAINER,
             target_type="container",
             target_id=0,
@@ -288,7 +276,7 @@ def create_container_api(
         return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
     except Exception as e:
         reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
-        _log_failure(
+        log_failure(
             operation=OperationType.CREATE_CONTAINER,
             target_type="container",
             target_id=0,
@@ -315,36 +303,12 @@ def delete_container_api(
     container_id = int(data.get("container_id", 0) or 0)
     try:
         if not container_service.remove_container(container_id=container_id, operator_user_id=operator_user_id):
-            _log_failure(
-                operation=OperationType.DELETE_CONTAINER,
-                target_type="container",
-                target_id=container_id,
-                operator_user_id=operator_user_id,
-                error_reason="delete_failed",
-                detail={"container_id": container_id},
-            )
             return _error(500, "Failed to delete container", "delete_failed")
     except container_service.NodeServiceError as e:
         reason = getattr(e, "reason", None)
-        _log_failure(
-            operation=OperationType.DELETE_CONTAINER,
-            target_type="container",
-            target_id=container_id,
-            operator_user_id=operator_user_id,
-            error_reason=reason,
-            detail={"container_id": container_id},
-        )
         return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
     except Exception as e:
         reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
-        _log_failure(
-            operation=OperationType.DELETE_CONTAINER,
-            target_type="container",
-            target_id=container_id,
-            operator_user_id=operator_user_id,
-            error_reason=reason or "internal_error",
-            detail={"container_id": container_id},
-        )
         return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
     return {"success": 1, "message": "Container deleted successfully"}
 
@@ -448,7 +412,7 @@ def set_long_term_container_api(
         )
     except container_service.NodeServiceError as e:
         reason = getattr(e, "reason", None)
-        _log_failure(
+        log_failure(
             operation=OperationType.SET_LONG_TERM,
             target_type="container",
             target_id=container_id,
@@ -459,7 +423,7 @@ def set_long_term_container_api(
         return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
     except Exception as e:
         reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
-        _log_failure(
+        log_failure(
             operation=OperationType.SET_LONG_TERM,
             target_type="container",
             target_id=container_id,
@@ -485,7 +449,7 @@ def start_container_api(
     container_id = int(data.get("container_id", 0) or 0)
     try:
         if not container_service.start_container(container_id=container_id, operator_user_id=operator_user_id):
-            _log_failure(
+            log_failure(
                 operation=OperationType.START_CONTAINER,
                 target_type="container",
                 target_id=container_id,
@@ -496,7 +460,7 @@ def start_container_api(
             return _error(500, "Failed to start container", "start_failed")
     except container_service.NodeServiceError as e:
         reason = getattr(e, "reason", None)
-        _log_failure(
+        log_failure(
             operation=OperationType.START_CONTAINER,
             target_type="container",
             target_id=container_id,
@@ -507,7 +471,7 @@ def start_container_api(
         return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
     except Exception as e:
         reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
-        _log_failure(
+        log_failure(
             operation=OperationType.START_CONTAINER,
             target_type="container",
             target_id=container_id,
@@ -533,7 +497,7 @@ def stop_container_api(
     container_id = int(data.get("container_id", 0) or 0)
     try:
         if not container_service.stop_container(container_id=container_id, operator_user_id=operator_user_id):
-            _log_failure(
+            log_failure(
                 operation=OperationType.STOP_CONTAINER,
                 target_type="container",
                 target_id=container_id,
@@ -544,7 +508,7 @@ def stop_container_api(
             return _error(500, "Failed to stop container", "stop_failed")
     except container_service.NodeServiceError as e:
         reason = getattr(e, "reason", None)
-        _log_failure(
+        log_failure(
             operation=OperationType.STOP_CONTAINER,
             target_type="container",
             target_id=container_id,
@@ -555,7 +519,7 @@ def stop_container_api(
         return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
     except Exception as e:
         reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
-        _log_failure(
+        log_failure(
             operation=OperationType.STOP_CONTAINER,
             target_type="container",
             target_id=container_id,
@@ -581,7 +545,7 @@ def restart_container_api(
     container_id = int(data.get("container_id", 0) or 0)
     try:
         if not container_service.restart_container(container_id=container_id, operator_user_id=operator_user_id):
-            _log_failure(
+            log_failure(
                 operation=OperationType.RESTART_CONTAINER,
                 target_type="container",
                 target_id=container_id,
@@ -592,7 +556,7 @@ def restart_container_api(
             return _error(500, "Failed to restart container", "restart_failed")
     except container_service.NodeServiceError as e:
         reason = getattr(e, "reason", None)
-        _log_failure(
+        log_failure(
             operation=OperationType.RESTART_CONTAINER,
             target_type="container",
             target_id=container_id,
@@ -603,7 +567,7 @@ def restart_container_api(
         return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
     except Exception as e:
         reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
-        _log_failure(
+        log_failure(
             operation=OperationType.RESTART_CONTAINER,
             target_type="container",
             target_id=container_id,
@@ -636,13 +600,37 @@ def add_collaborator_api(
             role=ROLE(role),
             operator_user_id=operator_user_id,
         ):
+            log_failure(
+                operation=OperationType.ADD_COLLABORATOR,
+                target_type="container",
+                target_id=container_id,
+                operator_user_id=operator_user_id,
+                error_reason="add_collaborator_failed",
+                detail={"user_id": user_id, "role": role},
+            )
             return _error(500, "Failed to add collaborator", "add_collaborator_failed")
     except container_service.NodeServiceError as e:
         reason = getattr(e, "reason", None)
+        log_failure(
+            operation=OperationType.ADD_COLLABORATOR,
+            target_type="container",
+            target_id=container_id,
+            operator_user_id=operator_user_id,
+            error_reason=reason or "add_collaborator_failed",
+            detail={"user_id": user_id, "role": role},
+        )
         if reason == "container_offline":
             return _error(400, str(e), reason)
         return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
     except Exception as e:
+        log_failure(
+            operation=OperationType.ADD_COLLABORATOR,
+            target_type="container",
+            target_id=container_id,
+            operator_user_id=operator_user_id,
+            error_reason="internal_error",
+            detail={"user_id": user_id, "role": role},
+        )
         return _error(500, f"Internal error: {e}", "internal_error")
     return {"success": 1, "message": "Collaborator added successfully"}
 
@@ -666,13 +654,37 @@ def remove_collaborator_api(
             user_id=user_id,
             operator_user_id=operator_user_id,
         ):
+            log_failure(
+                operation=OperationType.REMOVE_COLLABORATOR,
+                target_type="container",
+                target_id=container_id,
+                operator_user_id=operator_user_id,
+                error_reason="remove_collaborator_failed",
+                detail={"user_id": user_id},
+            )
             return _error(500, "Failed to remove collaborator", "remove_collaborator_failed")
     except container_service.NodeServiceError as e:
         reason = getattr(e, "reason", None)
+        log_failure(
+            operation=OperationType.REMOVE_COLLABORATOR,
+            target_type="container",
+            target_id=container_id,
+            operator_user_id=operator_user_id,
+            error_reason=reason or "remove_collaborator_failed",
+            detail={"user_id": user_id},
+        )
         if reason == "container_offline":
             return _error(400, str(e), reason)
         return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
     except Exception as e:
+        log_failure(
+            operation=OperationType.REMOVE_COLLABORATOR,
+            target_type="container",
+            target_id=container_id,
+            operator_user_id=operator_user_id,
+            error_reason="internal_error",
+            detail={"user_id": user_id},
+        )
         return _error(500, f"Internal error: {e}", "internal_error")
     return {"success": 1, "message": "Collaborator removed successfully"}
 
@@ -698,13 +710,37 @@ def update_role_api(
             updated_role=ROLE(updated_role),
             operator_user_id=operator_user_id,
         ):
+            log_failure(
+                operation=OperationType.UPDATE_COLLABORATOR_ROLE,
+                target_type="container",
+                target_id=container_id,
+                operator_user_id=operator_user_id,
+                error_reason="update_role_failed",
+                detail={"user_id": user_id, "new_role": updated_role},
+            )
             return _error(500, "Failed to update role", "update_role_failed")
     except container_service.NodeServiceError as e:
         reason = getattr(e, "reason", None)
+        log_failure(
+            operation=OperationType.UPDATE_COLLABORATOR_ROLE,
+            target_type="container",
+            target_id=container_id,
+            operator_user_id=operator_user_id,
+            error_reason=reason or "update_role_failed",
+            detail={"user_id": user_id, "new_role": updated_role},
+        )
         if reason == "container_offline":
             return _error(400, str(e), reason)
         return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
     except Exception as e:
+        log_failure(
+            operation=OperationType.UPDATE_COLLABORATOR_ROLE,
+            target_type="container",
+            target_id=container_id,
+            operator_user_id=operator_user_id,
+            error_reason="internal_error",
+            detail={"user_id": user_id, "new_role": updated_role},
+        )
         return _error(500, f"Internal error: {e}", "internal_error")
     return {"success": 1, "message": "Role updated successfully"}
 

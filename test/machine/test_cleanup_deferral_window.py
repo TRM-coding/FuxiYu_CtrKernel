@@ -11,6 +11,8 @@
 import datetime as _real_dt
 from datetime import datetime, timedelta
 
+import pytest
+
 from ...constant import MachineStatus
 from ...models.container_ssh_login import ContainerSSHLogin
 from ...repositories import container_ssh_login_repo
@@ -20,6 +22,13 @@ from ...services.container_module.utils import build_cleanup_info
 from ..factories import create_container_graph
 
 _CLOCK_STATE: dict = {"clock": None}
+
+
+@pytest.fixture(autouse=True)
+def _mute_machine_audit(monkeypatch):
+    # These tests isolate deferral behavior, not operation-log persistence.
+    for name in ("log_result", "log_success", "log_failure"):
+        monkeypatch.setattr(machine_tasks_mod, name, lambda *args, **kwargs: None)
 
 
 class _ClockedDatetime(_real_dt.datetime):
@@ -64,8 +73,7 @@ class TestUnavailableWindow:
     def test_offline_window_adds_deferral_on_recovery(self, app, db_session, monkeypatch):
         _root, machine, container = create_container_graph()
         _make_ssh_record(db_session, container, last_ssh_time="2026-01-01T00:00:00")
-        # 机器默认 ONLINE；op-log 依赖太多，测试里屏蔽
-        monkeypatch.setattr(machine_tasks_mod, "write_op_log", lambda **k: None)
+        # 机器默认 ONLINE。
         clock = _install_clock(monkeypatch)
 
         machine_tasks_mod.Update_machine(machine.id, machine_status=MachineStatus.OFFLINE)
@@ -90,7 +98,6 @@ class TestUnavailableWindow:
         _root2, _m2, container_b = create_container_graph(machine=machine)
         _make_ssh_record(db_session, container_a, "2026-01-01T00:00:00")
         _make_ssh_record(db_session, container_b, "2026-01-02T00:00:00")
-        monkeypatch.setattr(machine_tasks_mod, "write_op_log", lambda **k: None)
         clock = _install_clock(monkeypatch)
 
         machine_tasks_mod.Update_machine(machine.id, machine_status=MachineStatus.OFFLINE)
@@ -106,7 +113,6 @@ class TestUnavailableWindow:
     def test_maintenance_window_opens_and_closes(self, app, db_session, monkeypatch):
         _root, machine, container = create_container_graph()
         _make_ssh_record(db_session, container, "2026-01-01T00:00:00")
-        monkeypatch.setattr(machine_tasks_mod, "write_op_log", lambda **k: None)
         clock = _install_clock(monkeypatch)
 
         # 维护是独立开关，machine_status 保持 ONLINE
@@ -130,7 +136,6 @@ class TestUnavailableWindow:
         """离线中开维护、先关维护仍离线、最后恢复 → 累计整段时长，不重复计。"""
         _root, machine, container = create_container_graph()
         _make_ssh_record(db_session, container, "2026-01-01T00:00:00")
-        monkeypatch.setattr(machine_tasks_mod, "write_op_log", lambda **k: None)
         clock = _install_clock(monkeypatch)
 
         machine_tasks_mod.Update_machine(machine.id, machine_status=MachineStatus.OFFLINE)  # t0
@@ -158,7 +163,6 @@ class TestUnavailableWindow:
     def test_non_state_updates_do_not_open_window(self, app, db_session, monkeypatch):
         """非状态类字段更新（如扩容）不触发窗口：已在线的机器不会被误标进窗。"""
         _root, machine, container = create_container_graph()
-        monkeypatch.setattr(machine_tasks_mod, "write_op_log", lambda **k: None)
         _install_clock(monkeypatch)
 
         machine_tasks_mod.Update_machine(machine.id, max_disk_size_gb=2048)
@@ -246,7 +250,7 @@ class TestCleanupInfoDeferral:
         monkeypatch.setattr(container_cleanup_task.settings_tasks,
                             "get_container_cleanup_after_days", lambda: 7)
         monkeypatch.setattr(
-            "FuxiYu_CtrKernel.utils.mail.send", lambda **kw: {"ok": False})
+            "FuxiYu_CtrKernel.utils.mail._send_smtp", lambda **kw: {"ok": False})
 
         last = (datetime.utcnow() - timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%S")
         _make_ssh_record(db_session, container, last_ssh_time=last, deferral=10 * 86400)

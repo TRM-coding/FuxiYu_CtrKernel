@@ -97,6 +97,8 @@ class OperationType(str, Enum):
     CREATE_IMAGE = "create_image"
     UPDATE_IMAGE = "update_image"
     DELETE_IMAGE = "delete_image"
+    UPDATE_SETTING = "update_setting"
+    SEND_MAIL = "send_mail"
     # 定时任务（operator=系统）
     SEND_CLEANUP_REMINDER = "send_cleanup_reminder"
     PAUSE_CONTAINER = "pause_container"

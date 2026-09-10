@@ -15,7 +15,7 @@ from ..constant import ImageStatus, OperationType
 from ..extensions import session_scope
 from ..repositories import image_repo, userimage_repo
 from . import settings_tasks
-from .operation_log_tasks import write_operation_log as write_op_log
+from .operation_log_tasks import log_failure, log_success
 
 
 def _status_value(status) -> str:
@@ -175,9 +175,7 @@ def Create_image(
                 userimage_repo.grant_image(operator_user_id, image.id, session=session)
             image_id = image.id
     except Exception as exc:
-        write_op_log(
-            success=False,
-            operator_user_id=operator_user_id,
+        log_failure(operator_user_id=operator_user_id,
             operation=OperationType.CREATE_IMAGE,
             target_type="image",
             target_id=0,
@@ -185,9 +183,7 @@ def Create_image(
             error_reason=getattr(exc, "error_reason", None) or str(exc),
         )
         raise
-    write_op_log(
-        success=True,
-        operator_user_id=operator_user_id,
+    log_success(operator_user_id=operator_user_id,
         operation=OperationType.CREATE_IMAGE,
         target_type="image",
         target_id=image_id,
@@ -208,56 +204,100 @@ def Update_image(
 ) -> bool:
     """更新镜像模板元数据或内容。"""
 
-    fields = {
-        "name": name,
-        "description": description,
-        "base_image": base_image,
-        "status": _coerce_status(status),
-    }
-    if dockerfile_body is not None:
-        fields["dockerfile_body"] = dockerfile_body
-
+    image_name = name
     try:
+        with session_scope(commit=False) as session:
+            image = image_repo.get_by_id(image_id, session=session)
+            if image is None:
+                log_failure(operator_user_id=operator_user_id,
+                    operation=OperationType.UPDATE_IMAGE,
+                    target_type="image",
+                    target_id=image_id,
+                    detail={"name": None},
+                    error_reason="image_not_found",
+                )
+                return False
+            image_name = image.name
+
+        fields = {
+            "name": name,
+            "description": description,
+            "base_image": base_image,
+            "status": _coerce_status(status),
+        }
+        if dockerfile_body is not None:
+            fields["dockerfile_body"] = dockerfile_body
         with session_scope() as session:
             ok = image_repo.update_image(image_id, session=session, **fields)
     except Exception as exc:
-        write_op_log(
-            success=False,
-            operator_user_id=operator_user_id,
+        log_failure(operator_user_id=operator_user_id,
             operation=OperationType.UPDATE_IMAGE,
             target_type="image",
             target_id=image_id,
-            detail={"name": name},
+            detail={"name": image_name},
             error_reason=getattr(exc, "error_reason", None) or str(exc),
         )
         raise
 
-    if ok:
-        write_op_log(
-            success=True,
-            operator_user_id=operator_user_id,
+    if not ok:
+        log_failure(operator_user_id=operator_user_id,
             operation=OperationType.UPDATE_IMAGE,
             target_type="image",
             target_id=image_id,
-            detail={"name": name},
+            detail={"name": image_name},
+            error_reason="update_failed",
         )
+        return False
+
+    log_success(operator_user_id=operator_user_id,
+        operation=OperationType.UPDATE_IMAGE,
+        target_type="image",
+        target_id=image_id,
+        detail={"name": name or image_name},
+    )
     return ok
 
 
 def Delete_image(*, image_id: int, operator_user_id: int | None = None) -> bool:
-    with session_scope() as session:
-        image = image_repo.get_by_id(image_id, session=session)
-        if image is None:
-            return False
-        image_repo.delete_image(image_id, session=session)
+    image_name = None
+    try:
+        with session_scope() as session:
+            image = image_repo.get_by_id(image_id, session=session)
+            if image is None:
+                log_failure(operator_user_id=operator_user_id,
+                    operation=OperationType.DELETE_IMAGE,
+                    target_type="image",
+                    target_id=image_id,
+                    detail={"name": None},
+                    error_reason="image_not_found",
+                )
+                return False
+            image_name = image.name
+            deleted = image_repo.delete_image(image_id, session=session)
+            if deleted is None:
+                log_failure(operator_user_id=operator_user_id,
+                    operation=OperationType.DELETE_IMAGE,
+                    target_type="image",
+                    target_id=image_id,
+                    detail={"name": image_name},
+                    error_reason="delete_failed",
+                )
+                return False
+    except Exception as exc:
+        log_failure(operator_user_id=operator_user_id,
+            operation=OperationType.DELETE_IMAGE,
+            target_type="image",
+            target_id=image_id,
+            detail={"name": image_name},
+            error_reason=getattr(exc, "error_reason", None) or str(exc),
+        )
+        raise
 
-    write_op_log(
-        success=True,
-        operator_user_id=operator_user_id,
+    log_success(operator_user_id=operator_user_id,
         operation=OperationType.DELETE_IMAGE,
         target_type="image",
         target_id=image_id,
-        detail={},
+        detail={"name": image_name},
     )
     return True
 

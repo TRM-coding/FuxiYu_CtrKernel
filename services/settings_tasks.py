@@ -7,8 +7,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..constant import OperationType
 from ..extensions import session_scope
 from ..repositories import system_setting_repo
+from .operation_log_tasks import log_failure, log_success
 
 IMAGE_PLATFORM_INJECTION_KEY = "image.platform_injection_content"
 DEFAULT_IMAGE_PLATFORM_INJECTION_CONTENT = r"""USER root
@@ -326,26 +328,83 @@ def get_setting_value(key: str) -> str | None:
         return system_setting_repo.get_value(key, session=session)
 
 
-def set_setting_value(key: str, value: str, description: str | None = None) -> None:
-    """设置页写入配置；不存在时创建。"""
+def _setting_audit_value(key: str, value: object) -> object:
+    definition = _SETTING_BY_KEY.get(key)
+    if definition is None:
+        return value
+    return _parse_value(None if value is None else str(value), definition)
 
-    stored = _validate_value(key, value)
-    if description is None and key in _SETTING_BY_KEY:
-        description = _SETTING_BY_KEY[key].description
-    with session_scope() as session:
-        ok = system_setting_repo.update_setting(
-            key,
-            value=stored,
-            description=description,
-            session=session,
-        )
-        if not ok:
-            system_setting_repo.create_setting(
-                key=key,
+
+def _setting_audit_detail(
+    before: dict[str, object],
+    after: dict[str, object] | None = None,
+    *,
+    requested: object = None,
+) -> dict:
+    if after is None:
+        return {
+            "before": before,
+            "requested": requested,
+            "setting_keys": sorted(set(before) | (set(requested) if isinstance(requested, dict) else set())),
+        }
+    return {
+        "before": before,
+        "after": after,
+        "setting_keys": sorted(set(before) | set(after)),
+    }
+
+
+def set_setting_value(
+    key: str,
+    value: str,
+    description: str | None = None,
+    operator_user_id: int | None = None,
+) -> None:
+    """设置项写入配置；不存在时创建，并记录设置审计。"""
+
+    before: dict[str, object] = {}
+    after: dict[str, object] = {}
+    target_id = 0
+    try:
+        if description is None and key in _SETTING_BY_KEY:
+            description = _SETTING_BY_KEY[key].description
+        with session_scope() as session:
+            existing = system_setting_repo.get_by_key(key, session=session)
+            if existing is not None:
+                target_id = int(existing.id)
+                before = {key: _setting_audit_value(key, existing.value)}
+            stored = _validate_value(key, value)
+            after = {key: _setting_audit_value(key, stored)}
+            ok = system_setting_repo.update_setting(
+                key,
                 value=stored,
                 description=description,
                 session=session,
             )
+            if not ok:
+                created = system_setting_repo.create_setting(
+                    key=key,
+                    value=stored,
+                    description=description,
+                    session=session,
+                )
+                target_id = int(created.id)
+    except Exception as exc:
+        log_failure(operator_user_id=operator_user_id,
+            operation=OperationType.UPDATE_SETTING,
+            target_type="system_setting",
+            target_id=target_id,
+            detail=_setting_audit_detail(before, requested={key: value}),
+            error_reason=getattr(exc, "error_reason", None) or str(exc),
+        )
+        raise
+
+    log_success(operator_user_id=operator_user_id,
+        operation=OperationType.UPDATE_SETTING,
+        target_type="system_setting",
+        target_id=target_id,
+        detail=_setting_audit_detail(before, after),
+    )
 
 
 def list_settings() -> list[dict]:
@@ -354,28 +413,71 @@ def list_settings() -> list[dict]:
     return [_serialize_setting(definition, rows.get(definition.key)) for definition in SETTING_DEFINITIONS]
 
 
-def update_settings(values: dict[str, object]) -> list[dict]:
-    if not isinstance(values, dict):
-        raise ValueError("settings payload must be an object")
-    for key, value in values.items():
-        _validate_value(key, value)
-    with session_scope() as session:
-        for key, value in values.items():
-            definition = _SETTING_BY_KEY[key]
-            stored = _validate_value(key, value)
-            ok = system_setting_repo.update_setting(
-                key,
-                value=stored,
-                description=definition.description,
-                session=session,
-            )
-            if not ok:
-                system_setting_repo.create_setting(
-                    key=key,
+def update_settings(
+    values: dict[str, object],
+    operator_user_id: int | None = None,
+) -> list[dict]:
+    before: dict[str, object] = {}
+    after: dict[str, object] = {}
+    target_id = 0
+    try:
+        if not isinstance(values, dict):
+            raise ValueError("settings payload must be an object")
+        with session_scope() as session:
+            existing_rows = {
+                key: system_setting_repo.get_by_key(key, session=session)
+                for key in values
+            }
+            before = {
+                key: _setting_audit_value(key, row.value)
+                for key, row in existing_rows.items()
+                if row is not None
+            }
+            if len(existing_rows) == 1:
+                row = next(iter(existing_rows.values()))
+                target_id = int(row.id) if row is not None else 0
+            stored_values = {
+                key: _validate_value(key, value)
+                for key, value in values.items()
+            }
+            after = {
+                key: _setting_audit_value(key, stored)
+                for key, stored in stored_values.items()
+            }
+            for key, stored in stored_values.items():
+                definition = _SETTING_BY_KEY[key]
+                ok = system_setting_repo.update_setting(
+                    key,
                     value=stored,
                     description=definition.description,
                     session=session,
                 )
+                if not ok:
+                    created = system_setting_repo.create_setting(
+                        key=key,
+                        value=stored,
+                        description=definition.description,
+                        session=session,
+                    )
+                    # Batch updates have no single target; setting_keys identifies them.
+                    if len(stored_values) == 1:
+                        target_id = int(created.id)
+    except Exception as exc:
+        log_failure(operator_user_id=operator_user_id,
+            operation=OperationType.UPDATE_SETTING,
+            target_type="system_setting",
+            target_id=target_id,
+            detail=_setting_audit_detail(before, requested=values),
+            error_reason=getattr(exc, "error_reason", None) or str(exc),
+        )
+        raise
+
+    log_success(operator_user_id=operator_user_id,
+        operation=OperationType.UPDATE_SETTING,
+        target_type="system_setting",
+        target_id=target_id,
+        detail=_setting_audit_detail(before, after),
+    )
     return list_settings()
 
 

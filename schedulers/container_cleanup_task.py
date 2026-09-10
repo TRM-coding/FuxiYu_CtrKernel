@@ -109,33 +109,31 @@ def _send_cleanup_reminders_if_needed(container_id: int, info: dict, reminder_ho
                 )
             if sent:
                 continue
-            result = send_mail(to=email, subject=subject, content=content)
-            if result.get("ok"):
+            result = send_mail(
+                to=email, subject=subject, content=content,
+                operation=OperationType.SEND_CLEANUP_REMINDER,
+                target_type="container", target_id=container_id,
+                detail={
+                    "mail_type": "cleanup_reminder",
+                    "name": snapshot.get("container_name"),
+                    "original_container_name": snapshot.get("container_name"),
+                    "threshold": reminder_key,
+                    "cleanup_at": cleanup_at.isoformat(),
+                },
+            )
+            if not result.get("ok"):
+                continue
+            try:
                 with session_scope() as session:
                     marked = container_cleanup_reminder_repo.mark_sent(
-                        container_id,
-                        reminder_key,
-                        cleanup_at,
-                        email,
-                        session=session,
+                        container_id, reminder_key, cleanup_at, email, session=session,
                     )
-                if marked:
-                    logger.info("[container-cleanup] reminder sent container_id=%s threshold=%s to=%s", container_id, reminder_key, email)
-                    from ..services.operation_log_tasks import write_operation_log as write_op_log
-                    write_op_log(success=True,
-                        operation=OperationType.SEND_CLEANUP_REMINDER,
-                        target_type="container",
-                        target_id=container_id,
-                        detail={
-                            "recipient": email,
-                            "threshold": reminder_key,
-                            "cleanup_at": cleanup_at.isoformat() if cleanup_at else None,
-                        },
-                    )
-                else:
-                    logger.warning("[container-cleanup] reminder duplicate container_id=%s threshold=%s to=%s (already recorded)", container_id, reminder_key, email)
-            else:
-                logger.error("[container-cleanup] reminder failed container_id=%s threshold=%s to=%s: %s", container_id, reminder_key, email, result)
+                if not marked:
+                    logger.warning("[container-cleanup] reminder already recorded container_id=%s to=%s",
+                                   container_id, email)
+            except Exception as exc:
+                logger.warning("[container-cleanup] reminder sent but recording failed container_id=%s to=%s: %s",
+                               container_id, email, exc)
 
 
 def cleanup_expired_containers_once(cleanup_after_days: int) -> None:

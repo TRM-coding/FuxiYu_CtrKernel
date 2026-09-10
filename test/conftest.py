@@ -164,12 +164,8 @@ def mock_external_services(monkeypatch, request):
     monkeypatch.setattr("requests.post", _blocked_post)
     monkeypatch.setattr("smtplib.SMTP", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Real SMTP is blocked in the safe pytest suite")))
     monkeypatch.setattr("smtplib.SMTP_SSL", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Real SMTP_SSL is blocked in the safe pytest suite")))
-    monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail.send", _mail_send)
-    monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail.send_batch", _mail_send_batch)
-    monkeypatch.setattr("FuxiYu_CtrKernel.services.user_tasks.send_mail", _mail_send)
-    monkeypatch.setattr("FuxiYu_CtrKernel.services.announcement_tasks.send_mail", _mail_send)
-    monkeypatch.setattr("FuxiYu_CtrKernel.services.announcement_tasks.send_batch", _mail_send_batch)
-    monkeypatch.setattr("FuxiYu_CtrKernel.schedulers.container_cleanup_task.send_mail", _mail_send)
+    monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail._send_smtp", _mail_send)
+    monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail._send_batch_smtp", _mail_send_batch)
     yield
 
 

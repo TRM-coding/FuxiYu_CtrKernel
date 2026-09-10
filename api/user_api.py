@@ -257,12 +257,15 @@ def change_password_user(
 def delete_user_api(
     message: UserIdRequest,
     request: Request,
-    _: int = Depends(require_permission("user:manage")),
+    operator_user_id: int = Depends(require_permission("user:manage")),
 ):
     """删除用户。"""
 
     try:
-        ok = user_tasks.Delete_user(message.user_id)
+        ok = user_tasks.Delete_user(
+            message.user_id,
+            operator_user_id=operator_user_id,
+        )
     except Exception as e:
         payload: dict[str, Any] = {
             "success": 0,
@@ -317,11 +320,14 @@ def update_user_api(
 def reset_password_api(
     message: UserIdRequest,
     request: Request,
-    _: int = Depends(require_permission("user:manage")),
+    operator_user_id: int = Depends(require_permission("user:manage")),
 ):
     """重置用户密码（管理操作；本人改密走 change_password）。"""
 
-    new_password = user_tasks.Reset_password(message.user_id)
+    new_password = user_tasks.Reset_password(
+        message.user_id,
+        operator_user_id=operator_user_id,
+    )
     if new_password:
         return {"success": 1, "message": "password reset", "new_password": new_password}
     return _error(404, "user not found", "user_not_found")

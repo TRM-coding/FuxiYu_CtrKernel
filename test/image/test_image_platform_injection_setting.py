@@ -1,7 +1,9 @@
 import pytest
 
 from ...api import deps
+from ...models.operation_log import OperationLog
 from ...services import settings_tasks
+from sqlalchemy import select
 
 pytestmark = pytest.mark.usefixtures("ensure_auth_users")
 
@@ -26,6 +28,12 @@ def test_platform_injection_setting_can_be_updated(db_session):
     settings_tasks.set_setting_value(settings_tasks.IMAGE_PLATFORM_INJECTION_KEY, custom)
 
     assert settings_tasks.get_image_platform_injection_content() == custom
+    log = db_session.scalars(
+        select(OperationLog).where(OperationLog.operation == "update_setting")
+    ).one()
+    assert log.detail["before"][settings_tasks.IMAGE_PLATFORM_INJECTION_KEY]
+    assert log.detail["after"][settings_tasks.IMAGE_PLATFORM_INJECTION_KEY] == custom
+    assert settings_tasks.IMAGE_PLATFORM_INJECTION_KEY in log.detail["setting_keys"]
 
 
 def test_platform_injection_setting_api_roundtrip(client, monkeypatch):
@@ -74,7 +82,7 @@ def test_system_settings_seed_removes_deprecated_parallel_keys(db_session):
         assert system_setting_repo.get_by_key("node.parallel_enabled_containers", session=session) is None
 
 
-def test_system_settings_api_update_roundtrip(client, monkeypatch):
+def test_system_settings_api_update_roundtrip(client, db_session, monkeypatch):
     _auth(monkeypatch, user_id=7)
 
     resp = client.post(
@@ -86,6 +94,68 @@ def test_system_settings_api_update_roundtrip(client, monkeypatch):
     assert resp.json()["success"] == 1
     assert settings_tasks.get_container_cleanup_after_days() == 12
     assert settings_tasks.get_container_disk_check_enabled() is True
+    log = db_session.scalars(
+        select(OperationLog).where(OperationLog.operation == "update_setting")
+    ).one()
+    assert log.detail["after"] == {
+        "container.cleanup_after_days": 12,
+        "container.disk_check_enabled": True,
+    }
+    assert log.target_id == 0
+
+
+@pytest.mark.parametrize("single", [False, True])
+@pytest.mark.parametrize("key,value", [
+    ("container.disk_check_enabled", "maybe"),
+    ("container.cleanup_after_days", "invalid-number"),
+])
+def test_rejected_setting_audit_preserves_input(db_session, single, key, value):
+    before = settings_tasks.get_setting_value(key)
+    with pytest.raises(ValueError):
+        if single:
+            settings_tasks.set_setting_value(key, value)
+        else:
+            settings_tasks.update_settings({key: value})
+    log = db_session.scalars(select(OperationLog)).one()
+    assert log.success is False
+    assert log.detail["requested"] == {key: value}
+    assert "after" not in log.detail
+    assert key in log.detail["before"]
+    assert log.detail["setting_keys"] == [key]
+    assert settings_tasks.get_setting_value(key) == before
+
+
+def test_settings_batch_target_is_order_independent(db_session):
+    values = {"container.cleanup_after_days": 10, "container.disk_check_enabled": True}
+    settings_tasks.update_settings(values)
+    settings_tasks.update_settings(dict(reversed(list(values.items()))))
+    logs = db_session.scalars(select(OperationLog).order_by(OperationLog.id)).all()
+    assert [log.target_id for log in logs] == [0, 0]
+    assert logs[0].detail["setting_keys"] == logs[1].detail["setting_keys"]
+    settings_tasks.update_settings({"container.cleanup_after_days": 11})
+    log = db_session.scalars(select(OperationLog).order_by(OperationLog.id.desc())).first()
+    assert log.target_id > 0
+
+
+def test_settings_rollback_has_no_applied_after(db_session, monkeypatch):
+    repo = settings_tasks.system_setting_repo
+    update = repo.update_setting
+    before = settings_tasks.get_setting_value("container.cleanup_after_days")
+    values = {"container.cleanup_after_days": 10, "container.disk_check_enabled": True}
+
+    def fail_second(key, **kwargs):
+        if key == "container.disk_check_enabled":
+            raise RuntimeError("write failed")
+        return update(key, **kwargs)
+
+    monkeypatch.setattr(repo, "update_setting", fail_second)
+    with pytest.raises(RuntimeError, match="write failed"):
+        settings_tasks.update_settings(values)
+    assert settings_tasks.get_setting_value("container.cleanup_after_days") == before
+    log = db_session.scalars(select(OperationLog)).one()
+    assert log.target_id == 0
+    assert log.detail["requested"] == values
+    assert "after" not in log.detail
 
 
 def test_system_settings_api_rejects_unknown_key(client, monkeypatch):

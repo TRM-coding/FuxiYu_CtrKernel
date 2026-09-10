@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from ..extensions import session_scope
 from ..repositories import containers_repo
 from ..services import container_tasks, settings_tasks
+from ..utils.mail import send as send_mail
 from ..services.machine_tasks import get_machine_reachable, is_machine_in_maintenance
 
 logger = logging.getLogger(__name__)
@@ -201,7 +202,6 @@ def _fmt_bytes(b: int) -> str:
 
 def _handle_soft_limit(container, usage: dict, cache: dict[str, float] | None = None) -> None:
     """快满时发邮件提醒。同一容器 24 小时内不重复。"""
-    from ..utils.mail import send as send_mail
 
     # 冷却: 24 小时
     last_key = f"_soft_limit_last_sent_{container.id}"
@@ -234,22 +234,18 @@ def _handle_soft_limit(container, usage: dict, cache: dict[str, float] | None = 
     )
     sent_any = False
     for email in emails:
-        try:
-            result = send_mail(to=email, subject=subject, content=content)
-            if result.get("ok"):
-                sent_any = True
-                logger.info("[disk-check] soft limit email sent to %s for container %s", email, container.id)
-            else:
-                logger.warning("[disk-check] soft limit email failed to %s: %s", email, result)
-        except Exception as e:
-            logger.warning("[disk-check] soft limit email failed to %s: %s", email, e)
+        result = send_mail(
+            to=email, subject=subject, content=content,
+            target_type="container", target_id=container.id,
+            detail={"mail_type": "disk_soft_limit", "name": container.name},
+        )
+        sent_any = bool(result.get("ok")) or sent_any
     if sent_any:
         last_sent[last_key] = now_ts
 
 
 def _handle_hard_limit(container, usage: dict, cache: dict[str, float] | None = None) -> None:
     """超限时 docker pause 容器 + 发邮件。"""
-    from ..utils.mail import send as send_mail
 
     try:
         with session_scope(commit=False) as session:
@@ -279,15 +275,12 @@ def _handle_hard_limit(container, usage: dict, cache: dict[str, float] | None = 
         )
         sent_any = False
         for e in emails:
-            try:
-                result = send_mail(to=e, subject=subject, content=content)
-                if result.get("ok"):
-                    sent_any = True
-                    logger.info("[disk-check] hard limit email sent to %s for container %s", e, container.id)
-                else:
-                    logger.warning("[disk-check] hard limit email failed to %s: %s", e, result)
-            except Exception as ex:
-                logger.warning("[disk-check] hard limit email failed to %s: %s", e, ex)
+            result = send_mail(
+                to=e, subject=subject, content=content,
+                target_type="container", target_id=container.id,
+                detail={"mail_type": "disk_hard_limit", "name": container.name},
+            )
+            sent_any = bool(result.get("ok")) or sent_any
         if sent_any:
             last_sent[last_key] = now_ts
 
@@ -368,7 +361,6 @@ def _handle_freeze_escalation(
     days_frozen: int = 0,
 ) -> None:
     """冻结满 N 天仍超限 → remove_container + 通知邮件。"""
-    from ..utils.mail import send as send_mail
 
     container_data = usage.get("container", {})
     total_gb = (container_data.get("total_bytes") or 0) / (1024**3)
@@ -399,15 +391,12 @@ def _handle_freeze_escalation(
             )
             sent_any = False
             for e in emails:
-                try:
-                    result = send_mail(to=e, subject=subject, content=content)
-                    if result.get("ok"):
-                        sent_any = True
-                        logger.info("[disk-check] escalation email sent to %s for container %s", e, container.id)
-                    else:
-                        logger.warning("[disk-check] escalation email failed to %s: %s", e, result)
-                except Exception as ex:
-                    logger.warning("[disk-check] escalation email failed to %s: %s", e, ex)
+                result = send_mail(
+                    to=e, subject=subject, content=content,
+                    target_type="container", target_id=container.id,
+                    detail={"mail_type": "disk_escalation", "name": container.name, "days_frozen": days_frozen},
+                )
+                sent_any = bool(result.get("ok")) or sent_any
             if sent_any:
                 last_sent[last_key] = now_ts
 

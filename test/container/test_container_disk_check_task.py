@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 from ...constant import ContainerStatus, MachineStatus
 from ...models.containers import Container
+from ...models.operation_log import OperationLog
 from ...models.container_disk_freeze_state import ContainerDiskFreezeState
 from ...repositories import (
     container_disk_freeze_state_repo,
@@ -170,7 +171,7 @@ class TestDiskCheckMailResultHandling:
             lambda *args, **kwargs: ["owner@bjtu.edu.cn"],
         )
         monkeypatch.setattr(
-            "FuxiYu_CtrKernel.utils.mail.send",
+            "FuxiYu_CtrKernel.utils.mail._send_smtp",
             lambda **kwargs: {"ok": False, "error": "smtp"},
         )
 
@@ -178,8 +179,12 @@ class TestDiskCheckMailResultHandling:
         caplog.set_level("INFO")
         container_disk_check_task._handle_soft_limit(container, _usage_exceeding_soft_limit(), cache=cache)
 
-        assert "soft limit email failed" in caplog.text
-        assert "soft limit email sent" not in caplog.text
+        assert "op failed: op=send_mail" in caplog.text
+        assert "op success: op=send_mail" not in caplog.text
+        log = db_session.scalars(select(OperationLog).where(OperationLog.operation == "send_mail")).one()
+        assert log.success is False
+        assert log.detail["mail_type"] == "disk_soft_limit"
+        assert log.detail["name"] == container.name
         assert f"_soft_limit_last_sent_{container.id}" not in cache
 
     def test_hard_limit_mail_failure_is_not_logged_as_sent(self, app, db_session, monkeypatch, caplog):
@@ -190,7 +195,7 @@ class TestDiskCheckMailResultHandling:
             lambda *args, **kwargs: ["owner@bjtu.edu.cn"],
         )
         monkeypatch.setattr(
-            "FuxiYu_CtrKernel.utils.mail.send",
+            "FuxiYu_CtrKernel.utils.mail._send_smtp",
             lambda **kwargs: {"ok": False, "error": "smtp"},
         )
         monkeypatch.setattr(container_disk_check_task.container_tasks, "pause_container", lambda *args, **kwargs: True)
@@ -199,8 +204,11 @@ class TestDiskCheckMailResultHandling:
         caplog.set_level("INFO")
         container_disk_check_task._handle_hard_limit(container, _usage_exceeding_hard_limit(), cache=cache)
 
-        assert "hard limit email failed" in caplog.text
-        assert "hard limit email sent" not in caplog.text
+        assert "op failed: op=send_mail" in caplog.text
+        assert "op success: op=send_mail" not in caplog.text
+        log = db_session.scalars(select(OperationLog).where(OperationLog.operation == "send_mail")).one()
+        assert log.success is False
+        assert log.detail["mail_type"] == "disk_hard_limit"
         assert f"_hard_limit_last_sent_{container.id}" not in cache
 
     def test_escalation_mail_failure_is_not_logged_as_sent(self, app, db_session, monkeypatch, caplog):
@@ -211,7 +219,7 @@ class TestDiskCheckMailResultHandling:
             lambda *args, **kwargs: ["owner@bjtu.edu.cn"],
         )
         monkeypatch.setattr(
-            "FuxiYu_CtrKernel.utils.mail.send",
+            "FuxiYu_CtrKernel.utils.mail._send_smtp",
             lambda **kwargs: {"ok": False, "error": "smtp"},
         )
         monkeypatch.setattr(container_disk_check_task.container_tasks, "remove_container", lambda *args, **kwargs: True)
@@ -225,8 +233,11 @@ class TestDiskCheckMailResultHandling:
             days_frozen=8,
         )
 
-        assert "escalation email failed" in caplog.text
-        assert "escalation email sent" not in caplog.text
+        assert "op failed: op=send_mail" in caplog.text
+        assert "op success: op=send_mail" not in caplog.text
+        log = db_session.scalars(select(OperationLog).where(OperationLog.operation == "send_mail")).one()
+        assert log.success is False
+        assert log.detail["mail_type"] == "disk_escalation"
         assert f"_escalation_last_sent_{container.id}" not in cache
 
 
@@ -1266,7 +1277,7 @@ class TestHandleFreezeEscalation:
             return {"ok": True}
 
         monkeypatch.setattr(
-            "FuxiYu_CtrKernel.utils.mail.send", _fake_send_mail
+            "FuxiYu_CtrKernel.utils.mail._send_smtp", _fake_send_mail
         )
         monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_check_enabled", lambda: True)
 
@@ -1559,7 +1570,7 @@ class TestFreezeStateMachineTimeline:
         monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_freeze_grace_days", lambda: 3)
         # 邮件/Node 动作全部替换为记录器：本测试只验证状态机时序
         monkeypatch.setattr(container_disk_check_task, "_DISK_CHECK_CACHE", {})
-        monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail.send", lambda **kw: {"ok": False})
+        monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail._send_smtp", lambda **kw: {"ok": False})
         pauses = []
         removes = []
         monkeypatch.setattr(container_disk_check_task.container_tasks, "pause_container",

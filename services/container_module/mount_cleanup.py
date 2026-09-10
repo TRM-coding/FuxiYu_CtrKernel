@@ -16,13 +16,72 @@ from ...repositories import (
     deleted_container_restore_snapshot_repo,
     machine_repo,
 )
-from ..operation_log_tasks import write_operation_log as write_op_log
+from ..operation_log_tasks import log_failure, log_success
 from .exceptions import NodeServiceError, _raise_on_node_error
 from .node_comms import get_full_url, send
 from .utils import _container_log_detail
 
 
 def clean_mount_path(
+    mount_cleanup_id: int,
+    *,
+    operator_user_id: int | None = None,
+    trigger: str = "auto_mount_cleanup",
+    escalation: bool | None = None,
+) -> dict:
+    try:
+        return _clean_mount_path_impl(
+            mount_cleanup_id,
+            operator_user_id=operator_user_id,
+            trigger=trigger,
+            escalation=escalation,
+        )
+    except Exception as exc:
+        container_name = None
+        machine_id = None
+        deleted_id = None
+        mount_path = None
+        try:
+            with session_scope(commit=False) as session:
+                cleanup = container_mount_cleanup_repo.get_by_id(
+                    int(mount_cleanup_id),
+                    session=session,
+                )
+                if cleanup is not None:
+                    deleted_id = getattr(cleanup, "deleted_id", None)
+                    mount_path = getattr(cleanup, "mount_path", None)
+                    machine_id = getattr(cleanup, "machine_id", None)
+                    container = containers_repo.get_by_id(
+                        cleanup.container_id,
+                        session=session,
+                        include_invalid=True,
+                    )
+                    if container is not None:
+                        container_name = container.name
+                        machine_id = getattr(container, "machine_id", None) or machine_id
+                        mount_path = getattr(container, "bind_mount_path", None) or mount_path
+        except Exception:
+            pass
+        log_failure(
+            operator_user_id=operator_user_id,
+            operation=OperationType.DELETE_CONTAINER,
+            target_type="container_mount_cleanup",
+            target_id=int(mount_cleanup_id or 0),
+            detail={
+                **_container_log_detail(container_name),
+                "mount_path": mount_path,
+                "trigger": trigger,
+                "deleted_id": deleted_id,
+                "machine_id": machine_id,
+            },
+            error_reason=getattr(exc, "reason", None)
+            or getattr(exc, "error_reason", None)
+            or str(exc),
+        )
+        raise
+
+
+def _clean_mount_path_impl(
     mount_cleanup_id: int,
     *,
     operator_user_id: int | None = None,
@@ -114,8 +173,7 @@ def clean_mount_path(
                 session=session,
             )
 
-    write_op_log(
-        success=True,
+    log_success(
         operator_user_id=operator_user_id,
         operation=OperationType.DELETE_CONTAINER,
         target_type="container_mount_cleanup",

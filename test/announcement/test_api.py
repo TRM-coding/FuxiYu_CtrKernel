@@ -3,12 +3,14 @@
 import json
 
 import pytest
+from sqlalchemy import select
 
 from ...constant import AnnouncementStatus, AnnouncementTemplateCategory
 
 pytestmark = pytest.mark.usefixtures("ensure_auth_users")
 from ...extensions import session_scope
 from ...models.announcement import Announcement, AnnouncementDraft, AnnouncementTemplate
+from ...models.operation_log import OperationLog
 from ...repositories import announcement_repo
 from ..assertions import assert_json_error, assert_json_success
 from ..factories import (
@@ -262,7 +264,7 @@ def test_a18_get_announcement_not_found(client, monkeypatch):
 # ══════════════════════════════════════════════════════════════════════
 
 
-def test_a19_resend_sent(client, monkeypatch):
+def test_a19_resend_sent(client, monkeypatch, db_session):
     """A-19: SENT 公告重发 → 200。"""
     mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
     user = _make_operator()
@@ -275,6 +277,9 @@ def test_a19_resend_sent(client, monkeypatch):
     )
     resp = client.post(f"/api/announcements/{ann.id}/resend", headers=_operator_headers())
     assert_json_success(resp)
+    log = db_session.scalars(select(OperationLog).where(OperationLog.operation == "send_mail")).one()
+    assert log.operator_user_id == 1
+    assert log.detail["mail_type"] == "announcement_resend"
 
 
 def test_a20_resend_sending(client, monkeypatch):
@@ -398,7 +403,7 @@ def test_a29_delete_draft_not_found(client, monkeypatch):
 # ══════════════════════════════════════════════════════════════════════
 
 
-def test_a30_batch_send(client, monkeypatch):
+def test_a30_batch_send(client, monkeypatch, db_session):
     """A-30: draft_ids + targets → 200 + N results。"""
     mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
     user = _make_operator()
@@ -416,6 +421,10 @@ def test_a30_batch_send(client, monkeypatch):
     payload = assert_json_success(resp)
     assert payload["total"] == 2
     assert len(payload["results"]) == 2
+    logs = db_session.scalars(select(OperationLog).where(OperationLog.operation == "send_mail")).all()
+    assert len(logs) == 2
+    assert all(log.operator_user_id == 1 for log in logs)
+    assert {log.detail["name"] for log in logs} == {"d1", "d2"}
 
 
 def test_a31_batch_send_empty_targets(client, monkeypatch):

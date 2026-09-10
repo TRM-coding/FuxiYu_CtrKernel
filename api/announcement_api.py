@@ -274,12 +274,12 @@ def get_announcement_api(
 def resend_announcement_api(
     request: Request,
     announcement_id: int,
-    _: int = Depends(require_operator),
+    operator_user_id: int = Depends(require_operator),
 ):
     """重新发送公告。"""
 
     try:
-        result = announcement_tasks.resend_announcement_service(announcement_id)
+        result = announcement_tasks.resend_announcement_service(announcement_id, operator_user_id=operator_user_id)
     except ValueError as e:
         reason = str(e)
         if reason == "announcement_still_sending":
@@ -447,7 +447,7 @@ def delete_draft_api(
 async def batch_send_drafts_api(
     request: Request,
     payload: dict[str, Any] = Body(default_factory=dict),
-    _: int = Depends(require_operator),
+    operator_user_id: int = Depends(require_operator),
 ):
     """批量发送草稿。"""
 
@@ -456,7 +456,7 @@ async def batch_send_drafts_api(
     targets = [announcement_tasks.TargetEntry(**target) for target in raw_targets]
 
     try:
-        result = announcement_tasks.batch_send_drafts_service(draft_ids, targets)
+        result = announcement_tasks.batch_send_drafts_service(draft_ids, targets, operator_user_id=operator_user_id)
     except ValueError as e:
         reason = str(e)
         status_map = {

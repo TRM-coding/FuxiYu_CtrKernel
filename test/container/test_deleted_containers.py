@@ -1,15 +1,92 @@
 from datetime import datetime
 
+import pytest
+
 from sqlalchemy import select
 
 from ...api import container_api, deps
 from ...models.container_mount_cleanup import ContainerMountCleanup
 from ...models.deleted_container_restore_snapshot import DeletedContainerRestoreSnapshot
+from ...models.operation_log import OperationLog
 from ...repositories import container_mount_cleanup_repo, containers_repo, deleted_container_restore_snapshot_repo, usercontainer_repo
 from ...services import container_tasks
 from ...services.container_module import mount_cleanup as mount_cleanup_mod
 from ..factories import create_container, create_container_graph, create_machine, create_user
 from .conftest import NODE_REMOVE_SUCCESS
+
+
+@pytest.mark.parametrize("kwargs,reason", [
+    ({}, "invalid_payload"),
+    ({"mount_cleanup_id": 9999}, "not_found"),
+    ({"deleted_id": 9999}, "deleted container record not found"),
+])
+def test_manual_mount_preflight_failure_is_audited(db_session, kwargs, reason):
+    with pytest.raises((container_tasks.NodeServiceError, ValueError)):
+        container_tasks.clean_deleted_container_mount(operator_user_id=7, **kwargs)
+    log = db_session.scalars(select(OperationLog)).one()
+    assert log.success is False
+    assert log.operator_user_id == 7
+    assert log.error_reason == reason
+    assert log.detail["trigger"] == "manual_clean_mount"
+
+
+def test_empty_manual_mount_api_request_is_audited(client, db_session, monkeypatch):
+    _auth(monkeypatch)
+    response = client.post("/api/containers/clean_deleted_container_mount", json={})
+    assert response.status_code == 404
+    assert response.json()["error_reason"] == "not_found"
+    log = db_session.scalars(select(OperationLog)).one()
+    assert log.error_reason == "not_found"
+
+
+def test_manual_cleanup_record_disappearing_during_preflight_is_audited(db_session, monkeypatch):
+    machine = create_machine()
+    cleanup = container_mount_cleanup_repo.insert(
+        container_id=999, container_name="legacy_mount", machine_id=machine.id,
+        mount_path="/home/u/containers/legacy_mount", session=db_session)
+    db_session.commit()
+    calls = []
+
+    def disappearing(*args, **kwargs):
+        calls.append(args)
+        return cleanup if len(calls) == 1 else None
+
+    monkeypatch.setattr(container_mount_cleanup_repo, "get_by_id", disappearing)
+    with pytest.raises(container_tasks.NodeServiceError, match="mount cleanup record not found"):
+        container_tasks.clean_deleted_container_mount(mount_cleanup_id=cleanup.id)
+    log = db_session.scalars(select(OperationLog)).one()
+    assert log.error_reason == "not_found"
+    assert log.target_id == cleanup.id
+
+
+def test_each_automatic_and_manual_mount_failure_is_audited(db_session, monkeypatch):
+    machine = create_machine()
+    cleanup = container_mount_cleanup_repo.insert(
+        container_id=999, container_name="retained_mount", machine_id=machine.id,
+        mount_path="/home/u/containers/retained_mount", session=db_session)
+    db_session.commit()
+    attempts = []
+
+    def fail_send(*args, **kwargs):
+        attempts.append(args)
+        raise RuntimeError("node unavailable")
+
+    monkeypatch.setattr(mount_cleanup_mod, "send", fail_send)
+    for _ in range(3):
+        with pytest.raises(RuntimeError, match="node unavailable"):
+            mount_cleanup_mod.clean_mount_path(cleanup.id)
+    assert len(db_session.scalars(select(OperationLog)).all()) == 3
+    # Service preflight adopts a legacy record; downstream logs exactly once per manual attempt.
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="node unavailable"):
+            container_tasks.clean_deleted_container_mount(mount_cleanup_id=cleanup.id)
+    logs = db_session.scalars(select(OperationLog)).all()
+    assert len(logs) == 5
+    assert len(attempts) == 5
+    db_session.expire_all()
+    assert cleanup.cleaned_at is None
+    deleted = db_session.scalars(select(DeletedContainerRestoreSnapshot)).one()
+    assert deleted.mount_cleaned is False
 
 
 def _auth(monkeypatch, *, valid=True, user_id=1):

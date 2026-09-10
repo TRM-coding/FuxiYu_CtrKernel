@@ -13,6 +13,55 @@ from ...repositories import (
     usercontainer_repo,
 )
 from ...repositories.containers_repo import derive_port_mappings
+from .exceptions import NodeServiceError
+
+
+def resolve_mount_cleanup_request(
+    deleted_id: int | None, mount_cleanup_id: int | None,
+) -> tuple[int, object | None]:
+    """Resolve manual cleanup input, including legacy cleanup-only records."""
+    if deleted_id is not None and mount_cleanup_id is None:
+        with session_scope(commit=False) as session:
+            deleted_exists = deleted_container_restore_snapshot_repo.get_by_id(
+                int(deleted_id),
+                session=session,
+            )
+            cleanup_exists = container_mount_cleanup_repo.get_by_id(
+                int(deleted_id),
+                session=session,
+            )
+        if deleted_exists is None and cleanup_exists is not None:
+            mount_cleanup_id = int(deleted_id)
+            deleted_id = None
+
+    if deleted_id is None and mount_cleanup_id is not None:
+        with session_scope(commit=False) as session:
+            cleanup = container_mount_cleanup_repo.get_by_id(int(mount_cleanup_id), session=session)
+            if cleanup is None:
+                raise NodeServiceError("mount cleanup record not found", reason="not_found")
+            deleted_id = getattr(cleanup, "deleted_id", None)
+            if deleted_id is None:
+                deleted = deleted_container_restore_snapshot_repo.get_by_mount_cleanup_id(
+                    int(mount_cleanup_id),
+                    session=session,
+                )
+                deleted_id = deleted.id if deleted else None
+        if deleted_id is None:
+            with session_scope() as session:
+                cleanup = container_mount_cleanup_repo.get_by_id(
+                    int(mount_cleanup_id),
+                    session=session,
+                )
+                if cleanup is None:
+                    raise NodeServiceError("mount cleanup record not found", reason="not_found")
+                deleted = ensure_deleted_record_for_cleanup(cleanup, session=session)
+                deleted_id = deleted.id
+
+    if deleted_id is None:
+        raise NodeServiceError("deleted_id is required", reason="invalid_payload")
+    with session_scope() as session:
+        _deleted, cleanup = ensure_mount_cleanup_record(int(deleted_id), session=session)
+    return int(deleted_id), cleanup
 
 
 def build_container_restore_snapshot(

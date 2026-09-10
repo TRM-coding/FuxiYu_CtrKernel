@@ -40,12 +40,15 @@ def list_settings_api(
 @router.post("", response_model=UpdateSystemSettingsResponse)
 def update_settings_api(
     message: UpdateSystemSettingsRequest,
-    _: int = Depends(require_permission("settings:manage")),
+    operator_user_id: int = Depends(require_permission("settings:manage")),
 ):
     """批量更新系统设置。"""
 
     try:
-        settings = settings_tasks.update_settings(message.values)
+        settings = settings_tasks.update_settings(
+            message.values,
+            operator_user_id=operator_user_id,
+        )
     except ValueError as e:
         return _error(422, str(e), "invalid_setting")
     except Exception as e:
@@ -78,7 +81,7 @@ def get_image_platform_injection_api(
 )
 def update_image_platform_injection_api(
     message: UpdateImagePlatformInjectionSettingRequest,
-    _: int = Depends(require_permission("settings:manage")),
+    operator_user_id: int = Depends(require_permission("settings:manage")),
 ):
     """更新镜像平台注入片段。"""
 
@@ -87,6 +90,7 @@ def update_image_platform_injection_api(
             settings_tasks.IMAGE_PLATFORM_INJECTION_KEY,
             message.content,
             description="镜像构建时由 Ctrl 拼入最终 Dockerfile 的平台注入片段。",
+            operator_user_id=operator_user_id,
         )
     except ValueError as e:
         return _error(422, str(e), "invalid_setting")

@@ -32,7 +32,7 @@ from ..schemas.machine import (
 )
 from ..services import machine_tasks as machine_service
 from ..services.container_module import node_comms
-from ..services.operation_log_tasks import write_operation_log as write_op_log
+from ..services.operation_log_tasks import log_failure, log_success
 from .deps import require_current_user, require_operator, require_permission, require_resource
 
 router = APIRouter(prefix="/machines", tags=["machines"])
@@ -126,9 +126,7 @@ def register_machine_api(
         )
     except Exception as e:
         err_reason = getattr(e, "error_reason", None)
-        write_op_log(
-            success=False,
-            operator_user_id=operator_user_id,
+        log_failure(operator_user_id=operator_user_id,
             operation=OperationType.ADD_MACHINE,
             target_type="machine",
             target_id=0,
@@ -139,9 +137,7 @@ def register_machine_api(
             return _error(422, str(e), err_reason)
         return _error(500, f"Internal error: {e}", "internal_error")
 
-    write_op_log(
-        success=True,
-        operator_user_id=operator_user_id,
+    log_success(operator_user_id=operator_user_id,
         operation=OperationType.ADD_MACHINE,
         target_type="machine",
         target_id=result["machine_id"],

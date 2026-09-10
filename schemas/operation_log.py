@@ -26,6 +26,7 @@ class OperationLogItem(BaseModel):
     target_type: str | None = None
     target_id: int | None = None
     target_name: str | None = None
+    target_display_name: str | None = None
     root_owner: str | None = None
     detail: dict[str, Any] | None = None
     success: bool | int | None = None

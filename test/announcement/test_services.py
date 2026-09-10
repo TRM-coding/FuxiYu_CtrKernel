@@ -184,7 +184,7 @@ def test_s11_send_draft_partial_failure(db_session, monkeypatch):
         return results
 
     monkeypatch.setattr(
-        "FuxiYu_CtrKernel.services.announcement_tasks.send_batch", _mock_send_batch
+        "FuxiYu_CtrKernel.utils.mail._send_batch_smtp", _mock_send_batch
     )
 
     result = send_draft_service(
@@ -194,6 +194,14 @@ def test_s11_send_draft_partial_failure(db_session, monkeypatch):
     assert result.status == "partial"
     assert result.success_count == 1
     assert result.fail_count == 1
+    from sqlalchemy import select
+    from ...models.operation_log import OperationLog
+
+    logs = db_session.scalars(select(OperationLog).order_by(OperationLog.id)).all()
+    assert [log.success for log in logs] == [True, False]
+    assert all(log.target_type == "announcement" and log.target_id == result.announcement_id for log in logs)
+    assert [log.detail["messages"][0]["recipient"] for log in logs] == [u1.email, u2.email]
+    assert all(log.detail["batch_total"] == 2 and log.detail["message_count"] == 1 for log in logs)
 
 
 def test_s12_send_draft_all_failure(db_session, monkeypatch):
@@ -202,7 +210,7 @@ def test_s12_send_draft_all_failure(db_session, monkeypatch):
     draft = _repo_save_draft(title="通知", content="正文", created_by=u1.id)
 
     monkeypatch.setattr(
-        "FuxiYu_CtrKernel.services.announcement_tasks.send_batch",
+        "FuxiYu_CtrKernel.utils.mail._send_batch_smtp",
         lambda messages, **kw: [{"ok": False, "error": "fail", "to": [m["to"]] if isinstance(m["to"], str) else m["to"]} for m in messages],
     )
 

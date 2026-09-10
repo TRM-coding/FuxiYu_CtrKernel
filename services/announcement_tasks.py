@@ -19,7 +19,7 @@ from ..models.user import User
 from ..models.usercontainer import UserContainer
 from ..repositories import announcement_repo
 from . import settings_tasks
-from ..utils.mail import send as send_mail, send_batch
+from ..utils.mail import send_batch
 
 # ══════════════════════════════════════════════════════════════════════
 # Pydantic 数据模型
@@ -152,6 +152,7 @@ def resolve_recipients(targets: list[TargetEntry]) -> ResolveResult:
 def send_draft_service(
     draft_id: int,
     targets: list[TargetEntry],
+    *, operator_user_id: int | None = None,
 ) -> SendResult:
     """将单条草稿发送给 targets 指定的收件人集合。
 
@@ -204,7 +205,11 @@ def send_draft_service(
         {"to": r.email, "subject": announcement_title, "content": announcement_content}
         for r in resolve_result.recipients
     ]
-    results = send_batch(messages)
+    results = send_batch(
+        messages, target_type="announcement", target_id=announcement_id,
+        operator_user_id=operator_user_id,
+        detail={"mail_type": "announcement", "name": announcement_title, "draft_id": draft_id},
+    )
     success = 0
     fail = 0
     failures: list[dict] = []
@@ -256,6 +261,7 @@ def send_draft_service(
 def batch_send_drafts_service(
     draft_ids: list[int],
     targets: list[TargetEntry],
+    *, operator_user_id: int | None = None,
 ) -> BatchSendResult:
     """批量发送草稿：所有被勾选的草稿发给同一组收件人。
 
@@ -273,7 +279,7 @@ def batch_send_drafts_service(
     results: list[SendResult] = []
     for did in draft_ids:
         try:
-            results.append(send_draft_service(did, targets=targets))
+            results.append(send_draft_service(did, targets=targets, operator_user_id=operator_user_id))
         except Exception as exc:
             results.append(
                 SendResult(
@@ -319,7 +325,7 @@ def batch_delete_announcements_service(announcement_ids: list[int]) -> dict:
 # ══════════════════════════════════════════════════════════════════════
 
 
-def resend_announcement_service(announcement_id: int) -> SendResult:
+def resend_announcement_service(announcement_id: int, *, operator_user_id: int | None = None) -> SendResult:
     """对已发送公告重新发送邮件，沿用原 targets。"""
     with session_scope() as session:
         ann = announcement_repo.get_announcement_by_id(announcement_id, session=session)
@@ -349,7 +355,11 @@ def resend_announcement_service(announcement_id: int) -> SendResult:
         {"to": r.email, "subject": ann_title, "content": ann_content}
         for r in resolve_result.recipients
     ]
-    results = send_batch(messages)
+    results = send_batch(
+        messages, target_type="announcement", target_id=ann_id,
+        operator_user_id=operator_user_id,
+        detail={"mail_type": "announcement_resend", "name": ann_title},
+    )
     success = 0
     fail = 0
     failures: list[dict] = []

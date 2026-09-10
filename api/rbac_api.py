@@ -16,7 +16,7 @@ from ..schemas.rbac import (
     UpdateRbacGroupEntitiesResponse,
 )
 from ..services import rbac_service
-from ..services.operation_log_tasks import write_operation_log as write_op_log
+from ..services.operation_log_tasks import log_failure, log_success
 from .deps import require_permission
 
 router = APIRouter(prefix="/rbac", tags=["rbac"])
@@ -24,7 +24,7 @@ router = APIRouter(prefix="/rbac", tags=["rbac"])
 logger = logging.getLogger("FuxiYu_CtrKernel.api.rbac_api")
 
 
-def _log_failure(*, operation, target_id, operator_user_id, error_reason, exc=None, detail=None, target_type="rbac_group"):
+def _log_rbac_failure(*, operation, target_id, operator_user_id, error_reason, exc=None, detail=None, target_type="rbac_group"):
     """失败双写：op-log（审计）+ ctrl 日志（调试，带层级归因与"差在哪"的 why）。
 
     层归因约定：service ValueError = 业务校验层（layer=service）；
@@ -34,9 +34,7 @@ def _log_failure(*, operation, target_id, operator_user_id, error_reason, exc=No
     merged_detail = dict(detail or {})
     if why:
         merged_detail["why"] = why
-    write_op_log(
-        success=False,
-        operator_user_id=operator_user_id,
+    log_failure(operator_user_id=operator_user_id,
         operation=operation,
         target_type=target_type,
         target_id=target_id,
@@ -82,7 +80,7 @@ def update_rbac_group_entities_api(
         group = rbac_service.update_group_entities(group_id, message.entity_codes)
     except ValueError as e:
         reason = str(e)
-        _log_failure(
+        _log_rbac_failure(
             operation=OperationType.UPDATE_RBAC_GROUP_ENTITIES,
             target_id=group_id,
             operator_user_id=operator_user_id,
@@ -95,9 +93,7 @@ def update_rbac_group_entities_api(
         if reason.startswith("unknown_auth_entities:"):
             return _error(400, "unknown auth entity", "unknown_auth_entity")
         return _error(400, "invalid rbac update", "invalid_rbac_update")
-    write_op_log(
-        success=True,
-        operator_user_id=operator_user_id,
+    log_success(operator_user_id=operator_user_id,
         operation=OperationType.UPDATE_RBAC_GROUP_ENTITIES,
         target_type="rbac_group",
         target_id=group_id,
@@ -125,7 +121,7 @@ def create_rbac_group_api(
         )
     except ValueError as e:
         reason = str(e)
-        _log_failure(
+        _log_rbac_failure(
             operation=OperationType.CREATE_RBAC_GROUP,
             target_id=0,
             operator_user_id=operator_user_id,
@@ -140,9 +136,7 @@ def create_rbac_group_api(
         if reason.startswith("unknown_auth_entities:"):
             return _error(400, "unknown auth entity", "unknown_auth_entity")
         return _error(400, "invalid rbac group", "invalid_rbac_group")
-    write_op_log(
-        success=True,
-        operator_user_id=operator_user_id,
+    log_success(operator_user_id=operator_user_id,
         operation=OperationType.CREATE_RBAC_GROUP,
         target_type="rbac_group",
         target_id=group["id"],
@@ -185,7 +179,7 @@ def set_user_groups_api(
         final_ids = rbac_service.set_user_groups(user_id, group_ids, operator_user_id=operator_user_id)
     except ValueError as e:
         reason = str(e)
-        _log_failure(
+        _log_rbac_failure(
             operation=OperationType.UPDATE_USER_GROUPS,
             target_type="user",
             target_id=user_id,
@@ -202,9 +196,7 @@ def set_user_groups_api(
             return _error(400, "unknown rbac group", reason)
         return _error(400, "invalid rbac user groups", reason)
 
-    write_op_log(
-        success=True,
-        operator_user_id=operator_user_id,
+    log_success(operator_user_id=operator_user_id,
         operation=OperationType.UPDATE_USER_GROUPS,
         target_type="user",
         target_id=user_id,

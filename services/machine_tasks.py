@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy import String, cast, func, or_, select
 from ..repositories import containers_repo, machine_permission_repo, user_repo
-from .operation_log_tasks import write_operation_log as write_op_log
+from .operation_log_tasks import log_failure, log_result, log_success
 from ..constant import MachineStatus, OperationType
 from ..models.machine import Machine
 #######################################
@@ -47,32 +47,96 @@ class machine_detail_information(BaseModel):
 #######################################
 # 机器权限管理
 
+def _machine_log_detail(machine=None, *, machine_name=None, machine_ip=None, **extra) -> dict:
+    name = machine_name if machine_name is not None else getattr(machine, "machine_name", None)
+    ip = machine_ip if machine_ip is not None else getattr(machine, "machine_ip", None)
+    detail = {
+        "name": name,
+        "machine_name": name,
+        "ip": ip,
+    }
+    detail.update(extra)
+    return detail
+
+
 def Add_machine_permission(machine_id: int, user_id: int, operator_user_id: int | None = None) -> bool:
+    machine = None
+    user = None
+    machine_name = None
+    machine_ip = None
     try:
         with session_scope() as session:
             machine = get_by_id(machine_id, session=session)
             if not machine:
                 raise ValueError('machine_not_found')
+            machine_name = machine.machine_name
+            machine_ip = machine.machine_ip
             user = user_repo.get_by_id(user_id, session=session)
             if not user:
                 raise ValueError('user_not_found')
             machine_permission_repo.add_permission(machine_id, user_id, session=session)
     except Exception as e:
-        write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE_PERMISSION, target_type="machine",
-                     target_id=machine_id, detail={"user_id": user_id},
+        log_failure(operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE_PERMISSION, target_type="machine",
+                     target_id=machine_id,
+                     detail=_machine_log_detail(
+                         machine_name=machine_name,
+                         machine_ip=machine_ip,
+                         user_id=user_id,
+                         username=getattr(user, "username", None),
+                     ),
                      error_reason=getattr(e, 'reason', None) or str(e))
         raise
-    write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE_PERMISSION, target_type="machine",
-                 target_id=machine_id, detail={"user_id": user_id, "username": user.username})
+    log_success(operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE_PERMISSION, target_type="machine",
+                 target_id=machine_id,
+                 detail=_machine_log_detail(
+                     machine_name=machine_name,
+                     machine_ip=machine_ip,
+                     user_id=user_id,
+                     username=user.username,
+                 ))
     return True
 
 
 def Remove_machine_permission(machine_id: int, user_id: int, operator_user_id: int | None = None) -> bool:
-    with session_scope() as session:
-        result = machine_permission_repo.remove_permission(machine_id, user_id, session=session)
-    write_op_log(success=bool(result), operator_user_id=operator_user_id, operation=OperationType.REMOVE_MACHINE_PERMISSION, target_type="machine",
-                 target_id=machine_id, detail={"user_id": user_id},
-                 error_reason=None if result else "remove_permission_failed")
+    machine = None
+    user = None
+    machine_name = None
+    machine_ip = None
+    try:
+        with session_scope() as session:
+            machine = get_by_id(machine_id, session=session)
+            machine_name = getattr(machine, "machine_name", None)
+            machine_ip = getattr(machine, "machine_ip", None)
+            user = user_repo.get_by_id(user_id, session=session)
+            result = machine_permission_repo.remove_permission(machine_id, user_id, session=session)
+    except Exception as exc:
+        log_failure(operator_user_id=operator_user_id,
+            operation=OperationType.REMOVE_MACHINE_PERMISSION,
+            target_type="machine",
+            target_id=machine_id,
+            detail=_machine_log_detail(
+                machine_name=machine_name,
+                machine_ip=machine_ip,
+                user_id=user_id,
+                username=getattr(user, "username", None),
+            ),
+            error_reason=getattr(exc, "error_reason", None) or str(exc),
+        )
+        raise
+    log_result(
+        success=bool(result),
+        operator_user_id=operator_user_id,
+        operation=OperationType.REMOVE_MACHINE_PERMISSION,
+        target_type="machine",
+        target_id=machine_id,
+        detail=_machine_log_detail(
+            machine_name=machine_name,
+            machine_ip=machine_ip,
+            user_id=user_id,
+            username=getattr(user, "username", None),
+        ),
+        error_reason=None if result else "remove_permission_failed",
+    )
     return result
 
 
@@ -261,12 +325,12 @@ def Add_machine(machine_name:str,
                 session=session,
             )
     except Exception as e:
-        write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE, target_type="machine", target_id=0,
-                     detail={"name": machine_name, "ip": machine_ip},
+        log_failure(operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE, target_type="machine", target_id=0,
+                     detail=_machine_log_detail(machine_name=machine_name, machine_ip=machine_ip),
                      error_reason=getattr(e, 'error_reason', None) or str(e))
         raise
-    write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE, target_type="machine", target_id=machine.id,
-                 detail={"name": machine_name, "ip": machine_ip})
+    log_success(operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE, target_type="machine", target_id=machine.id,
+                 detail=_machine_log_detail(machine, machine_name=machine_name, machine_ip=machine_ip))
     return True
 
 #######################################
@@ -304,11 +368,8 @@ def Remove_machine(machine_id:list[int], operator_user_id: int | None = None)->d
             err = getattr(e, 'reason', None) or str(e)
         if ok:
             removed.append(id)
-        write_op_log(success=bool(ok), operator_user_id=operator_user_id, operation=OperationType.REMOVE_MACHINE, target_type="machine", target_id=id,
-                     detail={
-                         "name": getattr(machine, 'machine_name', None),
-                         "ip": getattr(machine, 'machine_ip', None),
-                     },
+        log_result(success=bool(ok), operator_user_id=operator_user_id, operation=OperationType.REMOVE_MACHINE, target_type="machine", target_id=id,
+                     detail=_machine_log_detail(machine),
                      error_reason=err)
     return {"removed": removed, "blocked": blocked}
 #######################################
@@ -320,6 +381,13 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
     with session_scope(commit=False) as session:
         machine = get_by_id(machine_id, session=session)
     if not machine:
+        log_failure(operator_user_id=operator_user_id,
+            operation=OperationType.UPDATE_MACHINE,
+            target_type="machine",
+            target_id=machine_id,
+            detail=_machine_log_detail(machine),
+            error_reason="machine_not_found",
+        )
         return False
 
     # validate shared_size when provided: must be integer and <= 8 GB
@@ -404,12 +472,12 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
             if state_changed:
                 refresh_unavailable_window(machine_id, session=session)
     except Exception as e:
-        write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.UPDATE_MACHINE, target_type="machine", target_id=machine_id,
-                     detail={"before": before, "after": {k: str(v) for k, v in fields.items()}},
+        log_failure(operator_user_id=operator_user_id, operation=OperationType.UPDATE_MACHINE, target_type="machine", target_id=machine_id,
+                     detail=_machine_log_detail(machine, before=before, after={k: str(v) for k, v in fields.items()}),
                      error_reason=getattr(e, 'error_reason', None) or str(e))
         raise
-    write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.UPDATE_MACHINE, target_type="machine", target_id=machine_id,
-                 detail={"before": before, "after": {k: str(v) for k, v in fields.items()}})
+    log_success(operator_user_id=operator_user_id, operation=OperationType.UPDATE_MACHINE, target_type="machine", target_id=machine_id,
+                 detail=_machine_log_detail(machine, before=before, after={k: str(v) for k, v in fields.items()}))
     return True
 
 
@@ -419,6 +487,13 @@ def Set_maintenance(machine_id: int, is_maintenance: bool, operator_user_id: int
     with session_scope(commit=False) as session:
         machine = get_by_id(machine_id, session=session)
         if not machine:
+            log_failure(operator_user_id=operator_user_id,
+                operation=OperationType.UPDATE_MACHINE,
+                target_type="machine",
+                target_id=machine_id,
+                detail=_machine_log_detail(machine, field="is_maintenance"),
+                error_reason="machine_not_found",
+            )
             return False
         before = {"is_maintenance": bool(getattr(machine, "is_maintenance", False))}
 
@@ -430,24 +505,22 @@ def Set_maintenance(machine_id: int, is_maintenance: bool, operator_user_id: int
             if ok:
                 refresh_unavailable_window(machine_id, session=session)
     except Exception as e:
-        write_op_log(
-            success=False,
-            operator_user_id=operator_user_id,
+        log_failure(operator_user_id=operator_user_id,
             operation=OperationType.UPDATE_MACHINE,
             target_type="machine",
             target_id=machine_id,
-            detail={"before": before, "after": after, "field": "is_maintenance"},
+            detail=_machine_log_detail(machine, before=before, after=after, field="is_maintenance"),
             error_reason=getattr(e, "error_reason", None) or str(e),
         )
         raise
 
-    write_op_log(
+    log_result(
         success=bool(ok),
         operator_user_id=operator_user_id,
         operation=OperationType.UPDATE_MACHINE,
         target_type="machine",
         target_id=machine_id,
-        detail={"before": before, "after": after, "field": "is_maintenance"},
+        detail=_machine_log_detail(machine, before=before, after=after, field="is_maintenance"),
         error_reason=None if ok else "machine_not_found",
     )
     return bool(ok)

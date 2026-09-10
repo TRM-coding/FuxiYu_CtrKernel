@@ -28,7 +28,7 @@ def test_ctrl_e2e_cleanup_reminder_sends_mail_for_countdown_container(db_session
     last_ssh_time = cleanup_at - timedelta(days=7)
     _ssh_record(db_session, machine.id, container.id, last_ssh_time.isoformat())
     calls = []
-    monkeypatch.setattr(container_cleanup_task, "send_mail", lambda **kwargs: calls.append(kwargs) or {"ok": True})
+    monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail._send_smtp", lambda **kwargs: calls.append(kwargs) or {"ok": True})
 
     container_cleanup_task.cleanup_expired_containers_once(7)
 
@@ -45,7 +45,7 @@ def test_ctrl_e2e_cleanup_reminder_skips_long_term_container(db_session, monkeyp
     long_term_container_repo.add(container.id, session=db_session)
     db_session.commit()
     calls = []
-    monkeypatch.setattr(container_cleanup_task, "send_mail", lambda **kwargs: calls.append(kwargs) or {"ok": True})
+    monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail._send_smtp", lambda **kwargs: calls.append(kwargs) or {"ok": True})
 
     container_cleanup_task.cleanup_expired_containers_once(7)
 
