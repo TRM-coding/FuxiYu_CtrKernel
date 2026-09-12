@@ -1,10 +1,16 @@
-from ...blueprints import container_api
+from ...api import container_api, deps
 from ...services import container_tasks
 
 
 def _auth(monkeypatch, *, valid=True, user_id=1):
-    monkeypatch.setattr(container_api.authentications_repo, "is_token_valid", lambda token: valid)
-    monkeypatch.setattr(container_api.authentications_repo, "get_user_id_by_token", lambda token: user_id)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: valid)
+    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token, **kwargs: user_id)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_resource", lambda uid, rtype, rid: True)
+    monkeypatch.setattr(
+        "FuxiYu_CtrKernel.repositories.containers_repo.get_machine_id_by_container_id",
+        lambda cid, session: 1,
+    )
 
 
 def test_add_collaborator_api_container_offline_returns_400(client, monkeypatch):

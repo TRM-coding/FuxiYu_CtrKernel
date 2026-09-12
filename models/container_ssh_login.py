@@ -22,6 +22,9 @@ class ContainerSSHLogin(db.Model):
     )
     # 节点返回的上次 SSH 登录时间原样存储；无记录时允许为空
     last_ssh_login_time = db.Column(db.String(255), nullable=True)
+    # 累计顺延秒数（机器不可用窗口补偿，Ctrl 自有列、不被 Node 帧覆盖）：
+    # 窗口关闭时批量 += 故障时长；真登录（last_ssh_login_time 值变化）时清零。
+    deferral_seconds = db.Column(db.Integer, nullable=True, default=0)
     updated_at = db.Column(
         db.DateTime,
         nullable=False,

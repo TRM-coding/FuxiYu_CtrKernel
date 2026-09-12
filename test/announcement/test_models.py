@@ -58,7 +58,7 @@ def test_m02_draft_create_full_fields(db_session):
     assert draft.title == "草稿标题"
     assert draft.content == "正文内容"
     assert draft.created_by == user.id
-    assert draft.creator == user
+    assert draft.creator.id == user.id
 
 
 # ── M-03: AnnouncementTemplate 唯一名 ───────────────────────────────────

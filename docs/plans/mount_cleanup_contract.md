@@ -1,5 +1,7 @@
 # 已删除容器 mount 清理 — 收口合约
 
+> 2026-09 ??????????? `CONTAINER_*` / `ANNOUNCEMENT_*` env ??????????????????? `system_settings`??????? `settings_tasks.SETTING_DEFINITIONS` ????????? `settings_tasks.get_*` getter ???`.env.example` ?????? settings ????
+
 ## Phase 8：mount 路径记录与定期清理
 
 ### 0. 常量定义 / 表结构定义
@@ -83,7 +85,7 @@ CONTAINER_MOUNT_CLEANUP_AFTER_DAYS = int(
 | `schemas/container_mount_cleanup_task.py` | **新建** | 定期清理任务 |
 | `services/container_tasks.py` | 改 | `remove_container` 末尾插入 MountCleanup 记录 |
 | `config.py` | 改 | 新增 3 个配置项 |
-| `FuxiYu_NodeKernel/blueprints/__init__.py` | 改 | 新增 `POST /api/clean_mount` 端点 |
+| `FuxiYu_NodeKernel/network/api.py` | 改 | 新增 `POST /api/clean_mount` 端点 |
 
 ---
 
@@ -181,7 +183,7 @@ container_mount_cleanup_task (daemon thread, interval=86400s)
        ├─ payload = {"config": {"mount_path": row.mount_path}}
        ├─ send(encryption(json.dumps(payload)), signature(...), url)
        │
-       ├─ 成功 → row.cleaned_at = utcnow; db.session.commit()
+       ├─ 成功 → repo 在显式 session 中设置 row.cleaned_at = utcnow 并 flush
        └─ 失败 → print 日志，不清除 cleaned_at（下次重试）
 ```
 
@@ -213,7 +215,7 @@ allowed = {"name", "image", "machine_id", "container_status",
        mount_path: str, escalation: bool, removed_at: datetime,
        cleaned_at: datetime | None
 输出:  ContainerMountCleanup (新建的记录)
-内部:  row = ContainerMountCleanup(...); db.session.add(row); db.session.commit()
+内部:  row = ContainerMountCleanup(...); session.add(row); session.flush()
 ```
 
 ##### `list_pending(cutoff: datetime, limit: int = 100) -> list[ContainerMountCleanup]`
@@ -234,7 +236,7 @@ allowed = {"name", "image", "machine_id", "container_status",
 ```
 输入:  record_id: int
 输出:  bool
-内部:  row.cleaned_at = utcnow; db.session.commit()
+内部:  row.cleaned_at = utcnow; session.flush()
 ```
 
 #### 3.3 `_evaluate_limits` 扩展
@@ -295,7 +297,7 @@ start_mount_cleanup_scheduler(app, interval_seconds=86400) → Thread | None
 
 #### 3.7 NodeKernel 新端点
 
-**文件**: `/home/wyw/FuxiYu_NodeKernel/blueprints/__init__.py`
+**文件**: `/home/wyw/FuxiYu_NodeKernel/network/api.py`
 
 ```
 POST /api/clean_mount
@@ -393,3 +395,5 @@ CREATE TABLE container_mount_cleanup (
     INDEX idx_mount_cleanup_pending (cleaned_at, removed_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
+
+

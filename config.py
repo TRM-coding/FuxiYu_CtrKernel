@@ -35,6 +35,9 @@ class CommsConfig:
     # Node 端口（统一键名 NODE_PORT）；Ctrl 组装各宿主机 URL 时拼接
     NODE_PORT = _env_int("NODE_PORT", 5789)
     NODE_URL_MIDDLE = f":{NODE_PORT}/api"
+    # WSS 接收 read 超时（半开连接防护；数据通路对账契约 C4）。健康态 Node 每 5s 一帧，
+    # 30s 超时只打半开连接（Node 断电无 FIN/RST），超时走探活判离线。
+    WSS_READ_TIMEOUT = _env_int("CTRL_WSS_READ_TIMEOUT", 30)
 
 
 class NetConfig:
@@ -84,56 +87,13 @@ class AppConfig(SqlConfig, KeyConfig):
     # SSL / HTTPS (development toggle)
     # Set ENABLE_SSL=false to disable HTTPS in development. 默认开了启，除非明确设置为 false（字符串）。--- IGNORE ---
     SSL_ENABLED = os.getenv("ENABLE_SSL", "true").lower() == "true"
-    # P这些都是相对于web根目录存的/certs/localhost.pem。与现有架构有出入 可调整
-    SSL_CERT_PATH = os.getenv("SSL_CERT_PATH", "certs/localhost.pem")
-    SSL_KEY_PATH = os.getenv("SSL_KEY_PATH", "certs/localhost-key.pem")
-    # 容器自动清理阈值（天）。这里只用于计算和展示，不在此处执行实际清理动作。
-    CONTAINER_CLEANUP_AFTER_DAYS = int(os.getenv("CONTAINER_CLEANUP_AFTER_DAYS", "7"))
-    # 每个用户最多可设置的长期容器数量。
-    LONG_TERM_CONTAINER_LIMIT = int(os.getenv("LONG_TERM_CONTAINER_LIMIT", "1"))
-    # 容器清理前邮件提醒节点，单位小时，逗号分隔。
-    CONTAINER_CLEANUP_REMINDER_HOURS = os.getenv("CONTAINER_CLEANUP_REMINDER_HOURS", "72,24,12")
-    # NodeKernel 并发请求线程池大小上限。
-    NODE_REQUEST_POOL_SIZE = int(os.getenv("NODE_REQUEST_POOL_SIZE", "8"))
-    # 并发化开关，通过环境变量可独立开关。
-    NODE_PARALLEL_ENABLED_MACHINES = os.getenv("NODE_PARALLEL_ENABLED_MACHINES", "true").lower() == "true"
-    NODE_PARALLEL_ENABLED_CONTAINERS = os.getenv("NODE_PARALLEL_ENABLED_CONTAINERS", "true").lower() == "true"
-    NODE_PARALLEL_ENABLED_SSH_REFRESH = os.getenv("NODE_PARALLEL_ENABLED_SSH_REFRESH", "true").lower() == "true"
-    # 容器磁盘检测配置（Phase 1: 只读，默认关闭）
-    CONTAINER_DISK_CHECK_ENABLED = os.getenv("CONTAINER_DISK_CHECK_ENABLED", "false").lower() == "true"
-    CONTAINER_DISK_CHECK_INTERVAL_SECONDS = int(os.getenv("CONTAINER_DISK_CHECK_INTERVAL_SECONDS", "900"))
-    CONTAINER_DISK_SOFT_LIMIT_PERCENT = int(os.getenv("CONTAINER_DISK_SOFT_LIMIT_PERCENT", "80"))
-    CONTAINER_DISK_HARD_LIMIT_PERCENT = int(os.getenv("CONTAINER_DISK_HARD_LIMIT_PERCENT", "100"))
-    CONTAINER_DISK_RESPONSE_ENABLED = os.getenv("CONTAINER_DISK_RESPONSE_ENABLED", "false").lower() == "true"
-    # 磁盘超限冻结升级配置（Phase 5-6）
-    CONTAINER_DISK_FREEZE_ESCALATION_DAYS = int(
-        os.getenv("CONTAINER_DISK_FREEZE_ESCALATION_DAYS", "7")
-    )
-    CONTAINER_DISK_FREEZE_GRACE_DAYS = int(
-        os.getenv("CONTAINER_DISK_FREEZE_GRACE_DAYS", "3")
-    )
-    CONTAINER_DISK_FREEZE_RESET_PERCENT = int(
-        os.getenv("CONTAINER_DISK_FREEZE_RESET_PERCENT", "95")
-    )
-    # 已删除容器 mount 清理配置（Phase 8）
-    CONTAINER_MOUNT_CLEANUP_ENABLED = os.getenv(
-        "CONTAINER_MOUNT_CLEANUP_ENABLED", "false"
-    ).lower() == "true"
-    CONTAINER_MOUNT_CLEANUP_INTERVAL_SECONDS = int(
-        os.getenv("CONTAINER_MOUNT_CLEANUP_INTERVAL_SECONDS", "86400")
-    )
-    CONTAINER_MOUNT_CLEANUP_AFTER_DAYS = int(
-        os.getenv("CONTAINER_MOUNT_CLEANUP_AFTER_DAYS", "14")
-    )
-    # 公告系统配置
-    ANNOUNCEMENT_MAX_RECIPIENTS = int(os.getenv("ANNOUNCEMENT_MAX_RECIPIENTS", "200"))
-    ANNOUNCEMENT_SEND_COOLDOWN_SECONDS = int(os.getenv("ANNOUNCEMENT_SEND_COOLDOWN_SECONDS", "60"))
-    ANNOUNCEMENT_BATCH_SEND_MAX = int(os.getenv("ANNOUNCEMENT_BATCH_SEND_MAX", "20"))
-
+    # Ctrl HTTPS 默认读取本仓库 certs/ 下的 ctrl.pem / ctrl-key.pem。
+    SSL_CERT_PATH = os.getenv("SSL_CERT_PATH", "certs/ctrl.pem")
+    SSL_KEY_PATH = os.getenv("SSL_KEY_PATH", "certs/ctrl-key.pem")
 
 def get_config(env: str | None = None):
     """
-    返回用于 Flask app.config.from_object 的配置类。
+    返回应用运行配置类。
     目前仅提供单一配置，如需可根据 env 扩展。
     """
     return AppConfig

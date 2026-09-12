@@ -1,7 +1,6 @@
 from ...constant import ContainerStatus, ROLE
-from ...models.authentications import Authentication
 from ...models.long_term_container import LongTermContainer
-from ...models.user import User
+from ...repositories import authentications_repo, user_repo
 from ...services import user_tasks
 from ..factories import bind_user_container, create_container, create_machine
 
@@ -16,13 +15,15 @@ def test_register_and_login_with_real_repositories(db_session):
 
     assert success is True
     assert token is None
-    assert User.query.filter_by(username="repo_user").first().id == registered_user.id
+    assert user_repo.get_by_name("repo_user", session=db_session).id == registered_user.id
 
     success, login_user, token = user_tasks.Login("repo_user", "Password_123")
 
     assert success is True
     assert login_user.id == registered_user.id
-    assert Authentication.query.filter_by(token=token, user_id=registered_user.id).first() is not None
+    auth = authentications_repo.get_by_token(token, session=db_session)
+    assert auth is not None
+    assert auth.user_id == registered_user.id
 
 
 def test_user_detail_counts_with_real_usercontainer_and_long_term_rows(db_session):

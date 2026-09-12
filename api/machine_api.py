@@ -1,0 +1,365 @@
+﻿from typing import Any
+
+from fastapi import APIRouter, Depends, Query
+from fastapi.responses import JSONResponse
+
+from ..constant import OperationType
+from ..extensions import session_scope
+from ..repositories import machine_repo
+from ..schemas.machine import (
+    AddMachinePermissionRequest,
+    AddMachinePermissionResponse,
+    ListMachineBriefRequest,
+    ListMachineBriefResponse,
+    ListMachinePermissionsResponse,
+    RemoveMachinePermissionRequest,
+    RemoveMachinePermissionResponse,
+    MachineDetailResponse,
+    MachineIdRequest,
+    MachineStatusRequest,
+    MachineStatusResponse,
+    RegisterMachineByTrustAnchorRequest,
+    RegisterMachineWithProfileResponse,
+    RemoveMachineRequest,
+    RemoveMachineResponse,
+    RenewMachineTrustRequest,
+    RenewMachineTrustResponse,
+    SetMachineMaintenanceRequest,
+    SetMachineMaintenanceResponse,
+    UpdateMachineRequest,
+    UpdateMachineResponse,
+)
+from ..services import machine_tasks as machine_service
+from ..services.container_module import node_comms
+from ..services.operation_log_tasks import log_failure, log_success
+from .deps import require_current_user, require_operator, require_permission, require_resource
+
+router = APIRouter(prefix="/machines", tags=["machines"])
+
+
+def _model_data(model, *, exclude_none: bool = False) -> dict[str, Any]:
+    """兼容 Pydantic v1/v2 的模型转 dict。"""
+
+    if hasattr(model, "model_dump"):
+        return model.model_dump(exclude_none=exclude_none)
+    if hasattr(model, "dict"):
+        try:
+            return model.dict(exclude_none=exclude_none)
+        except TypeError:
+            return model.dict()
+    if isinstance(model, dict):
+        return model
+    return dict(getattr(model, "__dict__", {}))
+
+
+def _error(status_code: int, message: str, error_reason: str | None = None) -> JSONResponse:
+    """返回 Ctrl 现有错误结构。"""
+
+    payload: dict[str, Any] = {"success": 0, "message": message}
+    if error_reason is not None:
+        payload["error_reason"] = error_reason
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+
+
+#####################
+# 注册机器
+
+
+@router.post("/register_machine", response_model=RegisterMachineWithProfileResponse)
+def register_machine_api(
+    message: RegisterMachineByTrustAnchorRequest,
+    _register: int = Depends(require_permission("machine:register")),
+    operator_user_id: int = Depends(require_permission("machine:manage")),
+):
+    """TOFU 建档入口：首连 pin、下发 UID、采集硬件并创建机器记录。"""
+
+    detail = {"name": message.machine_name, "ip": message.machine_ip, "trigger": "tofu_register"}
+    try:
+        result = machine_service.Register_machine(
+            message.machine_name,
+            message.machine_ip,
+            message.machine_description,
+        )
+    except Exception as e:
+        err_reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
+        log_failure(operator_user_id=operator_user_id,
+            operation=OperationType.ADD_MACHINE,
+            target_type="machine",
+            target_id=0,
+            detail=detail,
+            error_reason=err_reason or str(e),
+        )
+        if err_reason:
+            return _error(422, str(e), err_reason)
+        return _error(500, f"Internal error: {e}", "internal_error")
+
+    log_success(operator_user_id=operator_user_id,
+        operation=OperationType.ADD_MACHINE,
+        target_type="machine",
+        target_id=result["machine_id"],
+        detail={**detail, "uid": result["uid"]},
+    )
+    return {
+        "success": 1,
+        "message": "Machine enrolled successfully",
+        "uid": result["uid"],
+        "certificate_fingerprint": result["certificate_fingerprint"],
+        "machine_id": result["machine_id"],
+        "hardware": result.get("hardware"),
+    }
+
+
+#####################
+# 删除机器
+
+
+@router.post("/remove_machine", response_model=RemoveMachineResponse)
+def remove_machine_api(
+    message: RemoveMachineRequest,
+    operator_user_id: int = Depends(require_permission("machine:manage")),
+):
+    """删除一组机器记录。"""
+
+    result = machine_service.Remove_machine(
+        machine_id=message.machine_ids,
+        operator_user_id=operator_user_id,
+    )
+    if result["blocked"]:
+        # 2026-09 决策：机器上仍有容器 → 拒绝删除，提示先手动清理（不自动级联删）
+        details = "；".join(
+            f"机器「{b.get('name') or b['machine_id']}」仍有 {b['container_count']} 个容器"
+            for b in result["blocked"]
+        )
+        return _error(409, f"以下机器未删除，请先手动清理容器：{details}", "machine_has_containers")
+    return {"success": 1, "message": "Machine(s) removed successfully"}
+
+
+#####################
+# 更新机器
+
+
+@router.post("/update_machine", response_model=UpdateMachineResponse)
+def update_machine_api(
+    message: UpdateMachineRequest,
+    operator_user_id: int = Depends(require_permission("machine:manage")),
+):
+    """更新机器管理字段或资源分配限制。"""
+
+    fields = _model_data(message.fields, exclude_none=True)
+    try:
+        success = machine_service.Update_machine(
+            machine_id=message.machine_id,
+            operator_user_id=operator_user_id,
+            **fields,
+        )
+    except Exception as e:
+        err_reason = getattr(e, "error_reason", None)
+        if err_reason:
+            return _error(422, str(e), err_reason)
+        return _error(500, f"Internal error: {e}", "internal_error")
+
+    if success:
+        return {"success": 1, "message": "Machine updated successfully"}
+    return _error(500, "Failed to update machine", "update_failed")
+
+
+#####################
+# 重新钉信任锚（对已登记机器的连接修复）
+
+
+@router.post("/renew_machine_trust", response_model=RenewMachineTrustResponse)
+def renew_machine_trust_api(
+    message: RenewMachineTrustRequest,
+    operator_user_id: int = Depends(require_permission("machine:manage")),
+):
+    """重钉已登记机器的信任锚：重抓对端证书覆盖 pin，必要时重发 uid。
+
+    用于 Node 换过自签证书、本地 pin 失效导致链路连不上的场景。只更新原行，
+    不建档——与 register_machine 的 INSERT 语义分开。
+    """
+
+    try:
+        result = machine_service.Renew_machine_trust(
+            machine_id=message.machine_id,
+            operator_user_id=operator_user_id,
+        )
+    except Exception as e:
+        err_reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
+        # 留痕在服务层完成（成功与失败都写），这里只负责把原因映射成状态码
+        if err_reason == "machine_not_found":
+            return _error(404, str(e), err_reason)
+        if err_reason:
+            return _error(422, str(e), err_reason)
+        return _error(500, f"Internal error: {e}", "internal_error")
+
+    return {
+        "success": 1,
+        "message": "Machine trust renewed successfully",
+        **{key: value for key, value in result.items() if key != "success"},
+    }
+
+
+#####################
+# 设置机器维护开关
+
+
+@router.post("/set_maintenance", response_model=SetMachineMaintenanceResponse)
+def set_machine_maintenance_api(
+    message: SetMachineMaintenanceRequest,
+    operator_user_id: int = Depends(require_permission("machine:manage")),
+):
+    """独立切换维护模式；不改写真实在线/离线状态。"""
+
+    try:
+        success = machine_service.Set_maintenance(
+            machine_id=message.machine_id,
+            is_maintenance=message.is_maintenance,
+            operator_user_id=operator_user_id,
+        )
+    except Exception as e:
+        err_reason = getattr(e, "error_reason", None)
+        if err_reason:
+            return _error(422, str(e), err_reason)
+        return _error(500, f"Internal error: {e}", "internal_error")
+
+    if success:
+        return {"success": 1, "message": "Machine maintenance updated successfully"}
+    return _error(404, "Machine not found", "machine_not_found")
+
+
+#####################
+# 查询机器详情
+
+
+@router.post("/get_detail_information", response_model=MachineDetailResponse)
+def get_detail_information_api(
+    message: MachineIdRequest,
+    _: int = Depends(require_permission("machine:view")),
+    __: int = Depends(require_resource("machine", "machine_id")),
+):
+    """查询机器详情（view 权限 AND 机器资源访问权）。"""
+
+    machine_info = machine_service.Get_detail_information(machine_id=message.machine_id)
+    if not machine_info:
+        return _error(404, "Machine not found", "machine_not_found")
+    return _model_data(machine_info)
+
+
+@router.post("/machine_status", response_model=MachineStatusResponse)
+def machine_status_api(
+    message: MachineStatusRequest,
+    _: int = Depends(require_permission("machine:view")),
+    __: int = Depends(require_resource("machine", "machine_id")),
+):
+    """查询机器状态；只读 Ctrl DB 与 WSS snapshot buffer，不主动请求 Node。"""
+
+    try:
+        with session_scope(commit=False) as session:
+            machine = machine_repo.get_by_id(message.machine_id, session=session)
+            if not machine:
+                return _error(404, "Machine not found", "machine_not_found")
+            machine_status = machine.machine_status.value if hasattr(machine.machine_status, "value") else machine.machine_status
+            return {
+                "machine_status": machine_status,
+                "is_maintenance": bool(getattr(machine, "is_maintenance", False)),
+                "runtime_snapshot": node_comms.get_cached_machine_runtime_snapshot(machine.id),
+            }
+    except Exception as e:
+        return _error(500, f"Internal error: {e}", "internal_error")
+
+
+#####################
+# 查询机器概要列表
+
+
+@router.post("/list_all_machine_bref_information", response_model=ListMachineBriefResponse)
+def list_all_machine_bref_information_api(
+    message: ListMachineBriefRequest,
+    user_id: int = Depends(require_permission("machine:view")),
+):
+    """分页查询机器概要。"""
+
+    machines_info, total_pages = machine_service.List_all_machine_bref_information(
+        page_number=message.page_number,
+        page_size=message.page_size,
+        user_id=user_id,
+        machine_search=(message.machine_search or "").strip() or None,
+    )
+    machines = []
+    for machine in machines_info:
+        machine_type = machine.machine_type.value if hasattr(machine.machine_type, "value") else machine.machine_type
+        machine_status = machine.machine_status.value if hasattr(machine.machine_status, "value") else machine.machine_status
+        machines.append(
+            {
+                "machine_id": getattr(machine, "id", None),
+                "machine_name": machine.machine_name,
+                "machine_ip": machine.machine_ip,
+                "machine_type": machine_type,
+                "machine_status": machine_status,
+                "is_maintenance": bool(getattr(machine, "is_maintenance", False)),
+                "runtime_snapshot": getattr(machine, "runtime_snapshot", None),
+            }
+        )
+    return {"machines": machines, "total_pages": total_pages}
+
+
+#####################
+# 添加机器权限
+
+
+@router.post("/add_machine_permission", response_model=AddMachinePermissionResponse)
+def add_machine_permission_api(
+    message: AddMachinePermissionRequest,
+    operator_user_id: int = Depends(require_permission("machine:manage")),
+):
+    """给用户添加机器权限。"""
+
+    try:
+        machine_service.Add_machine_permission(
+            message.machine_id,
+            message.user_id,
+            operator_user_id=operator_user_id,
+        )
+    except ValueError as e:
+        reason = str(e)
+        status = 404 if reason in ("machine_not_found", "user_not_found") else 400
+        return _error(status, reason, reason)
+    return {"success": 1, "message": "machine permission added"}
+
+
+#####################
+# 移除机器权限
+
+
+@router.post("/remove_machine_permission", response_model=RemoveMachinePermissionResponse)
+def remove_machine_permission_api(
+    message: RemoveMachinePermissionRequest,
+    operator_user_id: int = Depends(require_permission("machine:manage")),
+):
+    """收回用户的机器权限（机器权限可分配也可收回）。"""
+
+    ok = machine_service.Remove_machine_permission(
+        message.machine_id,
+        message.user_id,
+        operator_user_id=operator_user_id,
+    )
+    if not ok:
+        return _error(404, "machine or permission not found", "permission_not_found")
+    return {"success": 1, "message": "machine permission removed"}
+
+
+#####################
+# 查询机器权限
+
+
+@router.get("/list_machine_permissions", response_model=ListMachinePermissionsResponse)
+def list_machine_permissions_api(
+    machine_id: int = Query(..., ge=1),
+    _: int = Depends(require_permission("machine:manage")),
+):
+    """查询机器授权用户 id 列表（管理面信息）。"""
+
+    user_ids = machine_service.List_machine_permissions(machine_id)
+    return {"success": 1, "machine_id": machine_id, "user_ids": user_ids}

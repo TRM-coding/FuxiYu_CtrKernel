@@ -2,10 +2,51 @@
 
 from datetime import datetime
 
+from sqlalchemy import select
+
 from ...repositories import operation_log_repo
 from ...services.operation_log_tasks import list_operation_logs, operation_log_stats
 from ...constant import OperationType
 from ..factories import create_user, create_machine, create_container, bind_user_container
+from ...models.operation_log import OperationLog
+from ...services.operation_log_tasks import log_failure, log_success
+
+
+def test_deleted_container_keeps_owner_without_navigation(db_session):
+    user = create_user(username="retained_owner")
+    container = create_container(machine=create_machine(), name="retained")
+    bind_user_container(user, container, role="ROOT")
+    container.is_valid = False
+    container.active_name = None
+    db_session.commit()
+    log_success(operation=OperationType.DELETE_CONTAINER, target_type="container", target_id=container.id)
+    log = list_operation_logs()["logs"][0]
+    assert log["target_name"] is None
+    assert log["target_display_name"] == "retained"
+    assert log["root_owner"] == "retained_owner"
+
+
+def test_each_repeated_failure_is_audited(db_session, monkeypatch, caplog):
+    from ...services import operation_log_tasks
+
+    alerts = []
+    monkeypatch.setattr(operation_log_tasks, "_maybe_raise_alert", lambda **kwargs: alerts.append(kwargs))
+    args = dict(operation=OperationType.SEND_CLEANUP_REMINDER, target_type="container", target_id=999)
+    detail = {"recipient": "owner@example.test", "cleanup_at": "2026-09-12T00:00:00"}
+    for _ in range(3):
+        log_failure(**args, detail=detail, error_reason="smtp")
+    logs = db_session.scalars(select(OperationLog).order_by(OperationLog.id)).all()
+    assert len(logs) == 3
+    assert all(not log.success and log.error_reason == "smtp" for log in logs)
+    assert len(alerts) == 3
+    assert sum("op failed:" in record.message for record in caplog.records) == 3
+
+
+def test_manual_failures_are_not_suppressed(db_session):
+    for _ in range(2):
+        log_failure(operation=OperationType.DELETE_CONTAINER, target_type="container_mount_cleanup",
+                    target_id=999, error_reason="not_found")
+    assert len(db_session.scalars(select(OperationLog)).all()) == 2
 
 
 def test_list_enriches_container_name_and_root_owner(db_session):
@@ -15,6 +56,7 @@ def test_list_enriches_container_name_and_root_owner(db_session):
     bind_user_container(user, container, role="ROOT")
 
     operation_log_repo.write(
+        session=db_session,
         operator_user_id=user.id,
         operation=OperationType.CREATE_CONTAINER.value,
         target_type="container",
@@ -22,6 +64,7 @@ def test_list_enriches_container_name_and_root_owner(db_session):
         detail={"name": "c1"},
         success=True,
     )
+    db_session.commit()
 
     result = list_operation_logs(page=1, page_size=10)
     log = result["logs"][0]
@@ -32,13 +75,15 @@ def test_list_enriches_container_name_and_root_owner(db_session):
 def test_list_enriches_machine_name(db_session):
     machine = create_machine(machine_name="gpu-01")
     operation_log_repo.write(
+        session=db_session,
         operator_user_id=None,
-        operation=OperationType.MACHINE_STATUS_TRANSITION.value,
+        operation=OperationType.UPDATE_MACHINE.value,
         target_type="machine",
         target_id=machine.id,
         detail={"before": {"machine_status": "online"}, "after": {"machine_status": "offline"}},
         success=True,
     )
+    db_session.commit()
 
     result = list_operation_logs(page=1, page_size=10)
     log = result["logs"][0]
@@ -49,6 +94,7 @@ def test_list_enriches_machine_name(db_session):
 def test_list_enriches_user_name_and_tolerates_deleted_target(db_session):
     user = create_user(username="bob")
     operation_log_repo.write(
+        session=db_session,
         operator_user_id=user.id,
         operation=OperationType.CHANGE_PASSWORD.value,
         target_type="user",
@@ -56,8 +102,9 @@ def test_list_enriches_user_name_and_tolerates_deleted_target(db_session):
         detail={},
         success=True,
     )
-    # 目标已删除：查不到也不报错，target_name 保持 None
+    # 目标已删除：查不到也不报错，优先使用日志中保存的资源名称
     operation_log_repo.write(
+        session=db_session,
         operator_user_id=None,
         operation=OperationType.START_CONTAINER.value,
         target_type="container",
@@ -65,11 +112,13 @@ def test_list_enriches_user_name_and_tolerates_deleted_target(db_session):
         detail={"name": "ghost"},
         success=True,
     )
+    db_session.commit()
 
     result = list_operation_logs(page=1, page_size=10)
     by_target_id = {str(r["target_id"]): r for r in result["logs"]}
     assert by_target_id[str(user.id)]["target_name"] == "bob"
     assert by_target_id["999999"]["target_name"] is None
+    assert by_target_id["999999"]["target_display_name"] == "ghost"
 
 
 def test_list_window_accepts_local_times_with_offset(db_session):
@@ -81,6 +130,7 @@ def test_list_window_accepts_local_times_with_offset(db_session):
     machine = create_machine(machine_name="gpu-01")
     container = create_container(machine=machine, name="testingcontainer")
     row = operation_log_repo.write(
+        session=db_session,
         operator_user_id=None,
         operation=OperationType.CREATE_CONTAINER.value,
         target_type="container",
@@ -109,6 +159,7 @@ def test_list_window_accepts_local_times_with_offset(db_session):
 def test_stats_buckets_day_by_offset(db_session):
     """by_day 分桶日随偏移量：北京时间 8/17 00:03 的事件应计入 8/17 的桶（绿墙当天格子）。"""
     row = operation_log_repo.write(
+        session=db_session,
         operator_user_id=None,
         operation=OperationType.START_CONTAINER.value,
         target_type="container",
@@ -130,3 +181,41 @@ def test_stats_buckets_day_by_offset(db_session):
         tz_offset_minutes=480,
     )
     assert bj_buckets["by_day"]["2026-08-17"]["success"] == 1
+
+
+def test_list_skips_identity_mapping_for_previous_generation_log(db_session):
+    """id 复用（2026-09）：日志早于容器 created_at = 上一代容器日志 → 不映射名称/超管。"""
+    from datetime import timedelta
+
+    from ...models.operation_log import OperationLog
+
+    user = create_user(username="alice")
+    machine = create_machine(machine_name="gpu-01")
+    container = create_container(machine=machine, name="c2")
+    bind_user_container(user, container, role="ROOT")
+    container.created_at = datetime.utcnow() - timedelta(minutes=5)
+    db_session.commit()
+
+    def _log(op, when, name):
+        db_session.add(OperationLog(
+            operator_user_id=user.id, operation=OperationType[op].value,
+            target_type="container", target_id=container.id,
+            detail={"name": name}, success=True, created_at=when,
+        ))
+
+    # 上一代容器（同 id）的日志：早于当前容器创建
+    _log("DELETE_CONTAINER", datetime.utcnow() - timedelta(hours=1), "old_c2")
+    # 当前容器自己的日志：晚于创建
+    _log("START_CONTAINER", datetime.utcnow(), "c2")
+    db_session.commit()
+
+    result = list_operation_logs(page=1, page_size=10)
+    by_op = {log["operation"]: log for log in result["logs"]}
+
+    old = by_op[OperationType.DELETE_CONTAINER.value]
+    assert old["target_name"] is None
+    assert old["root_owner"] is None
+
+    cur = by_op[OperationType.START_CONTAINER.value]
+    assert cur["target_name"] == "c2"
+    assert cur["root_owner"] == "alice"

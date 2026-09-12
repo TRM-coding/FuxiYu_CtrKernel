@@ -3,14 +3,14 @@ from itertools import count
 
 from werkzeug.security import generate_password_hash
 
-from ..constant import ContainerStatus, MachineStatus, MachineTypes, PERMISSION, ROLE
-from ..extensions import db
+from ..constant import ContainerStatus, MachineStatus, MachineTypes, ROLE
+from ..extensions import SessionRegistry, session_scope
 from ..models.authentications import Authentication
 from ..models.containers import Container
 from ..models.machine import Machine
 from ..models.user import User
 from ..models.usercontainer import UserContainer
-from ..repositories import machine_permission_repo
+from ..repositories import auth_repo, machine_permission_repo
 
 DEFAULT_TEST_USERNAME = "test_user"
 DEFAULT_TEST_OPERATOR = "test_operator"
@@ -31,7 +31,7 @@ def create_user(
     email: str | None = None,
     password: str = "Password_123",
     graduation_year: str = "2026",
-    permission: PERMISSION = PERMISSION.USER,
+    operator: bool = False,
 ) -> User:
     username = username or _next("user")
     email = email or f"{username}@bjtu.edu.cn"
@@ -40,10 +40,16 @@ def create_user(
         email=email,
         password_hash=generate_password_hash(password),
         graduation_year=str(graduation_year),
-        permission=permission,
     )
-    db.session.add(user)
-    db.session.commit()
+    SessionRegistry.add(user)
+    SessionRegistry.commit()
+    if operator:
+        # 取代旧 permission 单字段：operator 语义 = 绑定 operator 组（通配权限点）
+        with session_scope() as session:
+            group = auth_repo.ensure_group("operator", "运维组：通配权限", session=session)
+            auth_repo.ensure_group_entity(group.id, "bypass_resource", session=session)
+            auth_repo.ensure_group_entity(group.id, "bypass_auth_entity", session=session)
+            auth_repo.ensure_user_group(user.id, group.id, session=session)
     return user
 
 
@@ -53,8 +59,8 @@ def create_auth(user: User, *, token: str | None = None, expires_at: datetime | 
         user_id=user.id,
         expires_at=expires_at or (datetime.utcnow() + timedelta(hours=1)),
     )
-    db.session.add(auth)
-    db.session.commit()
+    SessionRegistry.add(auth)
+    SessionRegistry.commit()
     return auth
 
 
@@ -64,15 +70,19 @@ def create_machine(
     machine_ip: str | None = None,
     machine_type: MachineTypes = MachineTypes.GPU,
     machine_status: MachineStatus = MachineStatus.ONLINE,
+    is_maintenance: bool = False,
     cpu_core_number: int = 32,
     gpu_number: int = 4,
     gpu_type: str = "A100",
+    gpu_list: list | None = None,
+    gpu_allow_list: list | None = None,
     memory_size_gb: int = 256,
     max_shared_gb: int = 8,
     max_cpu_core_number: int = 32,
     max_gpu_number: int = 4,
     max_memory_gb: int = 256,
     disk_size_gb: int = 1024,
+    max_disk_size_gb: int | None = None,
     machine_description: str = "test machine",
 ) -> Machine:
     idx = next(_ids)
@@ -81,19 +91,24 @@ def create_machine(
         machine_ip=machine_ip or f"127.0.0.{idx}",
         machine_type=machine_type,
         machine_status=machine_status,
+        is_maintenance=is_maintenance,
         cpu_core_number=cpu_core_number,
         gpu_number=gpu_number,
         gpu_type=gpu_type,
+        gpu_list=gpu_list,
+        gpu_allow_list=gpu_allow_list,
         memory_size_gb=memory_size_gb,
         max_shared_gb=max_shared_gb,
         max_cpu_core_number=max_cpu_core_number,
         max_gpu_number=max_gpu_number,
         max_memory_gb=max_memory_gb,
+        # 上限默认延续 disk_size_gb（与迁移回填语义一致）
+        max_disk_size_gb=max_disk_size_gb if max_disk_size_gb is not None else disk_size_gb,
         disk_size_gb=disk_size_gb,
         machine_description=machine_description,
     )
-    db.session.add(machine)
-    db.session.commit()
+    SessionRegistry.add(machine)
+    SessionRegistry.commit()
     return machine
 
 
@@ -122,8 +137,8 @@ def create_container(
         gpu_number=gpu_number,
         cpu_number=cpu_number,
     )
-    db.session.add(container)
-    db.session.commit()
+    SessionRegistry.add(container)
+    SessionRegistry.commit()
     return container
 
 
@@ -139,7 +154,8 @@ def create_container_graph(
     root_user = root_user or create_user()
     machine = machine or create_machine()
     container = container or create_container(machine=machine)
-    machine_permission_repo.add_permission(machine.id, root_user.id)
+    machine_permission_repo.add_permission(machine.id, root_user.id, session=SessionRegistry)
+    SessionRegistry.commit()
     bind_user_container(root_user, container, role=ROLE.ROOT, username=root_username)
     if collaborator_user is not None:
         bind_user_container(
@@ -166,6 +182,6 @@ def bind_user_container(
         username=username or ("root" if role == ROLE.ROOT else user.username),
         public_key=public_key,
     )
-    db.session.add(binding)
-    db.session.commit()
+    SessionRegistry.add(binding)
+    SessionRegistry.commit()
     return binding

@@ -1,6 +1,6 @@
 """Ctrl↔Node 链路测试共享基础设施。
 
-- `node_server`：在进程内线程里拉起真实的 Node Flask 应用（FakeDockerClient + stub 服务层），
+- `node_server`：在进程内线程里拉起真实的 Node FastAPI 应用（FakeDockerClient + stub 服务层），
   返回可直连的 base_url。不依赖外部端口与 docker daemon。
 - `node_transport`：链路测试统一走 transport 抽象，WSS 迁移后只换实现。
 
@@ -9,6 +9,7 @@ integration 测试自动放行真实 requests.post —— 进程内 HTTP 是真�
 """
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,6 @@ node_pkg = pytest.importorskip("FuxiYu_NodeKernel", reason="NodeKernel 仓库不
 
 from FuxiYu_NodeKernel import create_app as node_create_app  # noqa: E402
 from FuxiYu_NodeKernel import extensions as node_ext  # noqa: E402
-from FuxiYu_NodeKernel.utils.CheckKeys import KeyConfig  # noqa: E402
 
 
 class _Patcher:
@@ -48,13 +48,13 @@ class _Patcher:
 
 @pytest.fixture(scope="module")
 def node_server():
-    """进程内 Node 服务（真实 Flask 栈 + 真实密钥 + 假 docker）。"""
-    from werkzeug.serving import make_server
+    """进程内 Node 服务（真实 FastAPI + uvicorn + 假 docker）。
+
+    check_keys 已退役：Node 端点直接收明文 JSON（TLS 承担身份，链路测试内用 http）。
+    """
+    import uvicorn
 
     patcher = _Patcher()
-    patcher.setattr(KeyConfig, "PRIVATE_KEY_PATH", str(NODE_ROOT / "private_A.pem"))
-    patcher.setattr(KeyConfig, "PUBLIC_KEY_PATH", str(NODE_ROOT / "public_A.pem"))
-    patcher.setattr(KeyConfig, "PUBLIC_KEY_CONTROL", str(NODE_ROOT / "public_A.pem"))
 
     # 假 docker client：Node 端点会直接访问 extensions.docker_client
     import docker as docker_pkg
@@ -75,15 +75,26 @@ def node_server():
 
     patcher.setattr(node_ext, "docker_client", _FakeDocker())
 
-    app = node_create_app()
-    app.config.update(TESTING=True)
+    class _Server(uvicorn.Server):
+        def install_signal_handlers(self):
+            pass  # 线程内不允许信号处理
 
-    server = make_server("127.0.0.1", 0, app)
-    port = server.server_port
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    port = 5788
+    server = _Server(uvicorn.Config(node_create_app(), host="127.0.0.1", port=port, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
+    # 等待端口就绪
+    import socket
+
+    for _ in range(100):
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                break
+        except OSError:
+            time.sleep(0.05)
     yield f"http://127.0.0.1:{port}"
-    server.shutdown()
+    server.should_exit = True
+    thread.join(timeout=5)
     patcher.restore()
 
 

@@ -1,23 +1,28 @@
-"""Announcement 仓库层：提供公告、模板、草稿的 CRUD 操作。
+"""Announcement repository.
 
-全部函数都通过 db.session 直接访问数据库，由调用方通过 Flask
-应用上下文保证 session 可用。
+Repo functions only receive an explicit SQLAlchemy session and never commit or
+rollback. Transaction boundaries live in service/tasks or API dependencies.
 """
 
 import datetime as dt
 
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
 from ..constant import AnnouncementStatus, AnnouncementTemplateCategory
-from ..extensions import db
 from ..models.announcement import Announcement, AnnouncementDraft, AnnouncementTemplate
 
 
-# ── 公告 ──────────────────────────────────────────────────────────────
+#####################
+# 公告
+
 
 def create_announcement(
     title: str,
     content: str,
     created_by: int,
     *,
+    session: Session,
     status: AnnouncementStatus = AnnouncementStatus.SENDING,
     raw_content: str | None = None,
     targets: str | None = None,
@@ -26,7 +31,6 @@ def create_announcement(
     template_id: int | None = None,
     source_draft_id: int | None = None,
 ) -> Announcement:
-    """创建一条公告记录，初始状态为 SENDING。"""
     announcement = Announcement(
         title=title,
         content=content,
@@ -39,45 +43,57 @@ def create_announcement(
         template_id=template_id,
         source_draft_id=source_draft_id,
     )
-    db.session.add(announcement)
-    db.session.commit()
+    session.add(announcement)
+    session.flush()
     return announcement
 
 
-def get_announcement_by_id(announcement_id: int) -> Announcement | None:
-    """按主键查询公告。"""
-    return Announcement.query.get(announcement_id)
+def get_announcement_by_id(announcement_id: int, *, session: Session) -> Announcement | None:
+    return session.get(Announcement, int(announcement_id))
 
 
 def list_announcements(
     *,
+    session: Session,
     status: list[str] | None = None,
     created_by: int | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[Announcement], int]:
-    """分页查询公告，支持按状态和创建者过滤。"""
-    q = Announcement.query
+    stmt = select(Announcement)
     if status:
-        q = q.filter(Announcement.status.in_(status))
+        stmt = stmt.where(Announcement.status.in_(status))
     if created_by is not None:
-        q = q.filter_by(created_by=created_by)
+        stmt = stmt.where(Announcement.created_by == created_by)
 
-    total = q.count()
-    rows = q.order_by(Announcement.created_at.desc()).offset(offset).limit(limit).all()
+    total = int(session.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+    rows = list(
+        session.scalars(
+            stmt.order_by(Announcement.created_at.desc()).offset(offset).limit(limit)
+        ).all()
+    )
     return rows, total
+
+
+def count_announcements_by_status(status: AnnouncementStatus, *, session: Session) -> int:
+    return int(
+        session.scalar(
+            select(func.count()).select_from(Announcement).where(Announcement.status == status)
+        )
+        or 0
+    )
 
 
 def update_announcement_status(
     announcement_id: int,
     status: AnnouncementStatus,
     *,
+    session: Session,
     success_count: int | None = None,
     fail_count: int | None = None,
     sent_at: dt.datetime | None = None,
 ) -> Announcement | None:
-    """更新公告状态与发送统计数据（仅非 None 字段）。"""
-    ann = get_announcement_by_id(announcement_id)
+    ann = get_announcement_by_id(announcement_id, session=session)
     if ann is None:
         return None
     ann.status = status
@@ -87,21 +103,22 @@ def update_announcement_status(
         ann.fail_count = fail_count
     if sent_at is not None:
         ann.sent_at = sent_at
-    db.session.commit()
+    session.flush()
     return ann
 
 
-def delete_announcement(announcement_id: int) -> bool:
-    """物理删除公告。"""
-    ann = get_announcement_by_id(announcement_id)
+def delete_announcement(announcement_id: int, *, session: Session) -> bool:
+    ann = get_announcement_by_id(announcement_id, session=session)
     if ann is None:
         return False
-    db.session.delete(ann)
-    db.session.commit()
+    session.delete(ann)
+    session.flush()
     return True
 
 
-# ── 模板 ──────────────────────────────────────────────────────────────
+#####################
+# 模板
+
 
 def create_template(
     name: str,
@@ -109,11 +126,11 @@ def create_template(
     body_template: str,
     created_by: int,
     *,
+    session: Session,
     description: str | None = None,
     category: str = "custom",
     source_announcement_id: int | None = None,
 ) -> AnnouncementTemplate:
-    """新建模板。"""
     template = AnnouncementTemplate(
         name=name,
         subject_template=subject_template,
@@ -123,38 +140,38 @@ def create_template(
         category=AnnouncementTemplateCategory(category),
         source_announcement_id=source_announcement_id,
     )
-    db.session.add(template)
-    db.session.commit()
+    session.add(template)
+    session.flush()
     return template
 
 
-def get_template_by_id(template_id: int) -> AnnouncementTemplate | None:
-    """按主键查询模板。"""
-    return AnnouncementTemplate.query.get(template_id)
+def get_template_by_id(template_id: int, *, session: Session) -> AnnouncementTemplate | None:
+    return session.get(AnnouncementTemplate, int(template_id))
 
 
 def list_templates(
     *,
+    session: Session,
     category: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> tuple[list[AnnouncementTemplate], int]:
-    """分页查询模板，支持按类别过滤。"""
-    q = AnnouncementTemplate.query
+    stmt = select(AnnouncementTemplate)
     if category is not None:
-        q = q.filter_by(category=AnnouncementTemplateCategory(category))
+        stmt = stmt.where(AnnouncementTemplate.category == AnnouncementTemplateCategory(category))
 
-    total = q.count()
-    rows = q.order_by(AnnouncementTemplate.created_at.desc()).offset(offset).limit(limit).all()
+    total = int(session.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+    rows = list(
+        session.scalars(
+            stmt.order_by(AnnouncementTemplate.created_at.desc()).offset(offset).limit(limit)
+        ).all()
+    )
     return rows, total
 
 
-def update_template(template_id: int, **fields) -> AnnouncementTemplate | None:
-    """按主键更新模板允许的字段：
-    name, description, subject_template, body_template, variables, category。
-    """
+def update_template(template_id: int, *, session: Session, **fields) -> AnnouncementTemplate | None:
     allowed = {"name", "description", "subject_template", "body_template", "category"}
-    template = get_template_by_id(template_id)
+    template = get_template_by_id(template_id, session=session)
     if template is None:
         return None
     for key, value in fields.items():
@@ -162,37 +179,38 @@ def update_template(template_id: int, **fields) -> AnnouncementTemplate | None:
             if key == "category":
                 value = AnnouncementTemplateCategory(value)
             setattr(template, key, value)
-    db.session.commit()
+    session.flush()
     return template
 
 
-def delete_template(template_id: int) -> bool:
-    """删除模板（仅允许 CUSTOM 类别；SYSTEM 不可删）。"""
-    template = get_template_by_id(template_id)
+def delete_template(template_id: int, *, session: Session) -> bool:
+    template = get_template_by_id(template_id, session=session)
     if template is None:
         return False
     if template.category == AnnouncementTemplateCategory.SYSTEM:
         return False
-    db.session.delete(template)
-    db.session.commit()
+    session.delete(template)
+    session.flush()
     return True
 
 
-# ── 草稿 ──────────────────────────────────────────────────────────────
+#####################
+# 草稿
+
 
 def save_draft(
     title: str,
     content: str,
     created_by: int,
     *,
+    session: Session,
     draft_id: int | None = None,
     raw_content: str | None = None,
     targets: str | None = None,
     template_id: int | None = None,
 ) -> AnnouncementDraft:
-    """幂等保存草稿：draft_id 存在则更新，否则新建。"""
     if draft_id is not None:
-        draft = get_draft_by_id(draft_id)
+        draft = get_draft_by_id(draft_id, session=session)
         if draft is None:
             raise ValueError("draft_not_found")
         draft.title = title
@@ -213,37 +231,39 @@ def save_draft(
             targets=targets,
             template_id=template_id,
         )
-        db.session.add(draft)
-    db.session.commit()
+        session.add(draft)
+    session.flush()
     return draft
 
 
-def get_draft_by_id(draft_id: int) -> AnnouncementDraft | None:
-    """按主键查询草稿。"""
-    return AnnouncementDraft.query.get(draft_id)
+def get_draft_by_id(draft_id: int, *, session: Session) -> AnnouncementDraft | None:
+    return session.get(AnnouncementDraft, int(draft_id))
 
 
 def list_drafts(
     *,
+    session: Session,
     created_by: int | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[AnnouncementDraft], int]:
-    """分页查询草稿，支持按创建者过滤。"""
-    q = AnnouncementDraft.query
+    stmt = select(AnnouncementDraft)
     if created_by is not None:
-        q = q.filter_by(created_by=created_by)
+        stmt = stmt.where(AnnouncementDraft.created_by == created_by)
 
-    total = q.count()
-    rows = q.order_by(AnnouncementDraft.updated_at.desc()).offset(offset).limit(limit).all()
+    total = int(session.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+    rows = list(
+        session.scalars(
+            stmt.order_by(AnnouncementDraft.updated_at.desc()).offset(offset).limit(limit)
+        ).all()
+    )
     return rows, total
 
 
-def delete_draft(draft_id: int) -> bool:
-    """物理删除草稿。"""
-    draft = get_draft_by_id(draft_id)
+def delete_draft(draft_id: int, *, session: Session) -> bool:
+    draft = get_draft_by_id(draft_id, session=session)
     if draft is None:
         return False
-    db.session.delete(draft)
-    db.session.commit()
+    session.delete(draft)
+    session.flush()
     return True

@@ -2,9 +2,10 @@
 
 from datetime import datetime, timedelta
 
-from ...extensions import db
 from ...repositories import container_mount_cleanup_repo
-from ...schemas import container_mount_cleanup_task
+from ...schedulers import container_mount_cleanup_task
+from ...services.container_module import mount_cleanup as mount_cleanup_mod
+from ...services.container_module import node_comms
 
 
 class TestMountCleanupTask:
@@ -12,16 +13,17 @@ class TestMountCleanupTask:
 
     def test_no_pending_rows_does_nothing(self, app, db_session, monkeypatch):
         """无待清理记录 → 不做任何请求。"""
+        db_session.commit()
+
         sent = []
         monkeypatch.setattr(
-            container_mount_cleanup_task, "send",
+            node_comms, "send",
             lambda *a, **kw: sent.append(a) or {"success": 1}
         )
-        monkeypatch.setitem(app.config, "CONTAINER_MOUNT_CLEANUP_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_MOUNT_CLEANUP_AFTER_DAYS", 14)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_after_days", lambda: 14)
 
-        with app.app_context():
-            container_mount_cleanup_task.run_mount_cleanup_once()
+        container_mount_cleanup_task.run_mount_cleanup_once()
 
         assert len(sent) == 0
 
@@ -35,39 +37,40 @@ class TestMountCleanupTask:
             mount_path="/home/test/containers/old_ctr/",
             escalation=False,
             removed_at=old,
+            session=db_session,
         )
+
+        db_session.commit()
 
         sent_payloads = []
         monkeypatch.setattr(
-            container_mount_cleanup_task, "send",
-            lambda enc, sig, url, timeout: sent_payloads.append(url) or {"success": 1}
-        )
-        monkeypatch.setattr(
-            container_mount_cleanup_task, "signature",
-            lambda p: b"sig"
-        )
-        monkeypatch.setattr(
-            container_mount_cleanup_task, "encryption",
-            lambda p: b"enc"
+            node_comms, "send",
+            lambda url, payload, timeout: sent_payloads.append(url) or {"success": 1}
         )
         # mock machine_repo to return a valid IP
-        monkeypatch.setattr(
-            container_mount_cleanup_task.machine_repo,
-            "get_machine_ip_by_id",
-            lambda mid: "10.0.0.2"
-        )
-        monkeypatch.setitem(app.config, "CONTAINER_MOUNT_CLEANUP_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_MOUNT_CLEANUP_AFTER_DAYS", 14)
+        db_session.commit()
 
-        with app.app_context():
-            container_mount_cleanup_task.run_mount_cleanup_once()
+        monkeypatch.setattr(
+            mount_cleanup_mod.machine_repo,
+            "get_machine_ip_by_id",
+            lambda mid, **kwargs: "10.0.0.2"
+        )
+        monkeypatch.setattr(
+            container_mount_cleanup_task, "machine_in_scope",
+            lambda mid: True
+        )
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_after_days", lambda: 14)
+
+        container_mount_cleanup_task.run_mount_cleanup_once()
 
         assert len(sent_payloads) == 1
         assert "/clean_mount" in sent_payloads[0]
 
+        db_session.expire_all()
         # verify row is marked cleaned
         from ...models.container_mount_cleanup import ContainerMountCleanup
-        refreshed = db.session.get(ContainerMountCleanup, row.id)
+        refreshed = db_session.get(ContainerMountCleanup, row.id)
         assert refreshed.cleaned_at is not None
 
     def test_skips_recent_removals(self, app, db_session, monkeypatch):
@@ -80,18 +83,18 @@ class TestMountCleanupTask:
             mount_path="/home/test/containers/recent/",
             escalation=False,
             removed_at=recent,
+            session=db_session,
         )
 
         sent = []
         monkeypatch.setattr(
-            container_mount_cleanup_task, "send",
+            node_comms, "send",
             lambda *a, **kw: sent.append(a) or {"success": 1}
         )
-        monkeypatch.setitem(app.config, "CONTAINER_MOUNT_CLEANUP_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_MOUNT_CLEANUP_AFTER_DAYS", 14)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_after_days", lambda: 14)
 
-        with app.app_context():
-            container_mount_cleanup_task.run_mount_cleanup_once()
+        container_mount_cleanup_task.run_mount_cleanup_once()
 
         assert len(sent) == 0
 
@@ -104,46 +107,48 @@ class TestMountCleanupTask:
             container_id=1, container_name="c1",
             machine_id=1, mount_path="/home/x/containers/c1/",
             escalation=False, removed_at=old,
+            session=db_session,
         )
         r2 = container_mount_cleanup_repo.insert(
             container_id=2, container_name="c2",
             machine_id=2, mount_path="/home/x/containers/c2/",
             escalation=False, removed_at=old,
+            session=db_session,
         )
+
+        db_session.commit()
 
         call_count = [0]
 
-        def _fail_first(enc, sig, url, timeout):
+        def _fail_first(url, payload, timeout):
             call_count[0] += 1
             if call_count[0] == 1:
                 raise RuntimeError("node unreachable")
             return {"success": 1}
 
         monkeypatch.setattr(
-            container_mount_cleanup_task, "send", _fail_first
+            node_comms, "send", _fail_first
         )
         monkeypatch.setattr(
-            container_mount_cleanup_task, "signature", lambda p: b"sig"
-        )
-        monkeypatch.setattr(
-            container_mount_cleanup_task, "encryption", lambda p: b"enc"
-        )
-        monkeypatch.setattr(
-            container_mount_cleanup_task.machine_repo,
+            mount_cleanup_mod.machine_repo,
             "get_machine_ip_by_id",
-            lambda mid: "10.0.0.1"
+            lambda mid, **kwargs: "10.0.0.1"
         )
-        monkeypatch.setitem(app.config, "CONTAINER_MOUNT_CLEANUP_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_MOUNT_CLEANUP_AFTER_DAYS", 14)
+        monkeypatch.setattr(
+            container_mount_cleanup_task, "machine_in_scope",
+            lambda mid: True
+        )
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_after_days", lambda: 14)
 
-        with app.app_context():
-            container_mount_cleanup_task.run_mount_cleanup_once()
+        container_mount_cleanup_task.run_mount_cleanup_once()
 
+        db_session.expire_all()
         # r1 still not cleaned
-        r1_refreshed = db.session.get(ContainerMountCleanup, r1.id)
+        r1_refreshed = db_session.get(ContainerMountCleanup, r1.id)
         assert r1_refreshed.cleaned_at is None
         # r2 cleaned
-        r2_refreshed = db.session.get(ContainerMountCleanup, r2.id)
+        r2_refreshed = db_session.get(ContainerMountCleanup, r2.id)
         assert r2_refreshed.cleaned_at is not None
 
     def test_skips_when_machine_not_found(self, app, db_session, monkeypatch):
@@ -153,37 +158,112 @@ class TestMountCleanupTask:
             container_id=1, container_name="orphan",
             machine_id=99999, mount_path="/home/x/containers/orphan/",
             escalation=False, removed_at=old,
+            session=db_session,
         )
 
         monkeypatch.setattr(
-            container_mount_cleanup_task.machine_repo,
+            mount_cleanup_mod.machine_repo,
             "get_machine_ip_by_id",
-            lambda mid: None  # machine not found
+            lambda mid, **kwargs: None  # machine not found
         )
-        monkeypatch.setitem(app.config, "CONTAINER_MOUNT_CLEANUP_ENABLED", True)
-        monkeypatch.setitem(app.config, "CONTAINER_MOUNT_CLEANUP_AFTER_DAYS", 14)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_after_days", lambda: 14)
 
-        with app.app_context():
-            # should not raise
-            container_mount_cleanup_task.run_mount_cleanup_once()
+        # should not raise
+        container_mount_cleanup_task.run_mount_cleanup_once()
 
+    def test_skips_when_machine_unreachable(self, app, db_session, monkeypatch):
+        """机器不在范畴内（不可达）→ 不发清理请求、不标记 cleaned（等回到范畴内再清）。"""
+        from ...constant import MachineStatus
+        from ...models.container_mount_cleanup import ContainerMountCleanup
+        from ..factories import create_machine
 
-class TestMountCleanupScheduler:
-    """start_mount_cleanup_scheduler 调度器。"""
+        machine = create_machine(machine_status=MachineStatus.OFFLINE)
+        old = datetime.utcnow() - timedelta(days=20)
+        row = container_mount_cleanup_repo.insert(
+            container_id=1, container_name="offline_ctr",
+            machine_id=machine.id, mount_path="/home/x/containers/offline_ctr/",
+            escalation=False, removed_at=old,
+            session=db_session,
+        )
+        db_session.commit()
 
-    def test_returns_none_when_disabled(self, app):
-        app.config["CONTAINER_MOUNT_CLEANUP_ENABLED"] = False
-        result = container_mount_cleanup_task.start_mount_cleanup_scheduler(app)
-        assert result is None
+        sent = []
+        monkeypatch.setattr(
+            node_comms, "send",
+            lambda url, payload, timeout: sent.append(url) or {"success": 1}
+        )
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_after_days", lambda: 14)
 
-    def test_returns_existing_thread_when_alive(self, app):
-        app.config["CONTAINER_MOUNT_CLEANUP_ENABLED"] = True
+        container_mount_cleanup_task.run_mount_cleanup_once()
 
-        class _Thread:
-            def is_alive(self):
-                return True
+        assert sent == []
+        db_session.expire_all()
+        refreshed = db_session.get(ContainerMountCleanup, row.id)
+        assert refreshed.cleaned_at is None
 
-        existing = _Thread()
-        app.extensions["container_mount_cleanup_scheduler"] = {"thread": existing}
-        result = container_mount_cleanup_task.start_mount_cleanup_scheduler(app)
-        assert result is existing
+    def test_skips_when_machine_in_maintenance(self, app, db_session, monkeypatch):
+        """维护中（状态仍 ONLINE）→ 同样不发清理请求：维护那半格也要判。"""
+        from ...constant import MachineStatus
+        from ...models.container_mount_cleanup import ContainerMountCleanup
+        from ..factories import create_machine
+
+        machine = create_machine(machine_status=MachineStatus.ONLINE, is_maintenance=True)
+        old = datetime.utcnow() - timedelta(days=20)
+        row = container_mount_cleanup_repo.insert(
+            container_id=1, container_name="maintenance_ctr",
+            machine_id=machine.id, mount_path="/home/x/containers/maintenance_ctr/",
+            escalation=False, removed_at=old,
+            session=db_session,
+        )
+        db_session.commit()
+
+        sent = []
+        monkeypatch.setattr(
+            node_comms, "send",
+            lambda url, payload, timeout: sent.append(url) or {"success": 1}
+        )
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_after_days", lambda: 14)
+
+        container_mount_cleanup_task.run_mount_cleanup_once()
+
+        assert sent == []
+        db_session.expire_all()
+        refreshed = db_session.get(ContainerMountCleanup, row.id)
+        assert refreshed.cleaned_at is None
+
+    def test_manual_cleanup_still_runs_in_maintenance(self, app, db_session, monkeypatch):
+        """手动入口不受管辖范畴约束：维护中仍可按需手动清理。"""
+        from ...constant import MachineStatus
+        from ...services import container_tasks
+        from ..factories import create_machine
+
+        machine = create_machine(machine_status=MachineStatus.ONLINE, is_maintenance=True)
+        old = datetime.utcnow() - timedelta(days=20)
+        row = container_mount_cleanup_repo.insert(
+            container_id=1, container_name="manual_ctr",
+            machine_id=machine.id, mount_path="/home/x/containers/manual_ctr/",
+            escalation=False, removed_at=old,
+            session=db_session,
+        )
+        db_session.commit()
+
+        sent_payloads = []
+        monkeypatch.setattr(
+            node_comms, "send",
+            lambda url, payload, timeout: sent_payloads.append(url) or {"success": 1}
+        )
+        monkeypatch.setattr(
+            mount_cleanup_mod.machine_repo, "get_machine_ip_by_id",
+            lambda mid, **kwargs: "10.0.0.9"
+        )
+
+        result = container_tasks.clean_deleted_container_mount(
+            operator_user_id=None, mount_cleanup_id=row.id,
+        )
+
+        assert result.get("cleaned") is True
+        assert len(sent_payloads) == 1
+        assert "/clean_mount" in sent_payloads[0]

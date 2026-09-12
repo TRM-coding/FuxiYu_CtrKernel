@@ -1,252 +1,539 @@
-from flask import current_app
+import logging
+import secrets
 
-import threading
-import time
+from ..extensions import session_scope
+from datetime import datetime
 
+from .rbac_service import _has_entity_direct, _has_resource_manage_direct
 from ..repositories.machine_repo import *
 from pydantic import BaseModel
 from typing import Optional
-from ..utils.heartbeat import send, start_machine_maintenance_transition_heartbeat
-from ..utils.parallel import parallel_node_calls
-from ..repositories.containers_repo import update_container, list_containers as repo_list_containers
-from ..repositories import machine_permission_repo, user_repo
-from .operation_log_tasks import write_operation_log as write_op_log
-from ..constant import ContainerStatus, MachineStatus, OperationType
+from sqlalchemy import String, cast, func, or_, select
+from ..repositories import containers_repo, machine_permission_repo, user_repo
+from .operation_log_tasks import log_failure, log_result, log_success
+from ..constant import MachineStatus, OperationType
+from ..models.machine import Machine
+from .container_module.exceptions import NodeServiceError
+from .container_module.node_comms_modules.enrollment import (
+    _default_resource_limits,
+    _fetch_enrollment_profile,
+    _fetch_peer_cert,
+    _validate_trust_anchor,
+    _get_enrollment_client_cert,
+    _request_enrollment_profile,
+    _issue_node_uid,
+    _persist_peer_pin,
+    _persist_enrolled_machine,
+)
+
+logger = logging.getLogger(__name__)
+
 #######################################
 #API Definition
 class machine_bref_information(BaseModel):
-    id: int  #没想到更好的解决办法。主要作为各种操作的映射。
+    id: int
     machine_name:str
     machine_ip:str
     machine_type:str
     machine_status:str
+    is_maintenance: bool = False
+    runtime_snapshot: dict | None = None
 
 class machine_detail_information(BaseModel):
     machine_name:str
     machine_ip:str
     machine_type:str
     machine_status:str
+    is_maintenance: bool = False
     cpu_core_number:int
     gpu_number:int
-    gpu_type: Optional[str] # 部分sql数据会出现此字段是NULL的情况，因此暂时用这个方法解决
+    gpu_type: Optional[str]
+    gpu_list: Optional[list] = None
+    gpu_allow_list: Optional[list] = None
     memory_size_gb:int
     max_shared_gb:int
     max_cpu_core_number:int
     max_gpu_number:int
     max_memory_gb:int
+    max_disk_size_gb: Optional[int] = None
     disk_size_gb:int
     machine_description:str
-    containers:list[int] #容器id
+    containers:list[int] # 容器 id
+    runtime_snapshot: dict | None = None
 #######################################
 
 #######################################
 # 机器权限管理
 
+def _machine_log_detail(machine=None, *, machine_name=None, machine_ip=None, **extra) -> dict:
+    name = machine_name if machine_name is not None else getattr(machine, "machine_name", None)
+    ip = machine_ip if machine_ip is not None else getattr(machine, "machine_ip", None)
+    detail = {
+        "name": name,
+        "machine_name": name,
+        "ip": ip,
+    }
+    detail.update(extra)
+    return detail
+
+
 def Add_machine_permission(machine_id: int, user_id: int, operator_user_id: int | None = None) -> bool:
+    machine = None
+    user = None
+    machine_name = None
+    machine_ip = None
     try:
-        machine = get_by_id(machine_id)
-        if not machine:
-            raise ValueError('machine_not_found')
-        user = user_repo.get_by_id(user_id)
-        if not user:
-            raise ValueError('user_not_found')
-        machine_permission_repo.add_permission(machine_id, user_id)
+        with session_scope() as session:
+            machine = get_by_id(machine_id, session=session)
+            if not machine:
+                raise ValueError('machine_not_found')
+            machine_name = machine.machine_name
+            machine_ip = machine.machine_ip
+            user = user_repo.get_by_id(user_id, session=session)
+            if not user:
+                raise ValueError('user_not_found')
+            machine_permission_repo.add_permission(machine_id, user_id, session=session)
     except Exception as e:
-        write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE_PERMISSION, target_type="machine",
-                     target_id=machine_id, detail={"user_id": user_id},
+        log_failure(operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE_PERMISSION, target_type="machine",
+                     target_id=machine_id,
+                     detail=_machine_log_detail(
+                         machine_name=machine_name,
+                         machine_ip=machine_ip,
+                         user_id=user_id,
+                         username=getattr(user, "username", None),
+                     ),
                      error_reason=getattr(e, 'reason', None) or str(e))
         raise
-    write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE_PERMISSION, target_type="machine",
-                 target_id=machine_id, detail={"user_id": user_id, "username": user.username})
+    log_success(operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE_PERMISSION, target_type="machine",
+                 target_id=machine_id,
+                 detail=_machine_log_detail(
+                     machine_name=machine_name,
+                     machine_ip=machine_ip,
+                     user_id=user_id,
+                     username=user.username,
+                 ))
     return True
 
 
 def Remove_machine_permission(machine_id: int, user_id: int, operator_user_id: int | None = None) -> bool:
-    result = machine_permission_repo.remove_permission(machine_id, user_id)
-    write_op_log(success=bool(result), operator_user_id=operator_user_id, operation=OperationType.REMOVE_MACHINE_PERMISSION, target_type="machine",
-                 target_id=machine_id, detail={"user_id": user_id},
-                 error_reason=None if result else "remove_permission_failed")
+    machine = None
+    user = None
+    machine_name = None
+    machine_ip = None
+    try:
+        with session_scope() as session:
+            machine = get_by_id(machine_id, session=session)
+            machine_name = getattr(machine, "machine_name", None)
+            machine_ip = getattr(machine, "machine_ip", None)
+            user = user_repo.get_by_id(user_id, session=session)
+            result = machine_permission_repo.remove_permission(machine_id, user_id, session=session)
+    except Exception as exc:
+        log_failure(operator_user_id=operator_user_id,
+            operation=OperationType.REMOVE_MACHINE_PERMISSION,
+            target_type="machine",
+            target_id=machine_id,
+            detail=_machine_log_detail(
+                machine_name=machine_name,
+                machine_ip=machine_ip,
+                user_id=user_id,
+                username=getattr(user, "username", None),
+            ),
+            error_reason=getattr(exc, "error_reason", None) or str(exc),
+        )
+        raise
+    log_result(
+        success=bool(result),
+        operator_user_id=operator_user_id,
+        operation=OperationType.REMOVE_MACHINE_PERMISSION,
+        target_type="machine",
+        target_id=machine_id,
+        detail=_machine_log_detail(
+            machine_name=machine_name,
+            machine_ip=machine_ip,
+            user_id=user_id,
+            username=getattr(user, "username", None),
+        ),
+        error_reason=None if result else "remove_permission_failed",
+    )
     return result
 
 
 def List_machine_permissions(machine_id: int) -> list[int]:
-    return machine_permission_repo.list_user_ids_by_machine(machine_id)
+    with session_scope(commit=False) as session:
+        return machine_permission_repo.list_user_ids_by_machine(machine_id, session=session)
 
 
 #######################################
 # 辅助方法
 
-def _is_operator_user(user_id: int) -> bool:
-    try:
-        u = user_repo.get_by_id(user_id)
-        perm = getattr(u, 'permission', None) if u else None
-        return bool(perm and getattr(perm, 'value', str(perm)).lower() == 'operator')
-    except Exception:
-        return False
 
-def is_machine_online_remote(machine_id: int, timeout: float = 2.0) -> bool:
+def _machine_status_value(machine) -> str:
+    """返回机器真实连接状态：online/offline。"""
+    status = getattr(machine, "machine_status", None)
+    return status.value if hasattr(status, "value") else str(status)
+
+
+def refresh_unavailable_window(machine_id: int, *, session) -> None:
+    """按机器当前可用状态刷新不可用窗口（须在状态已更新的同一 session 事务内调用）。
+
+    窗口语义（清理顺延的公共地基）：不可用 = machine_status != ONLINE 或 is_maintenance。
+    - 进入不可用且 unavailable_since 为空 → 置位 now（窗口起点取最早）
+    - 恢复可用（窗口关闭）→ 把整段故障时长批量加到该机器全部 ssh deferral_seconds，
+      再清空 unavailable_since——到期清理计时随之顺延（宕机/维护期不算用户责任）
+    只应在 machine_status / is_maintenance 变化时调用；其它字段更新不触发，
+    否则会把"早已离线"的机器误标成刚进窗。
     """
-    Perform a single, lightweight communication check to the Node's `/machine_status` endpoint.
-    Returns True if Node responds with success==1 and machine_status == 'online'.
-    This function does NOT update DB state or perform additional logic; callers should handle
-    persistence or other decisions.
+    machine = get_by_id(machine_id, session=session)
+    if machine is None:
+        return
+    available = (
+        _machine_status_value(machine) == MachineStatus.ONLINE.value
+        and not getattr(machine, "is_maintenance", False)
+    )
+    since = getattr(machine, "unavailable_since", None)
+    if not available:
+        if since is None:
+            machine.unavailable_since = datetime.utcnow()
+            session.flush()
+    else:
+        if since is not None:
+            delta = int((datetime.utcnow() - since).total_seconds())
+            if delta > 0:
+                from ..repositories import container_ssh_login_repo
+                container_ssh_login_repo.add_deferral_seconds(machine_id, delta, session=session)
+            machine.unavailable_since = None
+            session.flush()
+
+
+def seed_unavailable_windows_from_last_seen() -> dict:
+    """启动扫描：用采集心跳兜住窗口起点，补上 Ctrl 停机期间的观测盲区。
+
+    背景：unavailable_since 只在 Ctrl 亲眼看到状态翻转时才写入（调用点仅
+    Update_machine 与 Set_maintenance）。Ctrl 停机期间发生的**进窗**无法被观测，
+    起点会被记成重启时刻 → 顺延少算 → 清理提前触发，而清理不可逆。
+    本扫描把「窗口未开」的机器起点回填为 last_seen_at，即「至少到这时它还是
+    好的」——取的是下界，方向恒为多给用户时间。
+
+    三条边界：
+    - 已有窗口的机器不动：已有起点更早，改写只会让顺延变少
+    - last_seen_at 为空则跳过：刚建档（模型默认 ONLINE、两列皆空）或迁移来源
+      无此数据——不凭空调制窗口
+    - **必须在链路首次拨号之前跑**：否则 Update_machine(ONLINE) 先按可用空操作，
+      扫描再置位就会开出一个无人结算的窗口（顺序由 link 侧保证并测锁定）
+
+    幂等：置位后 unavailable_since 非空，再次执行自然跳过。
+    """
+
+    seeded: list[int] = []
+    try:
+        with session_scope() as session:
+            for machine in session.scalars(select(Machine)).all():
+                if getattr(machine, "unavailable_since", None) is not None:
+                    continue
+                seen = getattr(machine, "last_seen_at", None)
+                if seen is None:
+                    continue
+                machine.unavailable_since = seen
+                seeded.append(machine.id)
+    except Exception as exc:
+        # 扫描失败不该阻断链路启动：窗口起点的兜底没做成，只是回到修复前的行为
+        logger.warning("seed_unavailable_windows_from_last_seen failed: %s", exc)
+        return {"seeded": [], "error": str(exc)}
+    if seeded:
+        logger.info("seeded unavailable windows from last_seen_at: machines=%s", seeded)
+    return {"seeded": seeded}
+
+
+def is_machine_in_maintenance(machine_id: int) -> bool:
+    """判断机器是否处于维护模式。"""
+    try:
+        with session_scope(commit=False) as session:
+            machine = get_by_id(machine_id, session=session)
+    except Exception:
+        machine = None
+    return bool(machine and getattr(machine, "is_maintenance", False))
+
+
+def is_machine_collect_error(machine_id: int) -> bool:
+    """判断机器是否处于采集异常（Node 无法采集容器状态，docker 卡死）——机器轴条件（契约 C1）。
+
+    标志由 collect_error 帧置位、正常快照清除；容器 DB 状态保持最后已知值，展示派生 status_unknown。
     """
     try:
-        m = get_by_id(machine_id)
+        with session_scope(commit=False) as session:
+            machine = get_by_id(machine_id, session=session)
     except Exception:
-        m = None
-    if not m:
-        return False
-    machine_ip = getattr(m, 'machine_ip', None)
-    if not machine_ip:
-        return False
+        machine = None
+    return bool(machine and getattr(machine, "collect_error_at", None))
 
-    try:
-        j = send(machine_ip, "/machine_status", {"config": {}}, timeout=timeout)
-    except Exception:
-        return False
-    if isinstance(j, dict) and j.get('success') in (1, True):
-        ms = (j.get('machine_status') or '').lower()
-        return ms == 'online'
-    return False
-
-
-# ── 机器可达性统一入口（TTL 缓存） ──────────────────────────
-# 所有需要"机器现在通不通"的地方都走这里（容器展示态派生、操作前置检查等）。
-# 唯一做 HTTP 探测的地方；WSS 落地后此入口改读连接状态，调用方无感。
-_reach_cache: dict[int, tuple[float, bool]] = {}
-_reach_cache_lock = threading.Lock()
-REACH_CACHE_TTL_SEC = 20.0
-
-
-def _peek_machine_reachable(machine_id: int) -> bool | None:
-    """缓存未过期返回结果，否则 None。"""
-    now = time.time()
-    with _reach_cache_lock:
-        hit = _reach_cache.get(machine_id)
-    if hit and (now - hit[0]) < REACH_CACHE_TTL_SEC:
-        return hit[1]
-    return None
-
-
-def _set_machine_reachable(machine_id: int, ok: bool) -> None:
-    with _reach_cache_lock:
-        _reach_cache[machine_id] = (time.time(), bool(ok))
 
 
 def get_machine_reachable(machine_id: int, timeout: float = 2.0) -> bool:
-    """机器可达性统一入口：命中 TTL 缓存零 HTTP，未命中探测一次并写缓存。"""
-    cached = _peek_machine_reachable(machine_id)
-    if cached is not None:
-        return cached
-    ok = is_machine_online_remote(machine_id, timeout=timeout)
-    _set_machine_reachable(machine_id, ok)
-    return ok
+    """读取机器连接状态。
+
+    参数 timeout 保留兼容旧调用；本函数不再发起 HTTP 探活，避免列表/展示查询
+    反向驱动 machine_status。
+    """
+    try:
+        with session_scope(commit=False) as session:
+            machine = get_by_id(machine_id, session=session)
+    except Exception:
+        machine = None
+    return _machine_status_value(machine) == MachineStatus.ONLINE.value if machine else False
+
+
+def machine_in_scope(machine_id: int | None) -> bool:
+    """动作类定时任务的「管辖范畴」判定：**可达 且 非维护**。
+
+    三个动作任务（容器清理 / 挂载清理 / 磁盘检测）共用此判据，口径统一。
+    范畴外是**职责划分**而非门禁：这次动作本就不该发生，调用方直接跳过且不留痕
+    （不写审计、不写常规日志）。机器记录缺失并入范畴外——缺依据时不抛异常。
+    """
+    if machine_id is None:
+        return False
+    return get_machine_reachable(machine_id) and not is_machine_in_maintenance(machine_id)
 
 #######################################
 #######################################
-# 添加一个新的机器到集群
-def Add_machine(machine_name:str,
-                   machine_ip:str,
-                   machine_type:MachineTypes,
-                   machine_description:str,
-                   cpu_core_number:int,
-                   gpu_number:int,
-                   gpu_type:str,
-                   memory_size:int,
-                   max_shared_gb:int,
-                   disk_size:int,
-                   max_memory_gb:int,
-                   max_gpu_number:int,
-                   max_cpu_core_number:int,
-                   operator_user_id: int | None = None)->bool:
-    # 防御性检查：限制字段长度，防止过长输入导致数据库异常
-    if machine_name and len(machine_name) > 115:
-        raise ValueError(f"machine_name too long (max 115): length={len(machine_name)}")
-    if gpu_type and len(str(gpu_type)) > 115:
-        raise ValueError(f"gpu_type too long (max 115): length={len(str(gpu_type))}")
-    if machine_type and len(str(machine_type)) > 255:
-        raise ValueError(f"machine_type too long (max 255): length={len(str(machine_type))}")
+# 注册机器（TOFU 接入并建档）
+def Register_machine(
+    machine_name: str, machine_ip: str, machine_description: str = "", timeout: float = 8.0,
+) -> dict:
+    """Enroll a Node from the administrator's trust anchor, then persist its record.
 
-    # max_shared_gb defensive check: must be non-negative integer and <= 8 (GB)
-    if max_shared_gb is not None:
-        try:
-            ss = int(max_shared_gb)
-        except Exception:
-            e = ValueError(f"max_shared_gb must be an integer: {max_shared_gb}")
-            setattr(e, 'error_reason', 'create_failed')
-            raise e
-        if ss <= 0:
-            e = ValueError(f"shared size out of range (0-8 GB): {ss}")
-            setattr(e, 'error_reason', 'create_failed')
-            raise e
+    建档即完成接入：机器行落库后，链路进程的下一轮集合对齐会自行拨通它，
+    注册流程不再需要任何重载动作。
+    """
+    from .container_module.node_comms import get_full_url
 
-        # ensure machine max_shared does not exceed machine max_memory
-        try:
-            mm = int(max_memory_gb) if max_memory_gb is not None else None
-        except Exception:
-            e = ValueError(f"max_memory_gb must be an integer: {max_memory_gb}")
-            setattr(e, 'error_reason', 'create_failed')
-            raise e
-        if mm is not None and ss > mm:
-            e = ValueError(f"max_shared_gb ({ss}) cannot be greater than max_memory_gb ({mm})")
-            setattr(e, 'error_reason', 'create_failed')
-            raise e
+    _validate_trust_anchor(machine_name, machine_ip)
+    client_cert = _get_enrollment_client_cert()
+    try:
+        fingerprint, cert_der = _fetch_peer_cert(machine_ip, timeout=timeout)
+    except Exception as exc:
+        raise NodeServiceError(
+            f"register_machine failed: cannot reach {machine_ip} over TLS: {exc}", reason="machine_unreachable",
+        ) from exc
+    hardware = _request_enrollment_profile(
+        get_full_url(machine_ip, "/node_identity/enrollment_profile"), machine_ip, client_cert, timeout,
+    )
+    uid = secrets.token_urlsafe(24)
+    _issue_node_uid(get_full_url(machine_ip, "/node_identity/issue_uid"), machine_ip, uid, client_cert, timeout)
+    _persist_peer_pin(machine_ip, cert_der)
+    machine_id = _persist_enrolled_machine(
+        machine_name, machine_ip, machine_description, _default_resource_limits(hardware), uid, fingerprint,
+    )
+    logger.info(
+        "machine %s (%s) enrolled: id=%s uid=%s fingerprint=%s hardware=%s",
+        machine_name, machine_ip, machine_id, uid, fingerprint, hardware,
+    )
+    return {
+        "success": True, "uid": uid, "certificate_fingerprint": fingerprint,
+        "machine_id": machine_id, "hardware": hardware,
+    }
+
+#######################################
+#######################################
+# 重新钉信任锚（对已登记机器的连接修复）
+def Renew_machine_trust(machine_id: int, operator_user_id: int | None = None, timeout: float = 8.0) -> dict:
+    """重新建立与已登记机器的连接信任 —— 只 UPDATE，不增删机器行。
+
+    适用场景：Node 重新生成过自签证书（例如主机名变化触发 SAN 校验失败，
+    ensure_self_signed_certificate 会静默重生成），本地 pin 随之作废、链路报
+    SSLCertVerificationError；而机器本身、容器与 uid 都没有变，坏的只是
+    「连接能力」。此时重新注册走不通（machine_ip/machine_name 唯一约束），
+    删行也被容器守卫挡住 —— 本函数就是那条缺失的出路。
+
+    语义边界：
+    - register 是 INSERT（建档），本函数是 UPDATE（换信任锚），二者不重叠；
+      本函数不写 machine_name / machine_ip，因此不可能触发唯一约束
+    - 「随时可按」的前提是先取证后落地：抓不到对端证书即整体失败返回，
+      pin 与全部凭证字段保持原值（绝不在没拿到新证据时就毁掉旧信任）
+    - uid 只在必要时动：对端丢了身份牌才重发；库里本无 uid 才对端自报一个
+      （Ctrl 在那行上没有主张，不算覆盖）；两者都有则保持不动，只把不一致
+      报出来由人判断
+    """
+    from .container_module.node_comms import get_full_url
+
+    with session_scope(commit=False) as session:
+        machine = get_by_id(machine_id, session=session)
+        if machine is None:
+            log_failure(
+                operator_user_id=operator_user_id,
+                operation=OperationType.RENEW_MACHINE_TRUST,
+                target_type="machine",
+                target_id=machine_id,
+                detail={"machine_id": machine_id},
+                error_reason="machine_not_found",
+            )
+            raise NodeServiceError(
+                f"renew_machine_trust failed: machine {machine_id} not found", reason="machine_not_found",
+            )
+        machine_name = machine.machine_name
+        machine_ip = machine.machine_ip
+        previous_fingerprint = machine.node_cert_fingerprint
+        previous_uid = machine.node_uid
+
+    detail = _machine_log_detail(machine_name=machine_name, machine_ip=machine_ip)
+    if not machine_ip:
+        log_failure(
+            operator_user_id=operator_user_id, operation=OperationType.RENEW_MACHINE_TRUST,
+            target_type="machine", target_id=machine_id, detail=detail, error_reason="invalid_machine_ip",
+        )
+        raise NodeServiceError(
+            f"renew_machine_trust failed: machine {machine_id} has no machine_ip", reason="invalid_machine_ip",
+        )
+
+    def _fail(reason: str, message: str) -> None:
+        log_failure(
+            operator_user_id=operator_user_id, operation=OperationType.RENEW_MACHINE_TRUST,
+            target_type="machine", target_id=machine_id, detail=detail, error_reason=reason,
+        )
+        raise NodeServiceError(message, reason=reason)
+
+    # ── 阶段一：取齐全部对端证据。任何一步失败都在改动本地状态之前退出 ──
+    client_cert = _get_enrollment_client_cert()
+    try:
+        fingerprint, cert_der = _fetch_peer_cert(machine_ip, timeout=timeout)
+    except Exception as exc:
+        _fail("machine_unreachable", f"renew_machine_trust failed: cannot reach {machine_ip} over TLS: {exc}")
 
     try:
-        machine = create_machine(
-            machinename=machine_name,
-            machine_ip=machine_ip,
-            machine_type=machine_type,
-            machine_description=machine_description,
-            cpu_core_number=cpu_core_number,
-            gpu_number=gpu_number,
-            gpu_type=gpu_type,
-            memory_size=memory_size,
-            max_shared_gb=max_shared_gb,
-            disk_size=disk_size,
-            max_memory_gb=max_memory_gb,
-            max_gpu_number=max_gpu_number,
-            max_cpu_core_number=max_cpu_core_number,
+        profile = _fetch_enrollment_profile(
+            get_full_url(machine_ip, "/node_identity/enrollment_profile"),
+            machine_ip, client_cert, timeout, context="renew_machine_trust",
         )
-    except Exception as e:
-        write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE, target_type="machine", target_id=0,
-                     detail={"name": machine_name, "ip": machine_ip},
-                     error_reason=getattr(e, 'error_reason', None) or str(e))
-        raise
-    write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.ADD_MACHINE, target_type="machine", target_id=machine.id,
-                 detail={"name": machine_name, "ip": machine_ip})
-    return True
+    except Exception as exc:
+        _fail("enrollment_failed", f"renew_machine_trust failed: {exc}")
+
+    identity_initialized = bool(profile.get("identity_initialized"))
+    reported_uid = profile.get("uid")
+
+    # uid 先下发、后落库：反过来的顺序若本地写成功而下发失败，DB 与 Node 会永久
+    # 错位（Node 仍持旧牌 → identity_initialized 为真 → 再按也不会重发）。
+    new_uid = previous_uid
+    uid_reissued = False
+    uid_adopted = False
+    if not identity_initialized:
+        new_uid = secrets.token_urlsafe(24)
+        try:
+            _issue_node_uid(
+                get_full_url(machine_ip, "/node_identity/issue_uid"),
+                machine_ip, new_uid, client_cert, timeout,
+            )
+        except Exception as exc:
+            _fail("issue_uid_failed", f"renew_machine_trust failed: cannot issue uid to {machine_ip}: {exc}")
+        uid_reissued = True
+    elif not previous_uid and reported_uid:
+        new_uid = reported_uid
+        uid_adopted = True
+
+    # ── 阶段二：到这里才动本地状态 ──
+    _persist_peer_pin(machine_ip, cert_der)
+    try:
+        with session_scope() as session:
+            update_machine(
+                machine_id,
+                node_cert_fingerprint=fingerprint,
+                cert_pinned_at=datetime.utcnow(),
+                node_uid=new_uid,
+                session=session,
+            )
+    except Exception as exc:
+        _fail("persist_failed", f"renew_machine_trust failed: persist machine {machine_id}: {exc}")
+
+    uid_mismatch = bool(previous_uid and reported_uid and previous_uid != reported_uid)
+    if uid_mismatch:
+        logger.warning(
+            "renew_machine_trust: machine %s uid mismatch (db=%s node=%s); kept db value",
+            machine_id, previous_uid, reported_uid,
+        )
+
+    log_success(
+        operator_user_id=operator_user_id, operation=OperationType.RENEW_MACHINE_TRUST,
+        target_type="machine", target_id=machine_id,
+        detail={
+            **detail,
+            "trigger": "manual_renew",
+            "fingerprint_before": previous_fingerprint,
+            "fingerprint_after": fingerprint,
+            "uid_reissued": uid_reissued,
+            "uid_adopted": uid_adopted,
+            "uid_mismatch": uid_mismatch,
+        },
+    )
+    logger.info(
+        "machine %s (%s) trust renewed: uid_reissued=%s uid_adopted=%s uid_mismatch=%s fingerprint=%s",
+        machine_name, machine_ip, uid_reissued, uid_adopted, uid_mismatch, fingerprint,
+    )
+    return {
+        "success": True,
+        "machine_id": machine_id,
+        "machine_name": machine_name,
+        "machine_ip": machine_ip,
+        "certificate_fingerprint": fingerprint,
+        "previous_certificate_fingerprint": previous_fingerprint,
+        "uid": new_uid,
+        "uid_reissued": uid_reissued,
+        "uid_adopted": uid_adopted,
+        "uid_mismatch": uid_mismatch,
+    }
 
 #######################################
 
 
 #######################################
 # 删除集群中的一个（一组）机器
-def Remove_machine(machine_id:list[int], operator_user_id: int | None = None)->bool:
+def Remove_machine(machine_id:list[int], operator_user_id: int | None = None)->dict:
+    """删除一组机器记录。
+
+    2026-09 决策：机器上仍有容器 → 拒绝删除该台并提示先手动清理（不自动级联删
+    物理容器——删除不可被机器记录删除捎带触发）。返回 {"removed": [id], "blocked": [...]}。
+    """
+    removed: list[int] = []
+    blocked: list[dict] = []
     for id in machine_id:
-        machine = get_by_id(id)
+        machine = None
+        ok = False
+        err = None
         try:
-            ok = delete_machine(id)
-            err = None if ok else "delete_failed"
+            with session_scope() as session:
+                machine = get_by_id(id, session=session)
+                if machine is None:
+                    err = "not_found"
+                else:
+                    count = containers_repo.count_containers(machine_id=id, session=session)
+                    if count > 0:
+                        blocked.append({"machine_id": id, "name": machine.machine_name, "container_count": count})
+                        err = "machine_has_containers"
+                    else:
+                        ok = delete_machine(id, session=session)
+                        err = None if ok else "delete_failed"
         except Exception as e:
             ok = False
             err = getattr(e, 'reason', None) or str(e)
-        write_op_log(success=bool(ok), operator_user_id=operator_user_id, operation=OperationType.REMOVE_MACHINE, target_type="machine", target_id=id,
-                     detail={
-                         "name": getattr(machine, 'machine_name', None),
-                         "ip": getattr(machine, 'machine_ip', None),
-                     },
+        if ok:
+            removed.append(id)
+        log_result(success=bool(ok), operator_user_id=operator_user_id, operation=OperationType.REMOVE_MACHINE, target_type="machine", target_id=id,
+                     detail=_machine_log_detail(machine),
                      error_reason=err)
-    return True
+    return {"removed": removed, "blocked": blocked}
 #######################################
 
 
 #######################################
-# 更新机器的信息
+# 更新机器信息
 def Update_machine(machine_id: int, operator_user_id: int | None = None, **fields) -> bool:
-    machine = get_by_id(machine_id)
+    with session_scope(commit=False) as session:
+        machine = get_by_id(machine_id, session=session)
     if not machine:
+        log_failure(operator_user_id=operator_user_id,
+            operation=OperationType.UPDATE_MACHINE,
+            target_type="machine",
+            target_id=machine_id,
+            detail=_machine_log_detail(machine),
+            error_reason="machine_not_found",
+        )
         return False
 
     # validate shared_size when provided: must be integer and <= 8 GB
@@ -285,251 +572,199 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
                 setattr(e, 'error_reason', 'update_failed')
                 raise e
 
-    requested_status = fields.get('machine_status', None)
-    current_status = machine.machine_status.value if hasattr(machine.machine_status, 'value') else str(machine.machine_status)
-
-    # ONLINE -> MAINTENANCE: Ctrl异步处理，保持当前状态并启动过渡心跳；
-    # 其他状态变更则直接更新
-    if str(current_status).lower() == MachineStatus.ONLINE.value and str(requested_status).lower() == MachineStatus.MAINTENANCE.value:
-        passthrough_fields = dict(fields)
-        passthrough_fields.pop('machine_status', None)
-        if 'disk_size' in passthrough_fields:
-            passthrough_fields['disk_size_gb'] = passthrough_fields.pop('disk_size')
-        if passthrough_fields:
-            before = {k: str(getattr(machine, k, None)) for k in passthrough_fields.keys()}
-            update_machine(machine_id, **passthrough_fields)
-            write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.UPDATE_MACHINE, target_type="machine", target_id=machine_id,
-                         detail={"before": before, "after": {k: str(v) for k, v in passthrough_fields.items()}})
-        # 状态迁移本身由过渡心跳完成后记（before/after 见 heartbeat 侧）
-        start_machine_maintenance_transition_heartbeat(machine_id)
-        return True
-
-    # 字段名翻译: 前端 disk_size → 模型 disk_size_gb
+    # 维护态为纯开关；machine_status 直接表达真实连接状态。
+    # 字段名翻译：前端 disk_size -> 模型 disk_size_gb。
     if 'disk_size' in fields:
         fields['disk_size_gb'] = fields.pop('disk_size')
 
-    # 记录前值：repo 已原子化，update 前从 machine 对象取旧值即可
+    # IP 变更自愈（2026-09）：新 IP 首连 + 证书指纹比对——同一证书换 IP → 自动导出新 pin；
+    # 指纹不匹配（证书也换了）→ 拒绝，防机器记录被劫持到攻击者机器。
+    new_ip = str(fields.get('machine_ip') or '').strip() if fields.get('machine_ip') is not None else None
+    if new_ip and new_ip != getattr(machine, 'machine_ip', None):
+        from ..utils.cert_utils import der_cert_to_pem
+        from .container_module.node_comms import _fetch_peer_cert, _pin_file
+
+        try:
+            fingerprint, cert_der = _fetch_peer_cert(new_ip)
+        except Exception as e:
+            err = ValueError(f"machine_ip change failed: cannot reach {new_ip} over TLS: {e}")
+            setattr(err, 'error_reason', 'ip_change_unreachable')
+            raise err
+        expected = getattr(machine, 'node_cert_fingerprint', None)
+        if not expected or fingerprint != expected:
+            err = ValueError(f"machine_ip change refused: {new_ip} presents a different certificate (re-register instead)")
+            setattr(err, 'error_reason', 'ip_change_fingerprint_mismatch')
+            raise err
+        # 同一证书换 IP → 导出新 pin（Ctrl→Node 链路按 IP 取信任锚）；
+        # 链路进程下一轮集合对齐会按新 IP 重拨，无需重载任何服务端上下文。
+        try:
+            pin_path = _pin_file(new_ip)
+            pin_path.parent.mkdir(parents=True, exist_ok=True)
+            pin_path.write_bytes(der_cert_to_pem(cert_der))
+        except Exception as e:  # pragma: no cover
+            print(f"[machine-ip-change] pin export failed for {new_ip}: {e}")
+        fields['machine_ip'] = new_ip
+    if str(fields.get('machine_status', '')).lower() == "maintenance":
+        raise ValueError("machine_status no longer accepts maintenance; use is_maintenance")
+    if 'is_maintenance' in fields:
+        fields['is_maintenance'] = bool(fields['is_maintenance'])
+
     before = {k: str(getattr(machine, k, None)) for k in fields.keys()}
+    # 状态类字段变化 → 同一事务内刷新不可用窗口（离线/维护进窗，恢复出窗顺延清理计时）
+    state_changed = ("machine_status" in fields) or ("is_maintenance" in fields)
     try:
-        update_machine(machine_id, **fields)
+        with session_scope() as session:
+            update_machine(machine_id, session=session, **fields)
+            if state_changed:
+                refresh_unavailable_window(machine_id, session=session)
     except Exception as e:
-        write_op_log(success=False, operator_user_id=operator_user_id, operation=OperationType.UPDATE_MACHINE, target_type="machine", target_id=machine_id,
-                     detail={"before": before, "after": {k: str(v) for k, v in fields.items()}},
+        log_failure(operator_user_id=operator_user_id, operation=OperationType.UPDATE_MACHINE, target_type="machine", target_id=machine_id,
+                     detail=_machine_log_detail(machine, before=before, after={k: str(v) for k, v in fields.items()}),
                      error_reason=getattr(e, 'error_reason', None) or str(e))
         raise
-    write_op_log(success=True, operator_user_id=operator_user_id, operation=OperationType.UPDATE_MACHINE, target_type="machine", target_id=machine_id,
-                 detail={"before": before, "after": {k: str(v) for k, v in fields.items()}})
+    log_success(operator_user_id=operator_user_id, operation=OperationType.UPDATE_MACHINE, target_type="machine", target_id=machine_id,
+                 detail=_machine_log_detail(machine, before=before, after={k: str(v) for k, v in fields.items()}))
     return True
-#######################################
 
 
-#######################################
-# 根据机器ID获取机器的详细信息
-def Get_detail_information(machine_id:int)->machine_detail_information|None:
-    machine=get_by_id(machine_id)
-    if not machine:
-        return None
+def Set_maintenance(machine_id: int, is_maintenance: bool, operator_user_id: int | None = None) -> bool:
+    """设置机器维护开关；真实在线/离线状态仍由连接状态维护。"""
 
-    return machine_detail_information(
-        machine_name=machine.machine_name,
-        machine_ip=machine.machine_ip,
-        machine_type=machine.machine_type.value,
-        machine_status=machine.machine_status.value,
-        cpu_core_number=machine.cpu_core_number,
-        gpu_number=machine.gpu_number,
-        gpu_type=machine.gpu_type,
-        memory_size_gb=machine.memory_size_gb,
-        max_shared_gb=machine.max_shared_gb,
-        max_cpu_core_number=machine.max_cpu_core_number,
-        max_gpu_number=machine.max_gpu_number,
-        max_memory_gb=machine.max_memory_gb,
-        disk_size_gb=machine.disk_size_gb,
-        machine_description=machine.machine_description,
-        containers=[container.id for container in machine.containers]
-    )
-#######################################
+    with session_scope(commit=False) as session:
+        machine = get_by_id(machine_id, session=session)
+        if not machine:
+            log_failure(operator_user_id=operator_user_id,
+                operation=OperationType.UPDATE_MACHINE,
+                target_type="machine",
+                target_id=machine_id,
+                detail=_machine_log_detail(machine, field="is_maintenance"),
+                error_reason="machine_not_found",
+            )
+            return False
+        before = {"is_maintenance": bool(getattr(machine, "is_maintenance", False))}
 
-#######################################
-def _node_probe_machine(machine_id: int, _app=None) -> bool:
-    """封装单次 NodeKernel /machine_status 可达性检查。
-
-    等同于原 for 循环内的 ``is_machine_online_remote(machine_id, timeout=2.0)``，
-    抽取为独立函数以适配 ``parallel_node_calls``。
-
-    *_app* 可选传入 Flask app 实例，用于线程池内推送 app context。
-    """
+    after = {"is_maintenance": bool(is_maintenance)}
     try:
-        if _app is not None:
-            with _app.app_context():
-                return is_machine_online_remote(machine_id, timeout=2.0)
-        return is_machine_online_remote(machine_id, timeout=2.0)
-    except Exception:
-        return False
+        with session_scope() as session:
+            ok = set_maintenance(machine_id, bool(is_maintenance), session=session)
+            # 维护开关变化 = 可用性变化：同一事务内刷新不可用窗口（开维护进窗 / 关维护出窗顺延）
+            if ok:
+                refresh_unavailable_window(machine_id, session=session)
+    except Exception as e:
+        log_failure(operator_user_id=operator_user_id,
+            operation=OperationType.UPDATE_MACHINE,
+            target_type="machine",
+            target_id=machine_id,
+            detail=_machine_log_detail(machine, before=before, after=after, field="is_maintenance"),
+            error_reason=getattr(e, "error_reason", None) or str(e),
+        )
+        raise
 
+    log_result(
+        success=bool(ok),
+        operator_user_id=operator_user_id,
+        operation=OperationType.UPDATE_MACHINE,
+        target_type="machine",
+        target_id=machine_id,
+        detail=_machine_log_detail(machine, before=before, after=after, field="is_maintenance"),
+        error_reason=None if ok else "machine_not_found",
+    )
+    return bool(ok)
+
+
+#######################################
+
+
+#######################################
+# 根据机器 ID 获取机器详情
+def Get_detail_information(machine_id:int)->machine_detail_information|None:
+    with session_scope(commit=False) as session:
+        machine = get_by_id(machine_id, session=session)
+        if not machine:
+            return None
+        container_ids = [container.id for container in machine.containers]
+        from .container_module.node_comms import get_cached_machine_runtime_snapshot
+        return machine_detail_information(
+            machine_name=machine.machine_name,
+            machine_ip=machine.machine_ip,
+            machine_type=machine.machine_type.value,
+            machine_status=_machine_status_value(machine),
+            is_maintenance=bool(getattr(machine, "is_maintenance", False)),
+            cpu_core_number=machine.cpu_core_number,
+            gpu_number=machine.gpu_number,
+            gpu_type=machine.gpu_type,
+            gpu_list=machine.gpu_list,
+            gpu_allow_list=machine.gpu_allow_list,
+            memory_size_gb=machine.memory_size_gb,
+            max_shared_gb=machine.max_shared_gb,
+            max_cpu_core_number=machine.max_cpu_core_number,
+            max_gpu_number=machine.max_gpu_number,
+            max_memory_gb=machine.max_memory_gb,
+            max_disk_size_gb=machine.max_disk_size_gb,
+            disk_size_gb=machine.disk_size_gb,
+            machine_description=machine.machine_description,
+            containers=container_ids,
+            runtime_snapshot=get_cached_machine_runtime_snapshot(machine.id),
+        )
+#######################################
 
 # 获取一批机器的概要信息
 def List_all_machine_bref_information(
-    page_number: int, 
+    page_number: int,
     page_size: int,
-    machine_name_prefix: str = None,  # 新增：按机器名称前缀过滤
-    sort_by: str = "id",              # 新增：排序字段
-    sort_order: str = "asc",          # 新增：排序方向（asc/desc）
-    user_id: int | None = None
+    machine_name_prefix: str = None,
+    sort_by: str = "id",
+    sort_order: str = "asc",
+    user_id: int | None = None,
+    machine_search: str | None = None,
 ) -> tuple[list[machine_bref_information], int]:
-    """
-    获取机器概要信息列表，支持分页、过滤和排序
-    
-    Args:
-        page_number: 页码（从0开始）
-        page_size: 每页条数
-        machine_name_prefix: 机器名称前缀（用于过滤，如 "test_machine_"）
-        sort_by: 排序字段（默认 "id"，支持 "machine_name"、"machine_ip" 等）
-        sort_order: 排序方向（"asc" 升序，"desc" 降序）
-    
-    Returns:
-        tuple: (机器概要信息列表, 总页数)
-    """
-    # 1. 构建查询条件
-    query_filters = {}
-    if machine_name_prefix:
-        # 按名称前缀过滤（关键：解决测试数据和原有数据混合的问题）
-        machines_query = Machine.query.filter(Machine.machine_name.like(f"{machine_name_prefix}%"))
-    else:
-        machines_query = Machine.query
-    
-    # 2. 设置排序规则（关键：确保分页结果可预测）
-    if sort_by == "id":
-        if sort_order == "asc":
-            machines_query = machines_query.order_by(Machine.id.asc())
-        else:
-            machines_query = machines_query.order_by(Machine.id.desc())
-    elif sort_by == "machine_name":
-        if sort_order == "asc":
-            machines_query = machines_query.order_by(Machine.machine_name.asc())
-        else:
-            machines_query = machines_query.order_by(Machine.machine_name.desc())
-    elif sort_by == "machine_ip":
-        if sort_order == "asc":
-            machines_query = machines_query.order_by(Machine.machine_ip.asc())
-        else:
-            machines_query = machines_query.order_by(Machine.machine_ip.desc())
-    
-        # 3. 权限过滤：普通用户仅能看到被授权机器
-    if user_id and not _is_operator_user(user_id):
-        allowed = set(machine_permission_repo.list_machine_ids_by_user(user_id))
-        machines_query = machines_query.filter(Machine.id.in_(allowed)) if allowed else machines_query.filter(False)
-
-    # 3. 执行分页查询
-    # 先计算符合过滤条件的总数量（而非全量机器）
-    total_count = machines_query.count()
-    # 分页查询（offset从0开始）
-    machines = machines_query.limit(page_size).offset(page_number * page_size).all()
-    
-    # 4. 并发可达性检查（Phase A），然后逐条同步状态（Phase B）
-    res = []
-
-    # --- Phase A: 并发探活 ---
-    try:
-        use_parallel = current_app.config.get("NODE_PARALLEL_ENABLED_MACHINES", True)
-        _app = current_app._get_current_object()
-    except RuntimeError:
-        use_parallel = True
-        _app = None
-    _probe_results: dict[int, bool] = {}
-    if machines:
-        if use_parallel and _app is not None:
-            # 缓存新鲜则零探测，否则并发探活
-            _callables = [
-                lambda mid=m.id, a=_app: (
-                    _peek_machine_reachable(mid)
-                    if _peek_machine_reachable(mid) is not None
-                    else _node_probe_machine(mid, _app=a)
+    with session_scope(commit=False) as session:
+        stmt = select(Machine)
+        if machine_name_prefix:
+            stmt = stmt.where(Machine.machine_name.like(f"{machine_name_prefix}%"))
+        if machine_search:
+            keyword = f"%{machine_search.strip()}%"
+            stmt = stmt.where(
+                or_(
+                    Machine.machine_name.ilike(keyword),
+                    Machine.machine_ip.ilike(keyword),
+                    cast(Machine.id, String).ilike(keyword),
                 )
-                for m in machines
-            ]
-            _raw = parallel_node_calls(_callables, timeout_per_call=3.0)
-            for m, r in zip(machines, _raw):
-                _probe_results[m.id] = r if isinstance(r, bool) else False
-        else:
-            for m in machines:
-                cached = _peek_machine_reachable(m.id)
-                _probe_results[m.id] = cached if cached is not None else _node_probe_machine(m.id)
-    # 写透可达性缓存：容器 getter 的派生展示态读它
-    for m in machines:
-        _set_machine_reachable(m.id, bool(_probe_results.get(m.id, False)))
+            )
+        # 资源级集合过滤：无通配（bypass_resource / machine:manage）的用户只看有访问权的机器
+        if user_id and not _has_resource_manage_direct(user_id, "machine") and not _has_entity_direct(user_id, "bypass_resource"):
+            allowed = set(machine_permission_repo.list_machine_ids_by_user(user_id, session=session))
+            stmt = stmt.where(Machine.id.in_(allowed)) if allowed else stmt.where(False)
 
-    # --- Phase B: 逐条同步（串行，避免 DB session 竞争） ---
+        sort_column = {
+            "id": Machine.id,
+            "machine_name": Machine.machine_name,
+            "machine_ip": Machine.machine_ip,
+        }.get(sort_by, Machine.id)
+        stmt = stmt.order_by(sort_column.desc() if sort_order == "desc" else sort_column.asc())
+
+        total_count = int(session.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+        machines = list(
+            session.scalars(
+                stmt.limit(page_size).offset(page_number * page_size)
+            ).all()
+        )
+    
+    from .container_module.node_comms import get_cached_machine_runtime_snapshot
+
+    res = []
     for machine in machines:
-        online = _probe_results.get(machine.id, False)
-
-        try:
-            try:
-                current_status_val = machine.machine_status.value.lower() if hasattr(machine.machine_status, 'value') else str(machine.machine_status).lower()
-            except Exception:
-                current_status_val = str(getattr(machine, 'machine_status', '')).lower()
-
-            def _mark_containers_offline(mach):
-                try:
-                    containers_on_machine = getattr(mach, 'containers', None) or repo_list_containers(limit=100, offset=0, machine_id=mach.id)
-                    for c in containers_on_machine:
-                        cid = getattr(c, 'id', None) or (c.get('container_id') if isinstance(c, dict) else None)
-                        if cid:
-                            try:
-                                update_container(cid, container_status=ContainerStatus.OFFLINE)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-
-            def _log_status_transition(mid, before, after):
-                """状态真正变化时记一条系统日志（前→后），未变化不记。"""
-                if before is not None and str(before).lower() == str(after).lower():
-                    return
-                write_op_log(success=True, operator_user_id=None, operation=OperationType.MACHINE_STATUS_TRANSITION,
-                             target_type="machine", target_id=mid,
-                             detail={"before": {"machine_status": before}, "after": {"machine_status": after}})
-
-            if current_status_val == 'maintenance':
-                if online:
-                    try:
-                        _log_status_transition(machine.id, current_status_val, MachineStatus.MAINTENANCE.value)
-                        update_machine(machine.id, machine_status=MachineStatus.MAINTENANCE)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        _log_status_transition(machine.id, current_status_val, MachineStatus.OFFLINE.value)
-                        update_machine(machine.id, machine_status=MachineStatus.OFFLINE)
-                    except Exception:
-                        pass
-                    _mark_containers_offline(machine)
-            else:
-                if online:
-                    try:
-                        _log_status_transition(machine.id, current_status_val, MachineStatus.ONLINE.value)
-                        update_machine(machine.id, machine_status=MachineStatus.ONLINE)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        _log_status_transition(machine.id, current_status_val, MachineStatus.OFFLINE.value)
-                        update_machine(machine.id, machine_status=MachineStatus.OFFLINE)
-                    except Exception:
-                        pass
-                    _mark_containers_offline(machine)
-        except Exception:
-            pass
-        latest = get_by_id(machine.id) or machine
         info = machine_bref_information(
-            id=latest.id,
-            machine_name=latest.machine_name,
-            machine_ip=latest.machine_ip,
-            machine_type=latest.machine_type.value,
-            machine_status=latest.machine_status.value
+            id=machine.id,
+            machine_name=machine.machine_name,
+            machine_ip=machine.machine_ip,
+            machine_type=machine.machine_type.value,
+            machine_status=_machine_status_value(machine),
+            is_maintenance=bool(getattr(machine, "is_maintenance", False)),
+            runtime_snapshot=get_cached_machine_runtime_snapshot(machine.id),
         )
         res.append(info)
     
-    # 计算总页数（基于过滤后的数量）
     total_pages = (total_count + page_size - 1) // page_size if page_size > 0 else 0
     
     return res, total_pages

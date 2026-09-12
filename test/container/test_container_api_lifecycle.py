@@ -1,12 +1,20 @@
 from sqlalchemy.exc import IntegrityError
-
-from ...blueprints import container_api
+from ...constant import ImageStatus
+from ...extensions import SessionRegistry
+from ...api import container_api, deps
+from ...models.image import Image
 from ...services import container_tasks
 
 
 def _auth(monkeypatch, *, valid=True, user_id=1):
-    monkeypatch.setattr(container_api.authentications_repo, "is_token_valid", lambda token: valid)
-    monkeypatch.setattr(container_api.authentications_repo, "get_user_id_by_token", lambda token: user_id)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: valid)
+    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token, **kwargs: user_id)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_resource", lambda uid, rtype, rid: True)
+    monkeypatch.setattr(
+        "FuxiYu_CtrKernel.repositories.containers_repo.get_machine_id_by_container_id",
+        lambda cid, session: 1,
+    )
 
 
 def test_create_container_api_requires_token(client, monkeypatch):
@@ -22,11 +30,11 @@ def test_create_container_api_rejects_invalid_payload(client, monkeypatch):
 
     resp = client.post(
         "/api/containers/create_container",
-        json={"container": {"CPU_NUMBER": "bad"}}
+        json={"machine_id": 1, "container": {"CPU_NUMBER": "bad"}}
     )
 
     assert resp.status_code == 400
-    assert resp.get_json()["error_reason"] == "invalid_payload"
+    assert resp.json()["error_reason"] == "invalid_payload"
 
 
 def test_create_container_api_duplicate_returns_409(client, monkeypatch):
@@ -36,7 +44,7 @@ def test_create_container_api_duplicate_returns_409(client, monkeypatch):
 
     resp = client.post(
         "/api/containers/create_container",
-        json={"user_name": "u", "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
+        json={"owner_user_id": 2, "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
     )
 
     assert resp.status_code == 409
@@ -52,10 +60,29 @@ def test_create_container_api_machine_permission_denied_returns_403(client, monk
 
     resp = client.post(
         "/api/containers/create_container",
-        json={"user_name": "u", "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
+        json={"owner_user_id": 2, "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
     )
 
     assert resp.status_code == 403
+
+
+def test_create_container_api_rejects_owner_without_machine_access(client, monkeypatch):
+    """代建者有能力但 owner 对该机器无权限 → 403（API 边界门禁）。"""
+    _auth(monkeypatch)
+    # 依赖层(uid=1)机器校验放行；owner(uid=2)对该机器无权限
+    monkeypatch.setattr(
+        "FuxiYu_CtrKernel.services.rbac_service.user_has_resource",
+        lambda uid, rtype, rid: uid == 1,
+    )
+    monkeypatch.setattr(container_api.container_service, "Create_container", lambda **kwargs: True)
+
+    resp = client.post(
+        "/api/containers/create_container",
+        json={"owner_user_id": 2, "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["error_reason"] == "machine_permission_denied"
 
 
 def test_create_container_api_success(client, monkeypatch):
@@ -64,11 +91,155 @@ def test_create_container_api_success(client, monkeypatch):
 
     resp = client.post(
         "/api/containers/create_container",
-        json={"user_name": "u", "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
+        json={"owner_user_id": 2, "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
     )
 
     assert resp.status_code == 200
-    assert resp.get_json()["success"] == 1
+    assert resp.json()["success"] == 1
+
+
+def test_create_container_for_another_requires_manage(client, monkeypatch):
+    """普通用户(无 container:manage)代建他人容器 → 403（API 边界门禁）。"""
+    _auth(monkeypatch)
+    # 模拟普通 user 组：除 container:manage 外全放行
+    monkeypatch.setattr(
+        "FuxiYu_CtrKernel.services.rbac_service.user_has_entity",
+        lambda uid, code: code != "container:manage",
+    )
+    monkeypatch.setattr(container_api.container_service, "Create_container", lambda **kwargs: True)
+
+    resp = client.post(
+        "/api/containers/create_container",
+        json={"owner_user_id": 2, "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["error_reason"] == "insufficient_permission"
+
+
+def test_create_container_without_owner_creates_for_self(client, monkeypatch):
+    """不传 owner_user_id → 主体归一为当前用户自己。"""
+    _auth(monkeypatch)
+    captured = {}
+    def _fake_create(**kwargs):
+        captured.update(kwargs)
+        return True
+    monkeypatch.setattr(container_api.container_service, "Create_container", _fake_create)
+
+    resp = client.post(
+        "/api/containers/create_container",
+        json={"machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
+    )
+
+    assert resp.status_code == 200
+    assert captured["owner_user_id"] == 1
+
+
+def test_create_container_blank_owner_creates_for_self(client, monkeypatch):
+    """owner_user_id 为空字符串也视为未传，避免前端空选择导致 422。"""
+    _auth(monkeypatch)
+    captured = {}
+
+    def _fake_create(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(container_api.container_service, "Create_container", _fake_create)
+
+    resp = client.post(
+        "/api/containers/create_container",
+        json={"owner_user_id": "", "machine_id": 1, "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"}}
+    )
+
+    assert resp.status_code == 200
+    assert captured["owner_user_id"] == 1
+
+
+def test_create_container_with_image_id_builds_payload(client, monkeypatch):
+    _auth(monkeypatch)
+    build_payload = {
+        "image_id": 7,
+        "image_tag": "fuxi/image-7:20260826T000000Z",
+        "dockerfile_text": "FROM ubuntu:22.04\nRUN echo hello\n",
+    }
+    captured = {}
+
+    monkeypatch.setattr(
+        "FuxiYu_CtrKernel.services.image_tasks.build_image_payload",
+        lambda image_id: build_payload if image_id == 7 else None,
+    )
+    monkeypatch.setattr(
+        "FuxiYu_CtrKernel.services.image_tasks.Can_use_image_for_container",
+        lambda uid, image_id: True,
+    )
+    monkeypatch.setattr(
+        "FuxiYu_CtrKernel.services.rbac_service.user_has_resource",
+        lambda uid, rtype, rid: True,
+    )
+
+    def _fake_create(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(container_api.container_service, "Create_container", _fake_create)
+
+    resp = client.post(
+        "/api/containers/create_container",
+        json={
+            "owner_user_id": 2,
+            "machine_id": 1,
+            "image_id": 7,
+            "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "ignored"},
+        },
+    )
+
+    assert resp.status_code == 200
+    assert captured["image_build"] == build_payload
+    assert captured["container"].image == build_payload["image_tag"]
+
+
+def test_create_container_with_system_image_does_not_require_user_image_binding(client, monkeypatch):
+    _auth(monkeypatch)
+    image = Image(
+        name="system-image-for-container",
+        description="system image",
+        base_image="ubuntu:22.04",
+        dockerfile_body="",
+        status=ImageStatus.READY,
+        created_by_user_id=None,
+    )
+    SessionRegistry.add(image)
+    SessionRegistry.commit()
+
+    build_payload = {
+        "image_id": image.id,
+        "image_tag": f"fuxi/image-{image.id}:20260903T000000Z",
+        "dockerfile_text": "FROM ubuntu:22.04\n",
+    }
+    captured = {}
+
+    def _resource_check(uid, rtype, rid):
+        return rtype == "machine"
+
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_resource", _resource_check)
+    monkeypatch.setattr(
+        "FuxiYu_CtrKernel.services.image_tasks.build_image_payload",
+        lambda image_id: build_payload if image_id == image.id else None,
+    )
+    monkeypatch.setattr(container_api.container_service, "Create_container", lambda **kwargs: captured.update(kwargs) or True)
+
+    resp = client.post(
+        "/api/containers/create_container",
+        json={
+            "machine_id": 1,
+            "image_id": image.id,
+            "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "ignored"},
+        },
+    )
+
+    assert resp.status_code == 200
+    assert captured["image_build"] == build_payload
+    assert captured["container"].image == build_payload["image_tag"]
 
 
 def test_delete_container_api_not_found_returns_404(client, monkeypatch):

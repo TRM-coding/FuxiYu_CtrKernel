@@ -1,9 +1,10 @@
+"""容器清理提醒记录仓储。"""
+
 import datetime as dt
 
-import sqlalchemy as sa
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
 
-from ..extensions import db
 from ..models.container_cleanup_reminder import ContainerCleanupReminder
 
 
@@ -12,20 +13,26 @@ def mark_sent(
     reminder_key: str,
     cleanup_at: dt.datetime,
     recipient_email: str,
+    *,
+    session: Session,
 ) -> bool:
+    if was_sent(
+        container_id,
+        reminder_key,
+        cleanup_at,
+        recipient_email,
+        session=session,
+    ):
+        return False
     row = ContainerCleanupReminder(
         container_id=int(container_id),
         reminder_key=str(reminder_key),
         cleanup_at=cleanup_at,
         recipient_email=recipient_email,
     )
-    db.session.add(row)
-    try:
-        db.session.commit()
-        return True
-    except IntegrityError:
-        db.session.rollback()
-        return False
+    session.add(row)
+    session.flush()
+    return True
 
 
 def was_sent(
@@ -33,29 +40,26 @@ def was_sent(
     reminder_key: str,
     cleanup_at: dt.datetime,
     recipient_email: str,
+    *,
+    session: Session,
 ) -> bool:
-    return (
-        ContainerCleanupReminder.query.filter_by(
-            container_id=int(container_id),
-            reminder_key=str(reminder_key),
-            cleanup_at=cleanup_at,
-            recipient_email=recipient_email,
-        ).first()
-        is not None
+    stmt = select(ContainerCleanupReminder.id).where(
+        ContainerCleanupReminder.container_id == int(container_id),
+        ContainerCleanupReminder.reminder_key == str(reminder_key),
+        ContainerCleanupReminder.cleanup_at == cleanup_at,
+        ContainerCleanupReminder.recipient_email == recipient_email,
     )
+    return session.scalars(stmt).first() is not None
 
 
-def clear_stale(container_id: int, current_cleanup_at: dt.datetime) -> int:
-    """删除同一容器中与当前 cleanup_at 不一致的旧提醒记录，返回删除条数。"""
-    result = (
-        ContainerCleanupReminder.query.filter(
+def clear_stale(container_id: int, current_cleanup_at: dt.datetime, *, session: Session) -> int:
+    """删除同一容器中与当前 cleanup_at 不一致的旧提醒记录。"""
+
+    result = session.execute(
+        delete(ContainerCleanupReminder).where(
             ContainerCleanupReminder.container_id == int(container_id),
             ContainerCleanupReminder.cleanup_at != current_cleanup_at,
-        ).delete(synchronize_session="fetch")
+        )
     )
-    try:
-        db.session.commit()
-    except Exception:
-        db.session.rollback()
-        return 0
-    return result
+    session.flush()
+    return int(result.rowcount or 0)

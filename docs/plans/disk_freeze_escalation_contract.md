@@ -1,5 +1,7 @@
 # 容器磁盘超限冻结升级机制 — 收口合约
 
+> 2026-09 ??????????? `CONTAINER_*` / `ANNOUNCEMENT_*` env ??????????????????? `system_settings`??????? `settings_tasks.SETTING_DEFINITIONS` ????????? `settings_tasks.get_*` getter ???`.env.example` ?????? settings ????
+
 ## Phase 5：冻结状态记录与升级（Freeze State & Escalation）
 
 ### 0. 常量定义 / 表结构定义
@@ -134,7 +136,7 @@ CONTAINER_DISK_FREEZE_RESET_PERCENT = int(
 ```
 输入:  container_id: int
 输出:  ContainerDiskFreezeState | None
-内部:  db.session.get(ContainerDiskFreezeState, int(container_id))
+内部:  session.get(ContainerDiskFreezeState, int(container_id))
 ```
 
 ##### `upsert_first_frozen(container_id: int) -> ContainerDiskFreezeState`
@@ -149,7 +151,7 @@ CONTAINER_DISK_FREEZE_RESET_PERCENT = int(
          container_id=int(container_id),
          first_frozen_at=datetime.utcnow(),
      )
-  4. db.session.add(row); db.session.commit()
+  4. session.add(row); session.flush()
   5. return row
 ```
 
@@ -161,7 +163,7 @@ CONTAINER_DISK_FREEZE_RESET_PERCENT = int(
 内部:
   1. row = get(container_id)
   2. if not row: return False
-  3. db.session.delete(row); db.session.commit()
+  3. session.delete(row); session.flush()
   4. return True
 ```
 
@@ -217,7 +219,7 @@ _evaluate_limits(container, usage) → None
             print("[disk-check] in grace period, skip action")
             return
         if freeze_state.grace_until:
-            freeze_state.grace_until = None; db.session.commit()
+            freeze_state.grace_until = None; session.flush()
 
         # 升级判断
         days_frozen = (utcnow - freeze_state.first_frozen_at).days
@@ -239,7 +241,7 @@ _handle_freeze_escalation(container, usage, app, days_frozen) → None
 
 输入:  container: Container ORM 对象
        usage: dict（同上）
-       app: Flask app 对象
+       config: Ctrl 配置对象
        days_frozen: int（已冻结天数，用于邮件内容）
 输出:  None
 
@@ -413,7 +415,7 @@ API: POST /containers/unpause_container
   1. row = get(container_id)
   2. if not row: return False
   3. row.grace_until = datetime.utcnow() + timedelta(days=grace_days)
-  4. db.session.commit()
+  4. session.flush()
   5. return True
 ```
 
@@ -427,7 +429,7 @@ API: POST /containers/unpause_container
   1. row = get(container_id)
   2. if not row or row.grace_until is None: return False
   3. row.grace_until = None
-  4. db.session.commit()
+  4. session.flush()
   5. return True
 ```
 
@@ -442,7 +444,7 @@ API: POST /containers/unpause_container
 from ..repositories import container_disk_freeze_state_repo
 freeze_state = container_disk_freeze_state_repo.get(container_id)
 if freeze_state is not None:
-    grace_days = current_app.config.get("CONTAINER_DISK_FREEZE_GRACE_DAYS", 3)
+    grace_days = AppConfig.get("CONTAINER_DISK_FREEZE_GRACE_DAYS", 3)
     container_disk_freeze_state_repo.set_grace(container_id, grace_days)
     print(
         f"[disk-check] grace period set for container {container_id} "
@@ -515,3 +517,5 @@ if freeze_state is not None:
 - 容器创建/删除/暂停的 NodeKernel 端点（复用现有 `/pause_container` `/remove_container`）
 - 前端
 - Docker 配置
+
+

@@ -3,50 +3,84 @@
 抽象出数据库访问逻辑，方便后续替换为其它存储。"""
 
 from typing import Sequence
-from ..extensions import db
+
+from sqlalchemy import String, cast, or_, select
+from sqlalchemy.orm import Session
+
 from ..models.user import User
-from ..constant import PERMISSION
 from .authentications_repo import get_user_id_by_token
 
 
-def get_by_id(user_id: int) -> User | None:
-	return User.query.get(user_id)
+def get_by_id(user_id: int, *, session: Session) -> User | None:
+	return session.get(User, int(user_id))
 
-def get_name_by_id(user_id:int)->str|None:
-    user=User.query.get(user_id)
+def list_all_users(*, session: Session) -> Sequence[User]:
+	"""全部用户（RBAC seed 存量映射用）。"""
+	return list(session.scalars(select(User)).all())
+
+def get_name_by_id(user_id:int, *, session: Session)->str|None:
+    user = get_by_id(user_id, session=session)
     if user:
         return user.username
     return None
 
 
-def get_by_name(username: str) -> User | None:
-	return User.query.filter_by(username=username).first()
+def get_by_name(username: str, *, session: Session) -> User | None:
+	stmt = select(User).where(User.username == username)
+	return session.scalars(stmt).first()
 
 
-def list_users(limit: int = 50, offset: int = 0) -> Sequence[User]:
-	return User.query.order_by(User.id).offset(offset).limit(limit).all()
+def get_by_email(email: str, *, session: Session) -> User | None:
+	stmt = select(User).where(User.email == email)
+	return session.scalars(stmt).first()
 
 
-def create_user(username: str, email: str, password_hash: str, graduation_year: str) -> User:
+def list_users(limit: int = 50, offset: int = 0, user_search: str | None = None, visible_ids: set[int] | None = None, *, session: Session) -> Sequence[User]:
+	stmt = select(User).order_by(User.id).offset(offset).limit(limit)
+	if user_search:
+		stmt = select(User).where(
+			or_(
+				User.username.ilike(keyword := f"%{user_search}%"),
+				User.email.ilike(keyword),
+				cast(User.id, String).ilike(keyword),
+				cast(User.graduation_year, String).ilike(keyword),
+			)
+		).order_by(User.id).offset(offset).limit(limit)
+	if visible_ids is not None:
+		stmt = stmt.where(User.id.in_(visible_ids))
+	return list(session.scalars(stmt).all())
+
+
+def create_user(
+	username: str,
+	email: str,
+	password_hash: str,
+	graduation_year: str,
+	*,
+	session: Session,
+) -> User:
 	user = User(
 		username=username,
 		email=email,
 		password_hash=password_hash,
-		graduation_year=graduation_year # 小bug，但之前没调用这个函数，故之前未报错；现已修复
-		# permission 会使用默认值 PERMISSION.USER
+		graduation_year=graduation_year,
 	)
-	db.session.add(user)
-	db.session.commit()
+	session.add(user)
+	session.flush()
 	return user
 
-def update_user(user_id: int, *, commit: bool = True, **fields) -> User | None:
+def update_user(
+    user_id: int,
+    *,
+    session: Session,
+    **fields,
+) -> User | None:
     """
     部分更新用户字段。
     使用示例:
         update_user(1, email="new@x.com", graduation_year=2026)
-        update_user(1, username="alice2", commit=False)  # 由调用方稍后统一提交
     """
-    user = get_by_id(user_id)
+    user = get_by_id(user_id, session=session)
     if not user:
         return None
 
@@ -63,40 +97,16 @@ def update_user(user_id: int, *, commit: bool = True, **fields) -> User | None:
             dirty = True
 
     if dirty:
-       
-       db.session.commit()
+        session.flush()
     return user
 
 
 
-def delete_user(user_id: int) -> bool:
-	user = get_by_id(user_id)
+def delete_user(user_id: int, *, session: Session) -> bool:
+	user = get_by_id(user_id, session=session)
 	if not user:
 		return False
-	db.session.delete(user)
-	db.session.commit()
+	session.delete(user)
+	session.flush()
 	return True
 
-def check_permission(token: str, required_permission: PERMISSION) -> bool:
-    user_id = get_user_id_by_token(token)
-
-    if not user_id:
-        return False
-    user = get_by_id(user_id)
-    if not user:
-        return False
-
-    # 这里是迎合数据库返回内容；保证兼容性。
-    # 只是保险起见，一般情况下 permission 应该总是 PERMISSION 枚举类型。
-    def _norm(p):
-        return p.value if hasattr(p, "value") else p
-
-    user_perm = _norm(user.permission)
-    req_perm = _norm(required_permission)
-
-    cast_permission = {
-        "user": 1,
-        "operator": 2,
-    }
-
-    return cast_permission.get(user_perm, 0) >= cast_permission.get(req_perm, 0)
