@@ -81,7 +81,13 @@ def _get_enrollment_client_cert():
         return None
 
 
-def _request_enrollment_profile(url: str, machine_ip: str, client_cert, timeout: float) -> dict:
+def _fetch_enrollment_profile(url: str, machine_ip: str, client_cert, timeout: float, context: str = "register_machine") -> dict:
+    """取对端 enrollment_profile 全量响应；由调用方决定取用哪些字段。
+
+    注册只关心 hardware，重钉还要读 identity_initialized（判断是否需重发 uid），
+    所以这里返回全量，不再把「取硬件快照」的裁剪混进请求本身。
+    """
+
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", InsecureRequestWarning)
@@ -89,13 +95,20 @@ def _request_enrollment_profile(url: str, machine_ip: str, client_cert, timeout:
         profile = response.json()
     except Exception as exc:
         raise NodeServiceError(
-            f"register_machine failed: enrollment_profile error from {machine_ip}: {exc}",
+            f"{context} failed: enrollment_profile error from {machine_ip}: {exc}",
             reason="enrollment_failed",
         ) from exc
     if not isinstance(profile, dict):
         raise NodeServiceError(
-            f"register_machine failed: bad enrollment_profile from {machine_ip}", reason="enrollment_failed",
+            f"{context} failed: bad enrollment_profile from {machine_ip}", reason="enrollment_failed",
         )
+    return profile
+
+
+def _request_enrollment_profile(url: str, machine_ip: str, client_cert, timeout: float) -> dict:
+    """注册路径的视图：只取硬件快照。"""
+
+    profile = _fetch_enrollment_profile(url, machine_ip, client_cert, timeout)
     return profile.get("hardware") if isinstance(profile.get("hardware"), dict) else {}
 
 

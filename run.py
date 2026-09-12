@@ -25,22 +25,21 @@ def _truthy_env(name: str, default: str = "1") -> bool:
 
 
 def _start_wss_receiver() -> subprocess.Popen | None:
-    """启动 Ctrl WSS 接收旁挂。
+    """启动 Node 链路旁挂。
 
-    WSS 是 Node -> Ctrl 状态主链路；`python run.py` 必须同时拉起接收端，
-    否则 Node 会持续连接 5001 失败，状态无法落库。
+    链路是 Node 状态主通道（Ctrl 主动拨 Node）；`python run.py` 必须同时拉起
+    它，否则拿不到任何快照，机器状态无法落库。
     """
 
     if not _truthy_env("CTRL_WSS_ENABLED", "1"):
         return None
 
     env = os.environ.copy()
-    env.setdefault("CTRL_WSS_PORT", "5001")
     pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = parent_dir if not pythonpath else f"{parent_dir}{os.pathsep}{pythonpath}"
 
     return subprocess.Popen(
-        [sys.executable, "-m", "FuxiYu_CtrKernel.run_wss"],
+        [sys.executable, "-m", "FuxiYu_CtrKernel.run_node_links"],
         cwd=pkg_dir,
         env=env,
     )
@@ -72,7 +71,7 @@ if __name__ == "__main__":
         certs = ensure_ctrl_certificates()
         ssl_kwargs = {"ssl_certfile": str(certs.cert_file), "ssl_keyfile": str(certs.key_file)}
 
-    # WSS 接收子进程 + 看护（数据通路对账契约 C9）：主进程对 WSS 存活负责，
+    # Node 链路子进程 + 看护（数据通路对账契约 C9）：主进程对链路存活负责，
     # 意外退出即重启；主进程退出时停掉子进程。
     from FuxiYu_CtrKernel.schedulers.wss_supervisor import watch_wss_process
 

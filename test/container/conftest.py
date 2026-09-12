@@ -21,14 +21,6 @@ NODE_STATUS_OFFLINE = {"success": 1, "container_status": "offline"}
 NODE_STATUS_404 = {"status_code": 404, "error": "not found", "text": "not found"}
 
 
-@pytest.fixture(autouse=True)
-def mock_container_machine_online(monkeypatch):
-    monkeypatch.setattr(
-        "FuxiYu_CtrKernel.services.container_module.node_comms.is_machine_online_remote",
-        lambda machine_id: True,
-    )
-
-
 @pytest.fixture()
 def container_info():
     return Container_info(

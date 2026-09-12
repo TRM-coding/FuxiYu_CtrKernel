@@ -26,7 +26,6 @@ def test_ctrl_e2e_user_login_machine_permission_container_create_and_list(
     auth = create_auth(user, token="e2e-user-token")
     client.cookies.set("auth_token", auth.token)
     mocks.mock_node_response(monkeypatch, node_comms, {"success": 1})
-    monkeypatch.setattr(node_comms, "is_machine_online_remote", lambda machine_id: True)
 
     create_resp = client.post(
         "/api/containers/create_container",

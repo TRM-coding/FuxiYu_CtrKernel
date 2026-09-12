@@ -37,6 +37,7 @@ def _init_database() -> None:
     _ensure_image_template_schema()
     _ensure_container_failure_schema()
     _ensure_gpu_columns()
+    _ensure_cleanup_deferral_schema()
     try:
         from .services.rbac_service import seed_rbac_defaults
 
@@ -267,6 +268,44 @@ def _ensure_deleted_container_schema() -> None:
         logger.warning("deleted container schema upgraded: added mount_cleaned")
     if cleanup_missing and inspector.has_table("container_mount_cleanup"):
         logger.warning("container mount cleanup schema upgraded: added deleted_id")
+
+
+def _ensure_cleanup_deferral_schema() -> None:
+    """补齐清理顺延（不可用窗口）相关的增量列。
+
+    同一特性落在两张表上：machines 记窗口起点，ssh 记录表累计顺延秒数。
+    create_all 只创建新表、不会修改旧表，因此这两列是当初上线时漏补的——
+    旧 SQLite 库缺 machines.unavailable_since 会让机器列表与链路读面直接
+    500（每轮 `no such column`），缺 deferral_seconds 会让清理倒计时读面 500。
+    """
+
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    current_engine = extensions.engine
+    inspector = inspect(current_engine)
+    for table, required in (
+        ("machines", {
+            "unavailable_since": "ALTER TABLE machines ADD COLUMN unavailable_since DATETIME NULL",
+        }),
+        ("container_ssh_login_records", {
+            # 旧行 NULL 由读取侧 coalesce 兜底为 0，这里不强制 DEFAULT，避免重写存量行
+            "deferral_seconds": "ALTER TABLE container_ssh_login_records ADD COLUMN deferral_seconds INTEGER NULL",
+        }),
+    ):
+        if not inspector.has_table(table):
+            continue
+        existing = {column["name"] for column in inspector.get_columns(table)}
+        missing = [name for name in required if name not in existing]
+        if not missing:
+            continue
+        with current_engine.begin() as conn:
+            for name in missing:
+                conn.execute(text(required[name]))
+        logging.getLogger(__name__).warning(
+            "cleanup deferral schema upgraded: %s added columns %s", table, ", ".join(missing)
+        )
 
 
 def _ensure_gpu_columns() -> None:

@@ -33,7 +33,8 @@ def test_create_container_roundtrip(node_transport, monkeypatch):
 
     calls = []
 
-    def _stub(owner_name, cfg, public_key=None):
+    # 形参跟随 Node network/api.py 的实际调用：创建路径还带恢复挂载点
+    def _stub(owner_name, cfg, public_key=None, restore_mount_path=None):
         calls.append((owner_name, cfg.name, public_key))
         return node_service.CreateContainerReturn("cid123", cfg.name)
 
