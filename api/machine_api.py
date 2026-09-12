@@ -22,6 +22,8 @@ from ..schemas.machine import (
     RegisterMachineWithProfileResponse,
     RemoveMachineRequest,
     RemoveMachineResponse,
+    RenewMachineTrustRequest,
+    RenewMachineTrustResponse,
     SetMachineMaintenanceRequest,
     SetMachineMaintenanceResponse,
     UpdateMachineRequest,
@@ -161,6 +163,42 @@ def update_machine_api(
     if success:
         return {"success": 1, "message": "Machine updated successfully"}
     return _error(500, "Failed to update machine", "update_failed")
+
+
+#####################
+# 重新钉信任锚（对已登记机器的连接修复）
+
+
+@router.post("/renew_machine_trust", response_model=RenewMachineTrustResponse)
+def renew_machine_trust_api(
+    message: RenewMachineTrustRequest,
+    operator_user_id: int = Depends(require_permission("machine:manage")),
+):
+    """重钉已登记机器的信任锚：重抓对端证书覆盖 pin，必要时重发 uid。
+
+    用于 Node 换过自签证书、本地 pin 失效导致链路连不上的场景。只更新原行，
+    不建档——与 register_machine 的 INSERT 语义分开。
+    """
+
+    try:
+        result = machine_service.Renew_machine_trust(
+            machine_id=message.machine_id,
+            operator_user_id=operator_user_id,
+        )
+    except Exception as e:
+        err_reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
+        # 留痕在服务层完成（成功与失败都写），这里只负责把原因映射成状态码
+        if err_reason == "machine_not_found":
+            return _error(404, str(e), err_reason)
+        if err_reason:
+            return _error(422, str(e), err_reason)
+        return _error(500, f"Internal error: {e}", "internal_error")
+
+    return {
+        "success": 1,
+        "message": "Machine trust renewed successfully",
+        **{key: value for key, value in result.items() if key != "success"},
+    }
 
 
 #####################

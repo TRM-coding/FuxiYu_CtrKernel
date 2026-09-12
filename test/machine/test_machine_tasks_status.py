@@ -31,7 +31,8 @@ class _ClosingWebSocket:
     async def accept(self):
         self.accepted = True
 
-    async def receive_text(self):
+    # 契约命名跟随 websockets >= 14 的 asyncio 客户端：收帧入口是 recv()
+    async def recv(self):
         raise RuntimeError("wss closed")
 
     async def close(self, code=None):
@@ -45,7 +46,7 @@ class _FramesThenRaiseWebSocket(_ClosingWebSocket):
         super().__init__(uid)
         self.frames = list(frames)
 
-    async def receive_text(self):
+    async def recv(self):
         if self.frames:
             return self.frames.pop(0)
         raise RuntimeError("wss closed")
@@ -116,75 +117,13 @@ def test_set_maintenance_missing_machine_returns_false(db_session):
     assert machine_tasks.Set_maintenance(999999, True) is False
 
 
-def test_is_machine_online_remote_true_when_node_online(monkeypatch, db_session):
-    machine = create_machine(machine_ip="10.0.0.8")
-    monkeypatch.setattr(node_comms, "send", lambda url, payload, timeout=2.0: {"success": 1, "machine_status": "online"})
-
-    assert machine_tasks.is_machine_online_remote(machine.id) is True
-
-
-def test_is_machine_online_remote_false_when_machine_missing(db_session):
-    assert machine_tasks.is_machine_online_remote(999999) is False
-
-
-def test_is_machine_online_remote_false_when_node_offline(monkeypatch, db_session):
-    machine = create_machine()
-    monkeypatch.setattr(node_comms, "send", lambda url, payload, timeout=2.0: {"success": 1, "machine_status": "offline"})
-
-    assert machine_tasks.is_machine_online_remote(machine.id) is False
-
-
-def test_is_machine_online_remote_false_when_send_raises(monkeypatch, db_session):
-    machine = create_machine()
-    monkeypatch.setattr(node_comms, "send", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("network")))
-
-    assert machine_tasks.is_machine_online_remote(machine.id) is False
-
-
-def test_handle_node_ws_marks_machine_online_on_accept(monkeypatch, db_session):
-    uid = "wss-online-uid"
-    machine = create_machine(machine_status=MachineStatus.OFFLINE)
-    with session_scope() as session:
-        machine_repo.update_machine(machine.id, node_uid=uid, session=session)
-    monkeypatch.setattr(node_comms, "probe_machine_connectivity", lambda machine_id: True)
-
-    ws = _ClosingWebSocket(uid)
-    asyncio.run(node_comms.handle_node_ws(ws))
-
-    db_session.expire_all()
-    assert ws.accepted is True
-    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.ONLINE
-
-
-def test_handle_node_ws_marks_machine_offline_when_disconnect_probe_fails(monkeypatch, db_session):
-    uid = "wss-offline-uid"
-    machine = create_machine(machine_status=MachineStatus.ONLINE)
-    with session_scope() as session:
-        machine_repo.update_machine(machine.id, node_uid=uid, session=session)
-    monkeypatch.setattr(node_comms, "probe_machine_connectivity", lambda machine_id: False)
-
-    ws = _ClosingWebSocket(uid)
-    asyncio.run(node_comms.handle_node_ws(ws))
-
-    db_session.expire_all()
-    assert ws.accepted is True
-    assert ws.close_calls
-    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.OFFLINE
-
-
-def test_handle_node_ws_keeps_machine_online_when_disconnect_probe_succeeds(monkeypatch, db_session):
-    uid = "wss-probe-ok-uid"
-    machine = create_machine(machine_status=MachineStatus.ONLINE)
-    with session_scope() as session:
-        machine_repo.update_machine(machine.id, node_uid=uid, session=session)
-    monkeypatch.setattr(node_comms, "probe_machine_connectivity", lambda machine_id: True)
-
-    ws = _ClosingWebSocket(uid)
-    asyncio.run(node_comms.handle_node_ws(ws))
-
-    db_session.expire_all()
-    assert ws.accepted is True
-    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.ONLINE
+# 换向前的 is_machine_online_remote / handle_node_ws 用例已随探活族与 WSS 服务端接收
+# 路径一并删除；链路生命周期（拨号置 ONLINE、断开置 OFFLINE、退避、集合对齐）改由
+# test/machine/test_node_link.py 覆盖。
+#
+# 下文 list_machine_bref 各例原先用「is_machine_online_remote 一旦被调用即抛断言」
+# 来钉住「读面不打 Node」。换向后该函数已不存在，读面只读 DB 状态是结构性成立的，
+# 故守卫随之移除，断言本身保留。
 
 
 def test_apply_container_status_snapshot_removes_db_container_missing_on_node(db_session):
@@ -350,71 +289,42 @@ def test_apply_snapshot_batch_dispatches_with_resolved_uid(db_session):
     assert db_session.get(Container, container.id).container_status == ContainerStatus.OFFLINE
 
 
-def test_probe_machines_online_once_marks_unreachable_offline(monkeypatch, db_session):
-    # 数据通路对账契约 C3：Ctrl 启动探活，不达的 ONLINE 机器置 OFFLINE
+def test_consume_link_malformed_frames_do_not_raise(monkeypatch, db_session):
+    # 契约 C7：坏帧（非 JSON/非 dict/数组）→ 帧级容错丢弃，不杀链路；
+    # 只有最后一次 receive 的断开异常才结束消费循环
+    uid = "link-badframe-uid"
     machine = create_machine(machine_status=MachineStatus.ONLINE)
-    monkeypatch.setattr(node_comms, "probe_machine_connectivity", lambda machine_id: False)
+    with session_scope() as session:
+        machine_repo.update_machine(machine.id, node_uid=uid, session=session)
 
-    result = node_comms.probe_machines_online_once()
+    ws = _FramesThenRaiseWebSocket(uid, ["{not json", '"hello"', "[]"])
+    with pytest.raises(RuntimeError, match="wss closed"):
+        asyncio.run(node_comms._consume_link(ws, uid, machine.id))
 
     db_session.expire_all()
-    assert result["probed"] == 1
-    assert result["turned_offline"] == [machine.id]
-    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.OFFLINE
-
-
-def test_probe_machines_online_once_keeps_reachable_online(monkeypatch, db_session):
-    machine = create_machine(machine_status=MachineStatus.ONLINE)
-    monkeypatch.setattr(node_comms, "probe_machine_connectivity", lambda machine_id: True)
-
-    result = node_comms.probe_machines_online_once()
-
-    db_session.expire_all()
-    assert result["probed"] == 1
-    assert result["turned_offline"] == []
     assert db_session.get(Machine, machine.id).machine_status == MachineStatus.ONLINE
 
 
-def test_handle_node_ws_malformed_frame_does_not_kill_connection(monkeypatch, db_session):
-    # 契约 C7：坏帧（非 JSON/非 dict/数组）→ 帧级容错 continue，不杀连接；
-    # 连接只由最后一次 receive 的断开异常正常收尾
-    uid = "wss-badframe-uid"
+def test_consume_link_read_timeout_closes_socket(monkeypatch, db_session):
+    # 契约 C4：半开连接（receive 挂起）→ wait_for 超时 → 消费循环以超时结束，
+    # 由 run_machine_link 接手置 OFFLINE 并退避重连
+    uid = "link-timeout-uid"
     machine = create_machine(machine_status=MachineStatus.ONLINE)
     with session_scope() as session:
         machine_repo.update_machine(machine.id, node_uid=uid, session=session)
-    probe_calls = []
-    monkeypatch.setattr(node_comms, "probe_machine_connectivity",
-                        lambda machine_id: probe_calls.append(machine_id) or False)
-
-    ws = _FramesThenRaiseWebSocket(uid, ["{not json", '"hello"', "[]"])
-    asyncio.run(node_comms.handle_node_ws(ws))
-
-    db_session.expire_all()
-    assert probe_calls == [machine.id]  # 只断一次（收尾路径），坏帧不触发
-    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.OFFLINE
-
-
-def test_handle_node_ws_read_timeout_triggers_probe_and_offline(monkeypatch, db_session):
-    # 契约 C4：半开连接（receive 挂起）→ wait_for 超时 → 探活 → 不达置 OFFLINE
-    uid = "wss-timeout-uid"
-    machine = create_machine(machine_status=MachineStatus.ONLINE)
-    with session_scope() as session:
-        machine_repo.update_machine(machine.id, node_uid=uid, session=session)
-    probe_calls = []
-    monkeypatch.setattr(node_comms, "probe_machine_connectivity",
-                        lambda machine_id: probe_calls.append(machine_id) or False)
     monkeypatch.setattr(node_comms.CommsConfig, "WSS_READ_TIMEOUT", 0.01)
 
     class _HangingWebSocket(_ClosingWebSocket):
-        async def receive_text(self):
+        async def recv(self):
             await asyncio.sleep(3600)
 
     ws = _HangingWebSocket(uid)
-    asyncio.run(node_comms.handle_node_ws(ws))
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(node_comms._consume_link(ws, uid, machine.id))
 
+    # 消费循环只负责结束；置 OFFLINE 由 run_machine_link 的断开路径负责
     db_session.expire_all()
-    assert probe_calls == [machine.id]
-    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.OFFLINE
+    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.ONLINE
 
 
 def test_enqueue_frame_drops_oldest_when_full():
@@ -709,11 +619,6 @@ def test_apply_container_status_snapshot_clears_failed_diagnostics_on_recovery(d
 
 def test_list_machine_bref_does_not_probe_or_mutate_offline_machine(monkeypatch, db_session):
     machine = create_machine(machine_status=MachineStatus.OFFLINE)
-    monkeypatch.setattr(
-        machine_tasks,
-        "is_machine_online_remote",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not probe node")),
-    )
 
     result, total_pages = machine_tasks.List_all_machine_bref_information(0, 10)
 
@@ -727,11 +632,6 @@ def test_list_machine_bref_does_not_probe_or_mutate_offline_machine(monkeypatch,
 def test_list_machine_bref_keeps_online_machine_and_containers_without_probe(monkeypatch, db_session):
     machine = create_machine(machine_status=MachineStatus.ONLINE)
     container = create_container(machine=machine, status=ContainerStatus.ONLINE)
-    monkeypatch.setattr(
-        machine_tasks,
-        "is_machine_online_remote",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not probe node")),
-    )
 
     result, _ = machine_tasks.List_all_machine_bref_information(0, 10)
 
@@ -754,11 +654,6 @@ def test_list_machine_bref_reads_runtime_snapshot_buffer(monkeypatch, db_session
 
 def test_list_machine_bref_keeps_maintenance_flag_without_probe(monkeypatch, db_session):
     machine = create_machine(machine_status=MachineStatus.OFFLINE, is_maintenance=True)
-    monkeypatch.setattr(
-        machine_tasks,
-        "is_machine_online_remote",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not probe node")),
-    )
 
     result, _ = machine_tasks.List_all_machine_bref_information(0, 10)
 
@@ -768,11 +663,6 @@ def test_list_machine_bref_keeps_maintenance_flag_without_probe(monkeypatch, db_
 
 def test_list_machine_bref_online_maintenance_flag_without_probe(monkeypatch, db_session):
     machine = create_machine(machine_status=MachineStatus.ONLINE, is_maintenance=True)
-    monkeypatch.setattr(
-        machine_tasks,
-        "is_machine_online_remote",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not probe node")),
-    )
 
     result, _ = machine_tasks.List_all_machine_bref_information(0, 10)
 
@@ -805,11 +695,6 @@ def test_is_machine_collect_error_reads_machine_flag(db_session):
 def test_list_machine_bref_filters_by_machine_search(monkeypatch, db_session):
     target = create_machine(machine_name="search_target", machine_ip="10.20.30.40")
     create_machine(machine_name="other_machine", machine_ip="10.20.30.41")
-    monkeypatch.setattr(
-        machine_tasks,
-        "is_machine_online_remote",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not probe node")),
-    )
 
     by_name, _ = machine_tasks.List_all_machine_bref_information(0, 10, machine_search="target")
     by_ip, _ = machine_tasks.List_all_machine_bref_information(0, 10, machine_search="10.20.30.40")
@@ -830,11 +715,6 @@ def test_list_machine_bref_operator_bypasses_machine_permission(monkeypatch, db_
         auth_repo.ensure_user_group(operator.id, group.id, session=session)
     m1 = create_machine(machine_name="operator_machine_1")
     m2 = create_machine(machine_name="operator_machine_2")
-    monkeypatch.setattr(
-        machine_tasks,
-        "is_machine_online_remote",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not probe node")),
-    )
 
     result, _ = machine_tasks.List_all_machine_bref_information(0, 10, user_id=operator.id)
 

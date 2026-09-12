@@ -16,6 +16,7 @@ from ..models.machine import Machine
 from .container_module.exceptions import NodeServiceError
 from .container_module.node_comms_modules.enrollment import (
     _default_resource_limits,
+    _fetch_enrollment_profile,
     _fetch_peer_cert,
     _validate_trust_anchor,
     _get_enrollment_client_cert,
@@ -204,6 +205,45 @@ def refresh_unavailable_window(machine_id: int, *, session) -> None:
             session.flush()
 
 
+def seed_unavailable_windows_from_last_seen() -> dict:
+    """启动扫描：用采集心跳兜住窗口起点，补上 Ctrl 停机期间的观测盲区。
+
+    背景：unavailable_since 只在 Ctrl 亲眼看到状态翻转时才写入（调用点仅
+    Update_machine 与 Set_maintenance）。Ctrl 停机期间发生的**进窗**无法被观测，
+    起点会被记成重启时刻 → 顺延少算 → 清理提前触发，而清理不可逆。
+    本扫描把「窗口未开」的机器起点回填为 last_seen_at，即「至少到这时它还是
+    好的」——取的是下界，方向恒为多给用户时间。
+
+    三条边界：
+    - 已有窗口的机器不动：已有起点更早，改写只会让顺延变少
+    - last_seen_at 为空则跳过：刚建档（模型默认 ONLINE、两列皆空）或迁移来源
+      无此数据——不凭空调制窗口
+    - **必须在链路首次拨号之前跑**：否则 Update_machine(ONLINE) 先按可用空操作，
+      扫描再置位就会开出一个无人结算的窗口（顺序由 link 侧保证并测锁定）
+
+    幂等：置位后 unavailable_since 非空，再次执行自然跳过。
+    """
+
+    seeded: list[int] = []
+    try:
+        with session_scope() as session:
+            for machine in session.scalars(select(Machine)).all():
+                if getattr(machine, "unavailable_since", None) is not None:
+                    continue
+                seen = getattr(machine, "last_seen_at", None)
+                if seen is None:
+                    continue
+                machine.unavailable_since = seen
+                seeded.append(machine.id)
+    except Exception as exc:
+        # 扫描失败不该阻断链路启动：窗口起点的兜底没做成，只是回到修复前的行为
+        logger.warning("seed_unavailable_windows_from_last_seen failed: %s", exc)
+        return {"seeded": [], "error": str(exc)}
+    if seeded:
+        logger.info("seeded unavailable windows from last_seen_at: machines=%s", seeded)
+    return {"seeded": seeded}
+
+
 def is_machine_in_maintenance(machine_id: int) -> bool:
     """判断机器是否处于维护模式。"""
     try:
@@ -226,37 +266,6 @@ def is_machine_collect_error(machine_id: int) -> bool:
         machine = None
     return bool(machine and getattr(machine, "collect_error_at", None))
 
-def is_machine_online_remote(machine_id: int, timeout: float = 2.0) -> bool:
-    """
-    Perform a single, lightweight communication check to the Node's `/machine_status` endpoint.
-    Returns True if Node responds with success==1 and machine_status == 'online'.
-    This function does NOT update DB state or perform additional logic; callers should handle
-    persistence or other decisions.
-    """
-    try:
-        with session_scope(commit=False) as session:
-            m = get_by_id(machine_id, session=session)
-    except Exception:
-        m = None
-    if not m:
-        return False
-    machine_ip = getattr(m, 'machine_ip', None)
-    if not machine_ip:
-        return False
-
-    try:
-        from ..services.container_module import node_comms
-        j = node_comms.send(
-            node_comms.get_full_url(machine_ip, "/machine_status"),
-            {"config": {}},
-            timeout=timeout,
-        )
-    except Exception:
-        return False
-    if isinstance(j, dict) and j.get('success') in (1, True):
-        ms = (j.get('machine_status') or '').lower()
-        return ms == 'online'
-    return False
 
 
 def get_machine_reachable(machine_id: int, timeout: float = 2.0) -> bool:
@@ -278,8 +287,12 @@ def get_machine_reachable(machine_id: int, timeout: float = 2.0) -> bool:
 def Register_machine(
     machine_name: str, machine_ip: str, machine_description: str = "", timeout: float = 8.0,
 ) -> dict:
-    """Enroll a Node from the administrator's trust anchor, then reload WSS trust."""
-    from .container_module.node_comms import get_full_url, request_wss_restart
+    """Enroll a Node from the administrator's trust anchor, then persist its record.
+
+    建档即完成接入：机器行落库后，链路进程的下一轮集合对齐会自行拨通它，
+    注册流程不再需要任何重载动作。
+    """
+    from .container_module.node_comms import get_full_url
 
     _validate_trust_anchor(machine_name, machine_ip)
     client_cert = _get_enrollment_client_cert()
@@ -298,18 +311,160 @@ def Register_machine(
     machine_id = _persist_enrolled_machine(
         machine_name, machine_ip, machine_description, _default_resource_limits(hardware), uid, fingerprint,
     )
-    try:
-        wss_reload = request_wss_restart(reason=f"node_enrolled:{machine_id}")
-    except Exception as exc:
-        logger.warning("register_machine: failed to request WSS restart for %s: %s", machine_ip, exc)
-        wss_reload = {"wss_reload_required": True, "wss_restart_requested": False, "wss_restart_error": str(exc)}
     logger.info(
         "machine %s (%s) enrolled: id=%s uid=%s fingerprint=%s hardware=%s",
         machine_name, machine_ip, machine_id, uid, fingerprint, hardware,
     )
     return {
         "success": True, "uid": uid, "certificate_fingerprint": fingerprint,
-        "machine_id": machine_id, "hardware": hardware, **wss_reload,
+        "machine_id": machine_id, "hardware": hardware,
+    }
+
+#######################################
+#######################################
+# 重新钉信任锚（对已登记机器的连接修复）
+def Renew_machine_trust(machine_id: int, operator_user_id: int | None = None, timeout: float = 8.0) -> dict:
+    """重新建立与已登记机器的连接信任 —— 只 UPDATE，不增删机器行。
+
+    适用场景：Node 重新生成过自签证书（例如主机名变化触发 SAN 校验失败，
+    ensure_self_signed_certificate 会静默重生成），本地 pin 随之作废、链路报
+    SSLCertVerificationError；而机器本身、容器与 uid 都没有变，坏的只是
+    「连接能力」。此时重新注册走不通（machine_ip/machine_name 唯一约束），
+    删行也被容器守卫挡住 —— 本函数就是那条缺失的出路。
+
+    语义边界：
+    - register 是 INSERT（建档），本函数是 UPDATE（换信任锚），二者不重叠；
+      本函数不写 machine_name / machine_ip，因此不可能触发唯一约束
+    - 「随时可按」的前提是先取证后落地：抓不到对端证书即整体失败返回，
+      pin 与全部凭证字段保持原值（绝不在没拿到新证据时就毁掉旧信任）
+    - uid 只在必要时动：对端丢了身份牌才重发；库里本无 uid 才对端自报一个
+      （Ctrl 在那行上没有主张，不算覆盖）；两者都有则保持不动，只把不一致
+      报出来由人判断
+    """
+    from .container_module.node_comms import get_full_url
+
+    with session_scope(commit=False) as session:
+        machine = get_by_id(machine_id, session=session)
+        if machine is None:
+            log_failure(
+                operator_user_id=operator_user_id,
+                operation=OperationType.RENEW_MACHINE_TRUST,
+                target_type="machine",
+                target_id=machine_id,
+                detail={"machine_id": machine_id},
+                error_reason="machine_not_found",
+            )
+            raise NodeServiceError(
+                f"renew_machine_trust failed: machine {machine_id} not found", reason="machine_not_found",
+            )
+        machine_name = machine.machine_name
+        machine_ip = machine.machine_ip
+        previous_fingerprint = machine.node_cert_fingerprint
+        previous_uid = machine.node_uid
+
+    detail = _machine_log_detail(machine_name=machine_name, machine_ip=machine_ip)
+    if not machine_ip:
+        log_failure(
+            operator_user_id=operator_user_id, operation=OperationType.RENEW_MACHINE_TRUST,
+            target_type="machine", target_id=machine_id, detail=detail, error_reason="invalid_machine_ip",
+        )
+        raise NodeServiceError(
+            f"renew_machine_trust failed: machine {machine_id} has no machine_ip", reason="invalid_machine_ip",
+        )
+
+    def _fail(reason: str, message: str) -> None:
+        log_failure(
+            operator_user_id=operator_user_id, operation=OperationType.RENEW_MACHINE_TRUST,
+            target_type="machine", target_id=machine_id, detail=detail, error_reason=reason,
+        )
+        raise NodeServiceError(message, reason=reason)
+
+    # ── 阶段一：取齐全部对端证据。任何一步失败都在改动本地状态之前退出 ──
+    client_cert = _get_enrollment_client_cert()
+    try:
+        fingerprint, cert_der = _fetch_peer_cert(machine_ip, timeout=timeout)
+    except Exception as exc:
+        _fail("machine_unreachable", f"renew_machine_trust failed: cannot reach {machine_ip} over TLS: {exc}")
+
+    try:
+        profile = _fetch_enrollment_profile(
+            get_full_url(machine_ip, "/node_identity/enrollment_profile"),
+            machine_ip, client_cert, timeout, context="renew_machine_trust",
+        )
+    except Exception as exc:
+        _fail("enrollment_failed", f"renew_machine_trust failed: {exc}")
+
+    identity_initialized = bool(profile.get("identity_initialized"))
+    reported_uid = profile.get("uid")
+
+    # uid 先下发、后落库：反过来的顺序若本地写成功而下发失败，DB 与 Node 会永久
+    # 错位（Node 仍持旧牌 → identity_initialized 为真 → 再按也不会重发）。
+    new_uid = previous_uid
+    uid_reissued = False
+    uid_adopted = False
+    if not identity_initialized:
+        new_uid = secrets.token_urlsafe(24)
+        try:
+            _issue_node_uid(
+                get_full_url(machine_ip, "/node_identity/issue_uid"),
+                machine_ip, new_uid, client_cert, timeout,
+            )
+        except Exception as exc:
+            _fail("issue_uid_failed", f"renew_machine_trust failed: cannot issue uid to {machine_ip}: {exc}")
+        uid_reissued = True
+    elif not previous_uid and reported_uid:
+        new_uid = reported_uid
+        uid_adopted = True
+
+    # ── 阶段二：到这里才动本地状态 ──
+    _persist_peer_pin(machine_ip, cert_der)
+    try:
+        with session_scope() as session:
+            update_machine(
+                machine_id,
+                node_cert_fingerprint=fingerprint,
+                cert_pinned_at=datetime.utcnow(),
+                node_uid=new_uid,
+                session=session,
+            )
+    except Exception as exc:
+        _fail("persist_failed", f"renew_machine_trust failed: persist machine {machine_id}: {exc}")
+
+    uid_mismatch = bool(previous_uid and reported_uid and previous_uid != reported_uid)
+    if uid_mismatch:
+        logger.warning(
+            "renew_machine_trust: machine %s uid mismatch (db=%s node=%s); kept db value",
+            machine_id, previous_uid, reported_uid,
+        )
+
+    log_success(
+        operator_user_id=operator_user_id, operation=OperationType.RENEW_MACHINE_TRUST,
+        target_type="machine", target_id=machine_id,
+        detail={
+            **detail,
+            "trigger": "manual_renew",
+            "fingerprint_before": previous_fingerprint,
+            "fingerprint_after": fingerprint,
+            "uid_reissued": uid_reissued,
+            "uid_adopted": uid_adopted,
+            "uid_mismatch": uid_mismatch,
+        },
+    )
+    logger.info(
+        "machine %s (%s) trust renewed: uid_reissued=%s uid_adopted=%s uid_mismatch=%s fingerprint=%s",
+        machine_name, machine_ip, uid_reissued, uid_adopted, uid_mismatch, fingerprint,
+    )
+    return {
+        "success": True,
+        "machine_id": machine_id,
+        "machine_name": machine_name,
+        "machine_ip": machine_ip,
+        "certificate_fingerprint": fingerprint,
+        "previous_certificate_fingerprint": previous_fingerprint,
+        "uid": new_uid,
+        "uid_reissued": uid_reissued,
+        "uid_adopted": uid_adopted,
+        "uid_mismatch": uid_mismatch,
     }
 
 #######################################
@@ -415,7 +570,7 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
     new_ip = str(fields.get('machine_ip') or '').strip() if fields.get('machine_ip') is not None else None
     if new_ip and new_ip != getattr(machine, 'machine_ip', None):
         from ..utils.cert_utils import der_cert_to_pem
-        from .container_module.node_comms import _fetch_peer_cert, _pin_file, request_wss_restart
+        from .container_module.node_comms import _fetch_peer_cert, _pin_file
 
         try:
             fingerprint, cert_der = _fetch_peer_cert(new_ip)
@@ -428,12 +583,12 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
             err = ValueError(f"machine_ip change refused: {new_ip} presents a different certificate (re-register instead)")
             setattr(err, 'error_reason', 'ip_change_fingerprint_mismatch')
             raise err
-        # 同一证书换 IP → 导出新 pin + 重建 WSS pin bundle（Node→Ctrl WSS 校验链）
+        # 同一证书换 IP → 导出新 pin（Ctrl→Node 链路按 IP 取信任锚）；
+        # 链路进程下一轮集合对齐会按新 IP 重拨，无需重载任何服务端上下文。
         try:
             pin_path = _pin_file(new_ip)
             pin_path.parent.mkdir(parents=True, exist_ok=True)
             pin_path.write_bytes(der_cert_to_pem(cert_der))
-            request_wss_restart("pin_bundle_changed")
         except Exception as e:  # pragma: no cover
             print(f"[machine-ip-change] pin export failed for {new_ip}: {e}")
         fields['machine_ip'] = new_ip

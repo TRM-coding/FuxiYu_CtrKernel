@@ -18,14 +18,14 @@ def _handle_container_deleted(container_name: str, machine_id: int | None = None
     删容器行即级联清理。外部删除是异常路径，记录 warning。
 
     作用域（2026-09 修复）：删除必须限定在发送机器内——容器名只在单机内唯一，
-    machine_id 由连接 uid 归位（apply_snapshot_batch / _consume_frames 传入）；
+    machine_id 由链路归属确定（apply_snapshot_batch / _consume_frames 传入）；
     machine_id 缺失或名字不属于该机器 → 拒绝，避免跨机器重名误删他人容器记录。
     """
     container_id = None
     try:
         with session_scope() as session:
             if machine_id is None:
-                logger.warning("handle_node_ws delete: machine_id missing for %r (refuse)", container_name)
+                logger.warning("node link delete: machine_id missing for %r (refuse)", container_name)
                 log_failure(
                     operator_user_id=None,
                     operation=OperationType.DELETE_CONTAINER,
@@ -43,7 +43,7 @@ def _handle_container_deleted(container_name: str, machine_id: int | None = None
                 return
             container_id = containers_repo.get_id_by_name_machine(container_name, machine_id, session=session)
             if container_id is None:
-                logger.debug("handle_node_ws delete: container %r already gone or not on machine %s (skip)",
+                logger.debug("node link delete: container %r already gone or not on machine %s (skip)",
                              container_name, machine_id)
                 return
             record_deleted_container_artifacts(
@@ -58,7 +58,7 @@ def _handle_container_deleted(container_name: str, machine_id: int | None = None
                 deleted_reason="vanished on node",
                 session=session,
             )
-        logger.warning("handle_node_ws delete: container %r (id=%s) removed from DB (vanished on node)",
+        logger.warning("node link delete: container %r (id=%s) removed from DB (vanished on node)",
                        container_name, container_id)
         # 审计：外部消失是删除的另一条路径（trigger=node_vanished），与 api/cleanup 一致入 op-log
         try:
@@ -75,9 +75,9 @@ def _handle_container_deleted(container_name: str, machine_id: int | None = None
                              "trigger": "node_vanished",
                          })
         except Exception as le:
-            logger.warning("handle_node_ws delete: op-log failed for %r: %s", container_name, le)
+            logger.warning("node link delete: op-log failed for %r: %s", container_name, le)
     except Exception as e:
-        logger.warning("handle_node_ws delete: failed to remove container %r: %s", container_name, e)
+        logger.warning("node link delete: failed to remove container %r: %s", container_name, e)
         log_failure(
             operator_user_id=None,
             operation=OperationType.DELETE_CONTAINER,

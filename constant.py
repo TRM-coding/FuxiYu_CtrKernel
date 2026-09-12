@@ -71,6 +71,8 @@ class OperationType(str, Enum):
     ADD_MACHINE = "add_machine"
     REMOVE_MACHINE = "remove_machine"
     UPDATE_MACHINE = "update_machine"
+    # 对已登记机器重钉信任锚（安全事件：重新信任一张证书）
+    RENEW_MACHINE_TRUST = "renew_machine_trust"
     ADD_MACHINE_PERMISSION = "add_machine_permission"
     REMOVE_MACHINE_PERMISSION = "remove_machine_permission"
     # 容器

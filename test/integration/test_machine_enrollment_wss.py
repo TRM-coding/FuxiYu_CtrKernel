@@ -1,8 +1,8 @@
-"""Node 加入 Ctrl 的真实链路集成测试。
+"""Ctrl ↔ Node 真实链路集成测试。
 
 拆成两层：
-1. register_machine 闭环：真实 Node HTTPS identity 端点 + TOFU pin + 建档 + WSS reload marker。
-2. WSS 推送闭环：真实 Ctrl WSS TLS 服务 + Node 客户端证书 + snapshot_batch 落库。
+1. register_machine 闭环：真实 Node HTTPS identity 端点 + TOFU pin + 建档。
+2. 链路闭环：真实 Node HTTPS/WSS 服务 + Ctrl 主动拨入 + snapshot_batch 落库。
 """
 
 from __future__ import annotations
@@ -19,16 +19,16 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI, WebSocket
+import uvicorn
 
 from FuxiYu_CtrKernel import create_app
 from FuxiYu_CtrKernel.config import CommsConfig
 from FuxiYu_CtrKernel.constant import ContainerStatus, MachineTypes
 from FuxiYu_CtrKernel.extensions import session_scope
-from FuxiYu_CtrKernel.repositories import machine_repo
+from FuxiYu_CtrKernel.repositories import containers_repo, machine_repo
 from FuxiYu_CtrKernel.services import machine_tasks
 from FuxiYu_CtrKernel.services.container_module import node_comms
-from FuxiYu_CtrKernel.services.container_module.node_comms_modules import transport
+from FuxiYu_CtrKernel.services.container_module.node_comms_modules import link, transport
 from FuxiYu_CtrKernel.test.factories import create_container, create_machine
 from FuxiYu_CtrKernel.test.conftest import TEST_CONFIG_OVERRIDES
 from FuxiYu_CtrKernel.utils.cert_utils import certificate_sha256_fingerprint, ensure_ctrl_certificates
@@ -86,8 +86,6 @@ def _patched_env(values: dict[str, str]):
 
 class _ThreadedServer:
     def __init__(self, config):
-        import uvicorn
-
         class _Server(uvicorn.Server):
             def install_signal_handlers(self):
                 pass
@@ -118,7 +116,8 @@ class _ThreadedServer:
 
 @contextmanager
 def _node_https_server(tmp_path: Path, port: int, ctrl_ca_file: Path):
-    import uvicorn
+    """真实 Node 服务：HTTPS 操作通道与 /ws/ctrl 快照端点共用同一监听与证书。"""
+
     from FuxiYu_NodeKernel import create_app as node_create_app
     from FuxiYu_NodeKernel.network import wss as node_wss
 
@@ -132,7 +131,6 @@ def _node_https_server(tmp_path: Path, port: int, ctrl_ca_file: Path):
             "NODE_TLS_KEY_FILE": str(node_key),
             "NODE_IDENTITY_FILE": str(identity_file),
             "NODE_CTRL_CA_FILE": str(ctrl_ca_file),
-            "NODE_WSS_ENABLED": "0",
         }
     ):
         original_static = node_wss.static_sys_snapshot
@@ -159,16 +157,13 @@ def _node_https_server(tmp_path: Path, port: int, ctrl_ca_file: Path):
             node_wss.static_sys_snapshot = original_static
 
 
-def test_register_machine_builds_record_pin_chain_and_wss_reload_request(app, tmp_path, monkeypatch):
+def test_register_machine_builds_record_and_pin(app, tmp_path, monkeypatch):
     ctrl_certs_dir = tmp_path / "ctrl-certs"
     pin_dir = tmp_path / "pinned"
-    marker = pin_dir / "_wss_reload_requested"
     port = _free_port()
 
     monkeypatch.setenv("CTRL_CERTS_DIR", str(ctrl_certs_dir))
-    monkeypatch.setattr(node_comms, "PINNED_CERTS_DIR", str(pin_dir))
     monkeypatch.setattr(transport, "PINNED_CERTS_DIR", str(pin_dir))
-    monkeypatch.setattr(node_comms, "WSS_RELOAD_MARKER", str(marker))
     monkeypatch.setattr(CommsConfig, "NODE_PORT", port)
     monkeypatch.setattr(CommsConfig, "NODE_URL_MIDDLE", f":{port}/api")
     ctrl_certs = ensure_ctrl_certificates()
@@ -203,143 +198,86 @@ def test_register_machine_builds_record_pin_chain_and_wss_reload_request(app, tm
         assert status["success"] == 1
         assert status["machine_status"] == "online"
 
-    pin_file = pin_dir / "127.0.0.1.pem"
-    chain_file = pin_dir / "_chain_bundle.pem"
-    assert pin_file.exists()
-    assert chain_file.exists()
-    assert pin_file.read_bytes() in chain_file.read_bytes()
-    assert marker.exists()
-    assert result["wss_reload_required"] is True
-    assert result["wss_restart_requested"] is True
+    # 建档即完成接入：pin 落盘供链路取信任锚，注册流程不再触发任何重载动作
+    assert (pin_dir / "127.0.0.1.pem").exists()
+    assert "wss_reload_required" not in result
+    assert "wss_restart_requested" not in result
 
 
-@contextmanager
-def _ctrl_wss_server(app, tmp_path: Path, node_cert: Path, port: int, monkeypatch):
-    import uvicorn
-    from FuxiYu_CtrKernel.services.container_module.node_comms import handle_node_ws
-    from FuxiYu_CtrKernel.services.container_module.node_comms import rebuild_pinned_chain
+def test_ctrl_link_dials_node_and_applies_snapshot(app, tmp_path, monkeypatch):
+    """换向闭环：Ctrl 主动拨 Node 的 /ws/ctrl，快照经链路落库。"""
 
-    ctrl_certs_dir = tmp_path / "ctrl-wss-certs"
-    pin_dir = tmp_path / "ctrl-wss-pinned"
-    pin_dir.mkdir(parents=True, exist_ok=True)
-    (pin_dir / "node.pem").write_bytes(node_cert.read_bytes())
-
-    monkeypatch.setenv("CTRL_CERTS_DIR", str(ctrl_certs_dir))
-    monkeypatch.setattr(node_comms, "PINNED_CERTS_DIR", str(pin_dir))
-    monkeypatch.setattr(transport, "PINNED_CERTS_DIR", str(pin_dir))
-    ctrl_certs = ensure_ctrl_certificates()
-
-    wss_app = FastAPI(title="FuxiYu CtrlKernel WSS Receiver Test")
-
-    @wss_app.websocket("/ws/node")
-    async def ws_node(websocket: WebSocket):
-        uid = websocket.query_params.get("uid")
-        if uid:
-            with session_scope(commit=False) as session:
-                machine = machine_repo.get_by_uid(uid, session=session)
-            if machine is None:
-                logging.getLogger(__name__).error("test WSS cannot resolve uid %s", uid)
-        await handle_node_ws(websocket)
-
-    chain = rebuild_pinned_chain()
-    config = uvicorn.Config(
-        wss_app,
-        host="127.0.0.1",
-        port=port,
-        log_level="warning",
-        lifespan="off",
-        ssl_certfile=str(ctrl_certs.cert_file),
-        ssl_keyfile=str(ctrl_certs.key_file),
-        ssl_ca_certs=str(chain),
-        ssl_cert_reqs=ssl.CERT_REQUIRED,
-    )
-    server = _ThreadedServer(config).start(port)
-    try:
-        yield ctrl_certs
-    finally:
-        server.stop()
-
-
-async def _send_wss_snapshot(port: int, uid: str, node_cert: Path, node_key: Path, ctrl_ca_file: Path):
-    import websockets
-
-    context = ssl.create_default_context(cafile=str(ctrl_ca_file))
-    context.load_cert_chain(certfile=str(node_cert), keyfile=str(node_key))
-    async with websockets.connect(f"wss://127.0.0.1:{port}/ws/node?uid={uid}", ssl=context) as websocket:
-        await websocket.send(
-            """
-            {
-              "type": "snapshot_batch",
-              "node_uid": "%s",
-              "payload": [
-                {
-                  "type": "snapshot",
-                  "topic": "container_status",
-                  "payload": {"wss_it_c": {"status": "offline"}}
-                },
-                {
-                  "type": "snapshot",
-                  "topic": "sys_snapshot",
-                  "payload": {
-                    "hostname": "node-it-01",
-                    "cpu": {"cores": 8, "usage_percent": 10},
-                    "memory": {"total_gb": 32, "used_gb": 5, "usage_percent": 15.6},
-                    "disk": {"total_gb": 200, "used_gb": 50, "percent": 25},
-                    "gpu": []
-                  }
-                }
-              ]
-            }
-            """
-            % uid
-        )
-        await asyncio.sleep(0.2)
-
-
-def test_ctrl_wss_accepts_pinned_node_certificate_and_applies_snapshot(app, tmp_path, monkeypatch):
     from FuxiYu_NodeKernel.network import wss as node_wss
 
-    test_db = tmp_path / "ctrl-wss.sqlite"
-    fastapi_app = create_app(
+    test_db = tmp_path / "ctrl-link.sqlite"
+    create_app(
         overrides={
             **TEST_CONFIG_OVERRIDES,
             "SQLALCHEMY_DATABASE_URI": f"sqlite:///{test_db}",
         }
     )
-    node_cert = tmp_path / "wss-node" / "node_cert.pem"
-    node_key = tmp_path / "wss-node" / "node_key.pem"
-    monkeypatch.setenv("NODE_TLS_CERT_FILE", str(node_cert))
-    monkeypatch.setenv("NODE_TLS_KEY_FILE", str(node_key))
-    node_files = node_wss.ensure_self_signed_certificate()
+
+    ctrl_certs_dir = tmp_path / "ctrl-link-certs"
+    pin_dir = tmp_path / "ctrl-link-pinned"
+    monkeypatch.setenv("CTRL_CERTS_DIR", str(ctrl_certs_dir))
+    monkeypatch.setattr(transport, "PINNED_CERTS_DIR", str(pin_dir))
+    ctrl_certs = ensure_ctrl_certificates()
 
     port = _free_port()
-    uid = "integration-node-uid"
-    machine = create_machine(
-        machine_name="wss-it-machine",
-        machine_ip="127.0.0.1",
-        machine_type=MachineTypes.GPU,
-        cpu_core_number=8,
-        gpu_number=0,
-        memory_size_gb=32,
-        disk_size_gb=200,
-    )
-    with session_scope() as session:
-        machine_repo.update_machine(
-            machine.id,
-            node_uid=uid,
-            node_cert_fingerprint=certificate_sha256_fingerprint(node_files.cert_file),
-            session=session,
-        )
-    container = create_container(machine=machine, name="wss_it_c", status=ContainerStatus.ONLINE)
-    machine_id = machine.id
-    container_id = container.id
+    monkeypatch.setattr(CommsConfig, "NODE_PORT", port)
 
-    with _ctrl_wss_server(fastapi_app, tmp_path, node_files.cert_file, port, monkeypatch) as ctrl_certs:
-        asyncio.run(_send_wss_snapshot(port, uid, node_files.cert_file, node_files.key_file, ctrl_certs.ca_cert))
+    uid = "ctrl-link-node-uid"
+    monkeypatch.setattr(node_wss, "list_container_status", lambda: {"link_it_c": {"status": "offline"}})
+    monkeypatch.setattr(node_wss, "list_last_ssh", lambda: {})
+    monkeypatch.setattr(node_wss, "list_disk_usage", lambda: {"containers": {}})
+    monkeypatch.setattr(node_wss, "list_sys_snapshot", lambda: dict(HARDWARE))
+
+    with _node_https_server(tmp_path, port, ctrl_certs.ca_cert) as node_files:
+        # Ctrl 侧建档 + pin（等价 register_machine 的第 6/7 步）
+        machine = create_machine(
+            machine_name="ctrl-link-machine",
+            machine_ip="127.0.0.1",
+            machine_type=MachineTypes.GPU,
+            cpu_core_number=8,
+            gpu_number=0,
+            memory_size_gb=32,
+            disk_size_gb=200,
+        )
+        with session_scope() as session:
+            machine_repo.update_machine(
+                machine.id,
+                node_uid=uid,
+                node_cert_fingerprint=certificate_sha256_fingerprint(node_files["cert"]),
+                session=session,
+            )
+        container = create_container(machine=machine, name="link_it_c", status=ContainerStatus.ONLINE)
+        machine_id, container_id = machine.id, container.id
+
+        # Node 侧发牌：链路端点以本机身份牌校验 Ctrl 出示的 uid
+        node_wss.save_ctrl_issued_uid(uid)
+        pin_dir.mkdir(parents=True, exist_ok=True)
+        (pin_dir / "127.0.0.1.pem").write_bytes(node_files["cert"].read_bytes())
+
+        async def _run_link():
+            task = asyncio.create_task(link.run_machine_link(machine_id, "127.0.0.1", uid))
+            try:
+                for _ in range(200):
+                    await asyncio.sleep(0.05)
+                    with session_scope(commit=False) as session:
+                        current = containers_repo.get_by_id(container_id, session=session)
+                    if current is not None and current.container_status == ContainerStatus.OFFLINE:
+                        return
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            raise AssertionError("snapshot never landed through the Ctrl-initiated link")
+
+        asyncio.run(_run_link())
 
     with session_scope(commit=False) as session:
         refreshed = machine_repo.get_by_id(machine_id, session=session)
-        refreshed_container = session.get(type(container), container_id)
         assert refreshed is not None
-        assert refreshed_container is not None
-        assert refreshed_container.container_status == ContainerStatus.OFFLINE
+        # 连接成功 → 链路把机器置 ONLINE（拨号结果即状态）
+        from FuxiYu_CtrKernel.constant import MachineStatus
+
+        assert refreshed.machine_status == MachineStatus.ONLINE

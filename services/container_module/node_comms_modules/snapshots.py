@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import time
 
 from ....constant import ContainerStatus, MachineStatus
 from ....extensions import session_scope
@@ -286,3 +287,33 @@ def _resolve_snapshot_machine_id(node_uid) -> int | None:
             pass
     logger.warning("apply_snapshot_batch: node_uid %r unresolved or missing; dropping batch", node_uid)
     return None
+
+
+############################################################
+# 采集心跳（last_seen_at）
+############################################################
+
+# 同一机器 60s 内只写一次库。快照每 5s 一批，逐批 UPDATE 没有必要；
+# 而窗口语义以天计，60s 粒度绰绰有余。
+_LAST_SEEN_MIN_INTERVAL = 60.0
+_last_seen_written: dict[int, float] = {}
+
+
+def _touch_machine_last_seen(machine_id: int) -> None:
+    """记下「Ctrl 此刻听到过这台机器」。
+
+    只要批次被应用就算听到——**含采集异常批**（对端可达但采集失败），
+    语义是链路层的事实，与采集内容是否正常无关。
+
+    失败只告警：心跳丢了不影响本批快照落库，下一批还会再来。
+    """
+
+    now = time.time()
+    if now - _last_seen_written.get(machine_id, 0.0) < _LAST_SEEN_MIN_INTERVAL:
+        return
+    _last_seen_written[machine_id] = now
+    try:
+        with session_scope() as session:
+            machine_repo.touch_last_seen(machine_id, datetime.datetime.utcnow(), session=session)
+    except Exception as exc:
+        logger.warning("touch last_seen failed for machine %s: %s", machine_id, exc)

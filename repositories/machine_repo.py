@@ -3,6 +3,7 @@
 repo 只接收显式 session，负责查询/写入/flush；事务提交由 service/tasks 的
 session_scope 统一决定。
 """
+from datetime import datetime
 from typing import Sequence
 
 from sqlalchemy import func, select
@@ -155,6 +156,21 @@ def update_machine(machine_id: int, *, session: Session, **fields) -> bool:
 
     if dirty:
         session.flush()
+    return True
+
+
+def touch_last_seen(machine_id: int, when: datetime, *, session: Session) -> bool:
+    """记下 Ctrl 最后一次成功采集到该机器数据的时刻（采集心跳）。
+
+    与 update_machine 分开：本函数由采集路径高频调用、不是操作员字段更新，
+    不走 update_machine 的白名单（那里是给管理动作用的）。
+    """
+
+    machine = get_by_id(machine_id, session=session)
+    if machine is None:
+        return False
+    machine.last_seen_at = when
+    session.flush()
     return True
 
 

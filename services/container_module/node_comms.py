@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
-from pathlib import Path
 
 import requests
 
 from ...config import CommsConfig
 from ...extensions import session_scope
-from ..machine_tasks import is_machine_online_remote
 from .node_comms_modules import runtime_cache as _runtime_cache
 from .node_comms_modules.runtime_cache import (
     _split_container_runtime_snapshot,
@@ -19,8 +15,7 @@ from .node_comms_modules.runtime_cache import (
     _read_machine_runtime_cache,
 )
 from .node_comms_modules.runtime_push import _post_runtime_buffer, _read_internal_token
-from .node_comms_modules.transport import PINNED_CERTS_DIR, _pin_file, _resolve_tls, _post_node_json, _decode_node_response
-from .node_comms_modules.security import WSS_RELOAD_MARKER, _write_wss_restart_marker, _read_pin_bundle
+from .node_comms_modules.transport import _pin_file, _resolve_tls, _post_node_json, _decode_node_response
 from .node_comms_modules.machine_access import _ensure_machine_online_for_operation
 from .node_comms_modules.enrollment import _fetch_peer_cert
 from .node_comms_modules.snapshots import (
@@ -39,25 +34,28 @@ from .node_comms_modules.snapshots import (
     _persist_hardware_changes,
     _log_system_snapshot,
     _resolve_snapshot_machine_id,
-)
-from .node_comms_modules.probes import (
-    CONNECTIVITY_PROBE_ATTEMPTS,
-    _decode_container_probe_response,
-    _load_connectivity_probe_target,
-    _list_online_probe_targets,
-    _mark_probe_target_offline,
+    _touch_machine_last_seen,
 )
 from .node_comms_modules.deletion import _handle_container_deleted
+from .node_comms_modules.link import (
+    LINK_PATH,
+    build_link_ssl_context,
+    link_url,
+    load_link_targets,
+    run_links_forever,
+    sync_links,
+)
 from .node_comms_modules.websocket import (
     FRAME_QUEUE_MAXSIZE,
     _consume_frames,
+    _consume_link,
     _enqueue_frame,
-    _resolve_ws_identity,
-    _accept_node_ws,
     _receive_node_frame,
     _route_node_frame,
-    _finish_node_ws,
 )
+
+# 上面从 link / websocket 引入的符号部分在本模块内不直接调用：
+# 它们是门户对外的再导出面（run_node_links 与测试从这里取链路入口）。
 
 logger = logging.getLogger(__name__)
 
@@ -79,41 +77,6 @@ def send(url: str, payload: dict, timeout: float = 5.0, *, cert=None, verify=Non
     except requests.RequestException as exc:
         logger.error("Request error: %s", exc)
         return {"error": str(exc)}
-
-
-############################################################
-# Certificate Trust and WSS Reload
-############################################################
-
-def wss_reload_marker() -> Path:
-    return Path(WSS_RELOAD_MARKER)
-
-
-def rebuild_pinned_chain() -> Path | None:
-    pins_dir = Path(PINNED_CERTS_DIR)
-    if not pins_dir.exists():
-        return None
-    pem_files = sorted(pins_dir.glob("*.pem"))
-    if not pem_files:
-        return None
-    bundle = pins_dir / "_chain_bundle.pem"
-    try:
-        bundle.write_bytes(_read_pin_bundle(pem_files))
-    except Exception as exc:
-        logger.warning("rebuild_pinned_chain failed: %s", exc)
-        return None
-    return bundle
-
-
-def request_wss_restart(reason: str = "pin_bundle_changed") -> dict:
-    """Rebuild the trust bundle and signal run_wss to recreate its SSL context."""
-    chain = rebuild_pinned_chain()
-    marker = wss_reload_marker()
-    _write_wss_restart_marker(marker, chain, reason)
-    return {
-        "wss_reload_required": True, "wss_restart_requested": True,
-        "pin_bundle": str(chain) if chain else None, "reload_marker": str(marker),
-    }
 
 
 ############################################################
@@ -153,58 +116,6 @@ def clear_runtime_buffers() -> None:
     with _runtime_cache._RUNTIME_BUFFER_LOCK:
         _runtime_cache._CONTAINER_RUNTIME_BUFFER.clear()
         _runtime_cache._MACHINE_RUNTIME_BUFFER.clear()
-
-
-############################################################
-# Status Queries and Connectivity Probes
-############################################################
-
-def get_container_status(machine_ip: str, container_name: str, timeout: float = 5.0) -> dict:
-    """Explicit HTTP status query; ordinary getters consume WSS snapshots instead."""
-    url = get_full_url(machine_ip, "/container_status")
-    payload = {"config": {"container_name": container_name}}
-    last_error = None
-    for attempt in range(2):
-        try:
-            response, last_error = _decode_container_probe_response(send(url, payload, timeout=timeout))
-            if last_error is None:
-                return response
-        except Exception as exc:
-            last_error = exc
-        logger.warning("get_container_status request error (attempt %s): %s", attempt + 1, last_error)
-        if attempt == 0:
-            time.sleep(0.5)
-    return {"error": str(last_error) if last_error is not None else "unknown error"}
-
-
-def probe_machine_connectivity(machine_id: int, attempts: int = CONNECTIVITY_PROBE_ATTEMPTS) -> bool:
-    """HTTP fallback for a disconnected Node; do not change persisted status here."""
-    machine_ip, probe_name = _load_connectivity_probe_target(machine_id)
-    if not machine_ip:
-        return False
-    for _ in range(max(1, attempts)):
-        try:
-            if probe_name is not None:
-                response = get_container_status(machine_ip, probe_name, timeout=2.0)
-                if isinstance(response, dict) and not response.get("error"):
-                    return True
-            elif is_machine_online_remote(machine_id, timeout=2.0):
-                return True
-        except Exception:
-            pass
-    logger.warning("probe_machine_connectivity: machine %s unreachable after %s attempts", machine_id, attempts)
-    return False
-
-
-def probe_machines_online_once() -> dict:
-    """Reconcile machines left ONLINE at Ctrl startup; Node owns reconnection."""
-    machines = _list_online_probe_targets()
-    turned_offline = []
-    for machine in machines:
-        if not probe_machine_connectivity(machine.id) and _mark_probe_target_offline(machine):
-            turned_offline.append(machine.id)
-    logger.info("probe_machines_online_once: probed=%s turned_offline=%s", len(machines), turned_offline)
-    return {"probed": len(machines), "turned_offline": turned_offline}
 
 
 ############################################################
@@ -301,6 +212,8 @@ def apply_snapshot_batch(batch: dict) -> dict:
     machine_id = _resolve_snapshot_machine_id(batch.get("node_uid"))
     if machine_id is None:
         return result
+    # 采集心跳：批次能落到这台机器上，就说明 Ctrl 此刻听到了它（含采集异常批）
+    _touch_machine_last_seen(machine_id)
     handlers = {
         "container_status": apply_container_status_snapshot, "last_ssh": apply_last_ssh_snapshot,
         "disk_usage": apply_disk_usage_snapshot, "sys_snapshot": apply_sys_snapshot,
@@ -317,28 +230,9 @@ def apply_snapshot_batch(batch: dict) -> dict:
 
 
 ############################################################
-# Node WebSocket Connection Lifecycle
+# Node Link Lifecycle
 ############################################################
 
-async def handle_node_ws(websocket) -> None:
-    """Authenticate the connection, queue frames in order, and probe on disconnect."""
-    identity = await _resolve_ws_identity(websocket)
-    if identity is None:
-        return
-    uid, machine = identity
-    if not await _accept_node_ws(websocket, uid, machine):
-        return
-    queue = asyncio.Queue(maxsize=FRAME_QUEUE_MAXSIZE)
-    consumer = asyncio.create_task(_consume_frames(queue, uid, machine.id))
-    close_reason = reachable_after_close = None
-    try:
-        while True:
-            frame = await _receive_node_frame(websocket, uid)
-            if frame is not None:
-                _route_node_frame(frame, queue, uid)
-    except Exception as exc:
-        close_reason = exc
-        logger.info("handle_node_ws: retrying... | uid=%s: %s", uid, exc)
-        reachable_after_close = await asyncio.to_thread(probe_machine_connectivity, machine.id)
-    finally:
-        await _finish_node_ws(websocket, consumer, uid, machine.id, reachable_after_close, close_reason)
+# 链路的拨号、收帧与重连在 node_comms_modules.link / websocket 内实现；
+# 本模块只负责把它们的门户与工具函数暴露给上层（run_node_links、machine_tasks）。
+# machines 表即链路清单：表里有行就拨，停拨的唯一方式是删除机器行。

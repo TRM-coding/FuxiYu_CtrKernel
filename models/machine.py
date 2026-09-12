@@ -47,6 +47,11 @@ class Machine(db.Model):
     # 不可用窗口起点（离线/维护）：进入不可用（machine_status != ONLINE 或 is_maintenance）
     # 且为空时置位；恢复可用时关闭并清空。用于清理类计时顺延（见 machine_tasks 窗口逻辑）。
     unavailable_since: datetime | None = db.Column(db.DateTime, nullable=True)
+    # 采集心跳：Ctrl 最后一次成功取得该机器数据的时刻（Ctrl 自身时钟）。
+    # 用途：窗口起点的**下界**——窗口起点只在 Ctrl 亲眼看到状态翻转时才写入，
+    # Ctrl 停机期间发生的进窗无法被观测，会把起点记成重启时刻而少算顺延。
+    # 启动时以本列兜底播种，宁可多给用户时间（详见 openspec track-machine-last-seen）。
+    last_seen_at: datetime | None = db.Column(db.DateTime, nullable=True)
     # 与 Container 的一对多关系（containers 表里有 machine_id 外键）
     containers = db.relationship(
         "Container", back_populates="machine", cascade="all, delete-orphan"

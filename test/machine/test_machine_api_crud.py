@@ -219,3 +219,91 @@ def test_get_machine_detail_success(client, monkeypatch):
 
     assert resp.status_code == 200
     assert resp.json()["machine_name"] == "m"
+
+
+#####################
+# 重新钉信任锚
+
+
+def test_renew_machine_trust_requires_token(client, monkeypatch):
+    _auth(monkeypatch, valid=False)
+
+    resp = client.post("/api/machines/renew_machine_trust", json={"machine_id": 1})
+
+    assert resp.status_code == 401
+
+
+def test_renew_machine_trust_requires_operator(client, monkeypatch):
+    _auth(monkeypatch, operator=False)
+
+    resp = client.post("/api/machines/renew_machine_trust", json={"machine_id": 1})
+
+    assert resp.status_code == 403
+
+
+def test_renew_machine_trust_success_passes_operator_and_returns_result(client, monkeypatch):
+    _auth(monkeypatch)
+    called = {}
+
+    def _renew(machine_id, operator_user_id=None):
+        called["machine_id"] = machine_id
+        return {
+            "success": True,
+            "machine_id": machine_id,
+            "machine_name": "m",
+            "machine_ip": "10.0.0.9",
+            "certificate_fingerprint": "fp-new",
+            "previous_certificate_fingerprint": "fp-old",
+            "uid": "u1",
+            "uid_reissued": True,
+            "uid_adopted": False,
+            "uid_mismatch": False,
+        }
+
+    monkeypatch.setattr(machine_api.machine_service, "Renew_machine_trust", _renew)
+
+    resp = client.post("/api/machines/renew_machine_trust", json={"machine_id": 7})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] == 1
+    assert body["certificate_fingerprint"] == "fp-new"
+    assert body["uid_reissued"] is True
+    assert called["machine_id"] == 7
+
+
+def test_renew_machine_trust_missing_machine_returns_404(client, monkeypatch):
+    _auth(monkeypatch)
+
+    def _raise(machine_id, operator_user_id=None):
+        raise NodeServiceError("renew_machine_trust failed: machine 7 not found", reason="machine_not_found")
+
+    monkeypatch.setattr(machine_api.machine_service, "Renew_machine_trust", _raise)
+
+    resp = client.post("/api/machines/renew_machine_trust", json={"machine_id": 7})
+
+    assert resp.status_code == 404
+    assert resp.json()["error_reason"] == "machine_not_found"
+
+
+def test_renew_machine_trust_unreachable_returns_422(client, monkeypatch):
+    _auth(monkeypatch)
+
+    def _raise(machine_id, operator_user_id=None):
+        raise NodeServiceError("cannot reach", reason="machine_unreachable")
+
+    monkeypatch.setattr(machine_api.machine_service, "Renew_machine_trust", _raise)
+
+    resp = client.post("/api/machines/renew_machine_trust", json={"machine_id": 7})
+
+    assert resp.status_code == 422
+    assert resp.json()["error_reason"] == "machine_unreachable"
+
+
+def test_renew_machine_trust_rejects_invalid_machine_id(client, monkeypatch):
+    """入参校验失败走框架的 400（与其它端点一致），不到服务层。"""
+    _auth(monkeypatch)
+
+    resp = client.post("/api/machines/renew_machine_trust", json={"machine_id": 0})
+
+    assert resp.status_code == 400

@@ -64,6 +64,31 @@ class RegisterMachineWithProfileResponse(RegisterMachineResponse):
 
 
 #####################
+# 重新钉信任锚（对已登记机器的连接修复）
+
+
+class RenewMachineTrustRequest(BaseModel):
+    """对已登记机器重钉信任锚；只更新原行，不建档。"""
+
+    machine_id: int = Field(..., ge=1)
+
+
+class RenewMachineTrustResponse(SuccessMessageResponse):
+    """重钉结果：新旧指纹与 uid 的处置方式都回给调用方。"""
+
+    machine_id: int
+    machine_name: str
+    machine_ip: str
+    certificate_fingerprint: str
+    previous_certificate_fingerprint: str | None = None
+    uid: str | None = None
+    # uid 的三种处置：重发（对端丢牌）/ 采纳（库里本无）/ 不一致但保持不动
+    uid_reissued: bool = False
+    uid_adopted: bool = False
+    uid_mismatch: bool = False
+
+
+#####################
 # 删除机器
 
 
