@@ -9,6 +9,7 @@ from ..extensions import session_scope
 from ..repositories import containers_repo, long_term_container_repo, container_cleanup_reminder_repo
 from ..repositories import container_ssh_login_repo
 from ..services import container_tasks, settings_tasks
+from ..services.machine_tasks import machine_in_scope
 from ..utils.mail import send as send_mail
 
 logger = logging.getLogger(__name__)
@@ -172,6 +173,13 @@ def cleanup_expired_containers_once(cleanup_after_days: int) -> None:
             }
             _send_cleanup_reminders_if_needed(cid, info_with_record)
             if info.get("cleanup_status") != "due":
+                continue
+            # 管辖范畴：机器可达且非维护才发起清理。
+            # 范畴外是职责划分而非门禁——这次动作本就不该发生，静默跳过：
+            # 不留审计、不留常规日志（没有动作被尝试，就没有失败可言）。
+            # 缺此判定时，动作层抛出的异常会在 _audit_removal 落库后才冒泡，
+            # 每轮为每个到期容器写一条 delete_container 失败记录。
+            if not machine_in_scope(getattr(rec, "machine_id", None)):
                 continue
             snapshot = container_tasks.build_container_restore_snapshot(
                 cid,

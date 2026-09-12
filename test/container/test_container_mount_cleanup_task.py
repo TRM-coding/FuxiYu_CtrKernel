@@ -56,7 +56,7 @@ class TestMountCleanupTask:
             lambda mid, **kwargs: "10.0.0.2"
         )
         monkeypatch.setattr(
-            container_mount_cleanup_task, "get_machine_reachable",
+            container_mount_cleanup_task, "machine_in_scope",
             lambda mid: True
         )
         monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
@@ -135,7 +135,7 @@ class TestMountCleanupTask:
             lambda mid, **kwargs: "10.0.0.1"
         )
         monkeypatch.setattr(
-            container_mount_cleanup_task, "get_machine_reachable",
+            container_mount_cleanup_task, "machine_in_scope",
             lambda mid: True
         )
         monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
@@ -173,13 +173,16 @@ class TestMountCleanupTask:
         container_mount_cleanup_task.run_mount_cleanup_once()
 
     def test_skips_when_machine_unreachable(self, app, db_session, monkeypatch):
-        """机器不可达 → 不发清理请求、不标记 cleaned（等恢复后下一轮再清）。"""
+        """机器不在范畴内（不可达）→ 不发清理请求、不标记 cleaned（等回到范畴内再清）。"""
+        from ...constant import MachineStatus
         from ...models.container_mount_cleanup import ContainerMountCleanup
+        from ..factories import create_machine
 
+        machine = create_machine(machine_status=MachineStatus.OFFLINE)
         old = datetime.utcnow() - timedelta(days=20)
         row = container_mount_cleanup_repo.insert(
             container_id=1, container_name="offline_ctr",
-            machine_id=2, mount_path="/home/x/containers/offline_ctr/",
+            machine_id=machine.id, mount_path="/home/x/containers/offline_ctr/",
             escalation=False, removed_at=old,
             session=db_session,
         )
@@ -190,9 +193,36 @@ class TestMountCleanupTask:
             node_comms, "send",
             lambda url, payload, timeout: sent.append(url) or {"success": 1}
         )
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
+        monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_after_days", lambda: 14)
+
+        container_mount_cleanup_task.run_mount_cleanup_once()
+
+        assert sent == []
+        db_session.expire_all()
+        refreshed = db_session.get(ContainerMountCleanup, row.id)
+        assert refreshed.cleaned_at is None
+
+    def test_skips_when_machine_in_maintenance(self, app, db_session, monkeypatch):
+        """维护中（状态仍 ONLINE）→ 同样不发清理请求：维护那半格也要判。"""
+        from ...constant import MachineStatus
+        from ...models.container_mount_cleanup import ContainerMountCleanup
+        from ..factories import create_machine
+
+        machine = create_machine(machine_status=MachineStatus.ONLINE, is_maintenance=True)
+        old = datetime.utcnow() - timedelta(days=20)
+        row = container_mount_cleanup_repo.insert(
+            container_id=1, container_name="maintenance_ctr",
+            machine_id=machine.id, mount_path="/home/x/containers/maintenance_ctr/",
+            escalation=False, removed_at=old,
+            session=db_session,
+        )
+        db_session.commit()
+
+        sent = []
         monkeypatch.setattr(
-            container_mount_cleanup_task, "get_machine_reachable",
-            lambda mid: False  # machine OFFLINE / 不存在
+            node_comms, "send",
+            lambda url, payload, timeout: sent.append(url) or {"success": 1}
         )
         monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
         monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_after_days", lambda: 14)
@@ -203,3 +233,37 @@ class TestMountCleanupTask:
         db_session.expire_all()
         refreshed = db_session.get(ContainerMountCleanup, row.id)
         assert refreshed.cleaned_at is None
+
+    def test_manual_cleanup_still_runs_in_maintenance(self, app, db_session, monkeypatch):
+        """手动入口不受管辖范畴约束：维护中仍可按需手动清理。"""
+        from ...constant import MachineStatus
+        from ...services import container_tasks
+        from ..factories import create_machine
+
+        machine = create_machine(machine_status=MachineStatus.ONLINE, is_maintenance=True)
+        old = datetime.utcnow() - timedelta(days=20)
+        row = container_mount_cleanup_repo.insert(
+            container_id=1, container_name="manual_ctr",
+            machine_id=machine.id, mount_path="/home/x/containers/manual_ctr/",
+            escalation=False, removed_at=old,
+            session=db_session,
+        )
+        db_session.commit()
+
+        sent_payloads = []
+        monkeypatch.setattr(
+            node_comms, "send",
+            lambda url, payload, timeout: sent_payloads.append(url) or {"success": 1}
+        )
+        monkeypatch.setattr(
+            mount_cleanup_mod.machine_repo, "get_machine_ip_by_id",
+            lambda mid, **kwargs: "10.0.0.9"
+        )
+
+        result = container_tasks.clean_deleted_container_mount(
+            operator_user_id=None, mount_cleanup_id=row.id,
+        )
+
+        assert result.get("cleaned") is True
+        assert len(sent_payloads) == 1
+        assert "/clean_mount" in sent_payloads[0]

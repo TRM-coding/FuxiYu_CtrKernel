@@ -7,7 +7,7 @@ from ..extensions import session_scope
 from ..repositories import containers_repo
 from ..services import container_tasks, settings_tasks
 from ..utils.mail import send as send_mail
-from ..services.machine_tasks import get_machine_reachable, is_machine_in_maintenance
+from ..services.machine_tasks import machine_in_scope
 
 logger = logging.getLogger(__name__)
 _SCHEDULER_STATE: dict[str, object] = {}
@@ -85,15 +85,12 @@ def _evaluate_limits(container, usage: dict) -> None:
     if not enabled:
         return
 
-    # 机器级 gate：机器不可达（offline）或维护中 → 跳过评估。
+    # 管辖范畴：机器可达且非维护才评估（与容器清理 / 挂载清理共用同一判据）。
     # 断线/维护期间磁盘帧停更，DB 值停留最后已知——此时不动状态机
     # （不 upsert 冻结 / 不推进宽限 / 不发邮件），避免基于过期数据的打扰与不可逆动作；
     # pause/remove 本就需要 Node 可达，把该前置从动作层提前到判断层。
-    # 机器状态由 WSS 置位 + 探活清除；维护走独立 is_maintenance 标志（machine_status 可能仍 ONLINE）。
-    machine_id = getattr(container, "machine_id", None)
-    if machine_id is None or not get_machine_reachable(machine_id) or is_machine_in_maintenance(machine_id):
-        logger.info("[disk-check] skip container_id=%s: machine unreachable or in maintenance",
-                    getattr(container, "id", "?"))
+    # 范畴外是职责划分而非门禁——静默跳过，不留审计也不留常规日志。
+    if not machine_in_scope(getattr(container, "machine_id", None)):
         return
 
     container_data = usage.get("container", {})

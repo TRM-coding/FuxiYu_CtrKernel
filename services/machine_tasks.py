@@ -281,6 +281,18 @@ def get_machine_reachable(machine_id: int, timeout: float = 2.0) -> bool:
         machine = None
     return _machine_status_value(machine) == MachineStatus.ONLINE.value if machine else False
 
+
+def machine_in_scope(machine_id: int | None) -> bool:
+    """动作类定时任务的「管辖范畴」判定：**可达 且 非维护**。
+
+    三个动作任务（容器清理 / 挂载清理 / 磁盘检测）共用此判据，口径统一。
+    范畴外是**职责划分**而非门禁：这次动作本就不该发生，调用方直接跳过且不留痕
+    （不写审计、不写常规日志）。机器记录缺失并入范畴外——缺依据时不抛异常。
+    """
+    if machine_id is None:
+        return False
+    return get_machine_reachable(machine_id) and not is_machine_in_maintenance(machine_id)
+
 #######################################
 #######################################
 # 注册机器（TOFU 接入并建档）

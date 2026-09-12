@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from ..extensions import session_scope
 from ..repositories import container_mount_cleanup_repo, deleted_container_restore_snapshot_repo
 from ..services import settings_tasks
-from ..services.machine_tasks import get_machine_reachable
+from ..services.machine_tasks import machine_in_scope
 from ..services.container_module.deleted_containers import (
     ensure_deleted_record_for_cleanup,
     ensure_mount_cleanup_record,
@@ -49,8 +49,6 @@ def run_mount_cleanup_once() -> None:
 
     for row in rows:
         try:
-            # 机器级 gate：机器不可达不发清理请求（清理动作需要 Node 在场；
-            # 否则每轮对宕机机器重复请求，等恢复后的下一轮再清）
             with session_scope() as session:
                 deleted, cleanup = ensure_mount_cleanup_record(row.id, session=session)
                 if cleanup is None:
@@ -60,12 +58,10 @@ def run_mount_cleanup_once() -> None:
                 machine_id = cleanup.machine_id
                 container_name = cleanup.container_name
                 mount_path = cleanup.mount_path
-            if not get_machine_reachable(machine_id):
-                logger.info(
-                    "[mount-cleanup] skip deleted row %s: machine %s unreachable",
-                    row.id,
-                    machine_id,
-                )
+            # 管辖范畴：机器可达且非维护才发清理请求（清理动作需要 Node 在场；
+            # 否则每轮对不在范畴内的机器重复请求，等回到范畴内的下一轮再清）。
+            # 范畴外是职责划分而非门禁——静默跳过，不留审计也不留常规日志。
+            if not machine_in_scope(machine_id):
                 continue
             # 动作逻辑统一在 container_module.mount_cleanup（幂等 / 请求 / mark_cleaned / op-log）
             result = clean_mount_path(cleanup_id, trigger="auto_mount_cleanup")

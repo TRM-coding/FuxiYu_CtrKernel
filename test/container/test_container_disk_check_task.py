@@ -479,7 +479,11 @@ class TestEvaluateLimitsDoesNotWriteDb:
 # ---------------------------------------------------------------------------
 
 class TestEvaluateLimitsMachineGate:
-    """机器离线或维护中 → 评估整体跳过：不触发 handler、不动冻结状态机。"""
+    """机器离线或维护中 → 评估整体跳过：不触发 handler、不动冻结状态机。
+
+    判据为共享的 machine_in_scope（可达 且 非维护）；范畴外属职责划分，
+    连常规日志都不写——否则 72 轮/天 × 离线天数的噪音只是从 DB 搬到日志文件。
+    """
 
     def _reachable_long_term(self, db_session, monkeypatch):
         _root, machine, container = create_container_graph()
@@ -489,8 +493,10 @@ class TestEvaluateLimitsMachineGate:
         monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_response_enabled", lambda: True)
         return machine, container
 
-    def test_offline_machine_skips_evaluate(self, app, db_session, monkeypatch):
-        """机器 OFFLINE：超 hard limit 也不触发 handler / 冻结 upsert。"""
+    def test_offline_machine_skips_evaluate(self, app, db_session, monkeypatch, caplog):
+        """机器 OFFLINE：超 hard limit 也不触发 handler / 冻结 upsert，且不留日志。"""
+        import logging
+
         machine, container = self._reachable_long_term(db_session, monkeypatch)
         machine.machine_status = MachineStatus.OFFLINE
         db_session.commit()
@@ -500,14 +506,18 @@ class TestEvaluateLimitsMachineGate:
                             lambda c, u, a: calls.append(c.id))
 
         usage = _usage_exceeding_hard_limit()
-        container_disk_check_task._evaluate_limits(container, usage)
+        with caplog.at_level(logging.DEBUG, logger=container_disk_check_task.__name__):
+            container_disk_check_task._evaluate_limits(container, usage)
 
         assert calls == []
         db_session.expire_all()
         assert container_disk_freeze_state_repo.get(container.id, session=db_session) is None
+        assert [r for r in caplog.records if "disk-check" in r.getMessage()] == []
 
-    def test_maintenance_machine_skips_evaluate(self, app, db_session, monkeypatch):
-        """维护中（is_maintenance，machine_status 仍 ONLINE）：同样跳过。"""
+    def test_maintenance_machine_skips_evaluate(self, app, db_session, monkeypatch, caplog):
+        """维护中（is_maintenance，machine_status 仍 ONLINE）：同样跳过，且不留日志。"""
+        import logging
+
         machine, container = self._reachable_long_term(db_session, monkeypatch)
         machine.is_maintenance = True
         db_session.commit()
@@ -517,9 +527,11 @@ class TestEvaluateLimitsMachineGate:
                             lambda c, u, a: calls.append(c.id))
 
         usage = _usage_exceeding_hard_limit()
-        container_disk_check_task._evaluate_limits(container, usage)
+        with caplog.at_level(logging.DEBUG, logger=container_disk_check_task.__name__):
+            container_disk_check_task._evaluate_limits(container, usage)
 
         assert calls == []
+        assert [r for r in caplog.records if "disk-check" in r.getMessage()] == []
 
 
 # ---------------------------------------------------------------------------
