@@ -20,6 +20,14 @@ PINNED_CERTS_DIR = os.getenv(
 def _pin_file(machine_ip: str) -> Path:
     return Path(PINNED_CERTS_DIR) / f"{machine_ip}.pem"
 
+
+# 节点是局域网端点：环境里的 http_proxy/https_proxy 不该介入 Ctrl → Node 的出站。
+# 代理一旦生效，requests 会改走 ProxyManager，`_PinnedNodeAdapter` 钉在 poolmanager 上的
+# ssl_context/assert_hostname 全被绕过、cert_verify 又把 ca_certs 退回 certifi —— pin 就此
+# 失效，而报错仍是 `self-signed certificate`（证书与 pin 其实一字不差，诊断会说"指纹一致"）。
+# 必须把 scheme 键显式置 None：**只传空字典挡不住环境代理**（requests 用 setdefault 合并）。
+_DIRECT_PROXIES = {"http": None, "https": None}
+
 def _resolve_tls(url: str, cert=None, verify=None):
     """解析 send 的 TLS 参数。
 
@@ -154,6 +162,17 @@ class _PinnedNodeAdapter(HTTPAdapter):
         kwargs["assert_hostname"] = False
         return super().init_poolmanager(*args, **kwargs)
 
+    def cert_verify(self, conn, url, verify, cert):
+        """本适配器自己就是 TLS 策略，不让 requests 再往连接上写信任锚。
+
+        requests 的默认实现在 verify 为真时把 ca_certs 设成 certifi 公共 CA 包，urllib3 随后
+        （ssl_wrap_socket）把它 load 进本适配器已装好 pin 的 context——信任锚于是变成
+        「pin ∪ 122 张公共 CA」。而本适配器**关掉了 hostname 校验**，公共 CA 那条路没有任何
+        名字约束：任何一张公共 CA 签发的证书都能冒充该 Node，pin 就不再是唯一信任锚了。
+        客户端证书不在此处补：`_urllib3_request_context` 已把它作为请求级 pool_kwargs 的
+        cert_file/key_file 交给连接池，建连接时自然带上（见本模块的防代理用例）。
+        """
+
 
 def _post_node_json(url: str, payload: dict, timeout: float, cert, verify):
     # verify 是 pin 文件路径时（已接入的机器）走自定义适配器；False 时（尚未 pin 的
@@ -162,10 +181,11 @@ def _post_node_json(url: str, payload: dict, timeout: float, cert, verify):
         session = requests.Session()
         session.mount("https://", _PinnedNodeAdapter(verify))
         try:
-            return session.post(url, json=payload, timeout=timeout, cert=cert)
+            return session.post(url, json=payload, timeout=timeout, cert=cert, proxies=_DIRECT_PROXIES)
         finally:
             session.close()
-    return requests.post(url, json=payload, timeout=timeout, cert=cert, verify=verify)
+    return requests.post(url, json=payload, timeout=timeout, cert=cert, verify=verify,
+                         proxies=_DIRECT_PROXIES)
 
 
 def _decode_node_response(response) -> dict:

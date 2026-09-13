@@ -161,6 +161,33 @@ def test_pinned_adapter_verifies_chain_but_not_hostname(monkeypatch, tmp_path):
     assert kw["assert_hostname"] is False, "urllib3 v2 的独立匹配也必须关掉"
 
 
+def test_pinned_adapter_keeps_requests_from_injecting_public_cas(monkeypatch, tmp_path):
+    """pin 必须是唯一信任锚：requests 的 cert_verify 不得把 certifi 灌进连接的信任锚。
+
+    requests 默认在 verify 为真时把 ca_certs 写成 certifi 公共 CA 包，urllib3 随后
+    （ssl_wrap_socket）把它 load 进本适配器装好 pin 的 context——信任锚于是变成
+    「pin ∪ 122 张公共 CA」。而本适配器关了 hostname 校验，公共 CA 那条路毫无名字约束：
+    任何一张公共 CA 签发的证书都能冒充该 Node，pin 就不再是唯一信任锚了。
+    """
+    from ...services.container_module.node_comms_modules import transport
+
+    pin = tmp_path / "10.0.0.7.pem"
+    pin.write_bytes(b"pinned node certificate")
+    _recording_pinned_context(monkeypatch, transport, {})
+
+    class _Conn:
+        cert_reqs = None
+        ca_certs = None
+        ca_cert_dir = None
+
+    conn = _Conn()
+    transport._PinnedNodeAdapter(str(pin)).cert_verify(conn, "https://10.0.0.7/api/x", True, None)
+
+    assert conn.ca_certs is None, "pin 之外不得再挂公共 CA 信任锚"
+    assert conn.ca_cert_dir is None
+    assert conn.cert_reqs is None, "cert_reqs 由请求级 pool_kwargs 决定，不在这里覆写"
+
+
 def test_post_node_json_uses_pinned_adapter_only_when_pin_present(monkeypatch, tmp_path):
     """有 pin 走自定义适配器；无 pin（TOFU 过渡态）保持原生 requests 行为。"""
     from ...services.container_module.node_comms_modules import transport
@@ -189,6 +216,70 @@ def test_post_node_json_uses_pinned_adapter_only_when_pin_present(monkeypatch, t
     assert transport._post_node_json("https://10.0.0.7/api/x", {}, 1.0, None, False) == "via-plain"
     assert plain == ["https://10.0.0.7/api/x"], "无 pin 时不该走适配器"
     assert len(mounted) == 1
+
+
+def test_post_node_json_never_uses_environment_proxy(monkeypatch, tmp_path):
+    """两条分支都必须显式绕开环境代理——节点是局域网端点，代理一接管 pin 就形同虚设。
+
+    代理生效时 requests 走 ProxyManager 而非适配器的 poolmanager：钉在 poolmanager 上的
+    ssl_context/assert_hostname 全被绕过，requests 又按 verify=True 把 ca_certs 兜底成
+    certifi，于是对端自签证书被拿公共 CA 校验（报 `self-signed certificate`，而证书与 pin
+    其实一字不差）。scheme 键必须显式置 None：**空字典挡不住**（requests 用 setdefault 合并）。
+    """
+    from ...services.container_module.node_comms_modules import transport
+
+    pin = tmp_path / "10.0.0.7.pem"
+    pin.write_bytes(b"pinned node certificate")
+    _recording_pinned_context(monkeypatch, transport, {})
+    seen = {}
+
+    class _Session:
+        def mount(self, prefix, adapter):
+            pass
+
+        def post(self, url, **kwargs):
+            seen["pinned"] = kwargs
+            return "via-session"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(transport.requests, "Session", _Session)
+    monkeypatch.setattr(
+        transport.requests, "post", lambda url, **kw: seen.setdefault("plain", kw) or "via-plain",
+    )
+
+    transport._post_node_json("https://10.0.0.7/api/x", {}, 1.0, None, str(pin))
+    transport._post_node_json("https://10.0.0.7/api/x", {}, 1.0, None, False)
+
+    direct = {"http": None, "https": None}
+    assert seen["pinned"]["proxies"] == direct, "带 pin 的分支也必须直连"
+    assert seen["plain"]["proxies"] == direct, "TOFU 分支同样不许走环境代理"
+
+
+def test_runtime_buffer_push_never_uses_environment_proxy(monkeypatch):
+    """WSS 子进程 → API 主进程的回环推送同样必须直连。
+
+    它打的是 127.0.0.1，而 requests 在没有 no_proxy 时并不 bypass 回环——代理把 CONNECT 到
+    私网/回环的请求直接重置，运行态帧就全丢了（主进程的运行态缓存只由这一跳喂，没有第二条路）。
+    """
+    from ...services.container_module.node_comms_modules import runtime_push
+
+    captured = {}
+
+    class _Response:
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(runtime_push, "_read_internal_token", lambda: "t")
+    monkeypatch.setattr(
+        runtime_push.requests, "post",
+        lambda url, **kw: captured.update(kw, url=url) or _Response(),
+    )
+
+    assert runtime_push._post_runtime_buffer("machines", {"machine_id": 7, "snapshot": {}}) is True
+    assert captured["proxies"] == {"http": None, "https": None}
+    assert captured["url"].startswith("https://127.0.0.1:") or captured["url"].startswith("http://127.0.0.1:")
 
 
 ############################################################
@@ -643,7 +734,12 @@ def test_run_machine_link_marks_online_on_connect_offline_on_close(monkeypatch):
         async def __aexit__(self, *exc):
             return False
 
-    monkeypatch.setattr(websockets, "connect", lambda url, ssl=None: _Connection())
+    def _fake_connect(url, ssl=None, proxy=None):
+        # 链路必须直连：环境里的 http_proxy/https_proxy 不该介入（websockets ≥15 默认 proxy=True）
+        assert proxy is None, f"link must dial directly, got proxy={proxy!r}"
+        return _Connection()
+
+    monkeypatch.setattr(websockets, "connect", _fake_connect)
     monkeypatch.setattr(link, "build_link_ssl_context", lambda host: object())
     monkeypatch.setattr(link, "Update_machine", lambda machine_id, **fields: statuses.append(fields["machine_status"]))
 
