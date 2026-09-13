@@ -70,6 +70,13 @@ REASON_STATUS_MAP = {
     "container_host_maintenance": 503,
     "container_status_unknown": 409,
     "node_endpoint_not_found": 502,
+    # 机器准入族（machine_access._ensure_machine_online_for_operation）。
+    # 创建路径**没有容器**、派生不出有效状态，所以撞的是这一族，而不是 container_host_*；
+    # 漏映射会让"维护中/离线/机器不存在"都落到 500，用户看到「服务器出现错误」而不是
+    # 「机器正在维护中」——动作类路径（start/stop/remove）由有效状态机先拦，不受影响。
+    "machine_maintenance": 503,
+    "machine_offline": 503,
+    "machine_not_found": 404,
     "container_not_found": 404,
     "machine_permission_denied": 403,
     "container_permission_denied": 403,

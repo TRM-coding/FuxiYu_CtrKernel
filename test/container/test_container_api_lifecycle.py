@@ -1,9 +1,10 @@
 from sqlalchemy.exc import IntegrityError
-from ...constant import ImageStatus
+from ...constant import ImageStatus, MachineStatus
 from ...extensions import SessionRegistry
 from ...api import container_api, deps
 from ...models.image import Image
 from ...services import container_tasks
+from ..factories import create_machine
 
 
 def _auth(monkeypatch, *, valid=True, user_id=1):
@@ -273,3 +274,50 @@ def test_start_stop_restart_api_success(client, monkeypatch):
     for endpoint in ("start_container", "stop_container", "restart_container"):
         resp = client.post(f"/api/containers/{endpoint}", json={"container_id": 1} )
         assert resp.status_code == 200
+
+
+############################################################
+# 机器准入族的 reason → 状态码（创建路径独有的一族）
+############################################################
+
+def _create_payload(machine_id):
+    return {
+        "machine_id": machine_id,
+        "container": {"CPU_NUMBER": 1, "MEMORY": 1, "NAME": "c", "image": "i"},
+    }
+
+
+def test_create_container_api_maps_maintenance_to_503(client, monkeypatch, db_session):
+    """维护中的机器：动作被拦（既有），且**回 503 而非 500**。
+
+    创建路径没有容器、派生不出有效状态，撞的是**机器准入族**
+    （machine_access._ensure_machine_online_for_operation 的 machine_maintenance），
+    与动作类路径的 container_host_maintenance 不是同一个 reason——后者在映射表里，
+    前者曾经没有，于是维护中创建容器会回 500，用户看到「服务器出现错误」。
+    """
+    _auth(monkeypatch)
+    machine = create_machine(machine_name="api_maint", is_maintenance=True)
+
+    resp = client.post("/api/containers/create_container", json=_create_payload(machine.id))
+
+    assert resp.status_code == 503
+    assert resp.json()["error_reason"] == "machine_maintenance"
+
+
+def test_create_container_api_maps_offline_to_503(client, monkeypatch, db_session):
+    _auth(monkeypatch)
+    machine = create_machine(machine_name="api_offline", machine_status=MachineStatus.OFFLINE)
+
+    resp = client.post("/api/containers/create_container", json=_create_payload(machine.id))
+
+    assert resp.status_code == 503
+    assert resp.json()["error_reason"] == "machine_offline"
+
+
+def test_create_container_api_maps_missing_machine_to_404(client, monkeypatch, db_session):
+    _auth(monkeypatch)
+
+    resp = client.post("/api/containers/create_container", json=_create_payload(999999))
+
+    assert resp.status_code == 404
+    assert resp.json()["error_reason"] == "machine_not_found"
