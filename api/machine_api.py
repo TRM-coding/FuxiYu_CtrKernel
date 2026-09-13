@@ -37,14 +37,14 @@ from .deps import require_current_user, require_operator, require_permission, re
 router = APIRouter(prefix="/machines", tags=["machines"])
 
 
-def _model_data(model, *, exclude_none: bool = False) -> dict[str, Any]:
+def _model_data(model, *, exclude_none: bool = False, exclude_unset: bool = False) -> dict[str, Any]:
     """兼容 Pydantic v1/v2 的模型转 dict。"""
 
     if hasattr(model, "model_dump"):
-        return model.model_dump(exclude_none=exclude_none)
+        return model.model_dump(exclude_none=exclude_none, exclude_unset=exclude_unset)
     if hasattr(model, "dict"):
         try:
-            return model.dict(exclude_none=exclude_none)
+            return model.dict(exclude_none=exclude_none, exclude_unset=exclude_unset)
         except TypeError:
             return model.dict()
     if isinstance(model, dict):
@@ -81,6 +81,7 @@ def register_machine_api(
             message.machine_name,
             message.machine_ip,
             message.machine_description,
+            port=message.port,
         )
     except Exception as e:
         err_reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
@@ -147,7 +148,10 @@ def update_machine_api(
 ):
     """更新机器管理字段或资源分配限制。"""
 
-    fields = _model_data(message.fields, exclude_none=True)
+    # exclude_unset 而非 exclude_none：要能分辨「客户端显式传了 null」与「没传这个字段」。
+    # 前者是「清空该字段」（目前只有 port 需要，清空即回落全局默认），后者是「别动它」。
+    # 其余字段传 null 也无害——仓库层对 None 一律跳过，只有 nullable_clear_fields 例外。
+    fields = _model_data(message.fields, exclude_unset=True)
     try:
         success = machine_service.Update_machine(
             machine_id=message.machine_id,

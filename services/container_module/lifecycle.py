@@ -8,6 +8,7 @@ from ..operation_log_tasks import log_success
 from .exceptions import NodeServiceError, _raise_on_node_error
 from . import node_comms
 from .node_comms import _ensure_machine_online_for_operation, get_full_url
+from .node_comms_modules.endpoint import resolve_endpoint
 from .operation_guard import ensure_container_operation_allowed
 from .pydantic_models import _derive_effective_status
 from .utils import _container_log_detail
@@ -22,17 +23,18 @@ logger = logging.getLogger(__name__)
 ####################################################
 
 def _load_container_target(container_id: int):
-    """读容器与所在机器 IP；不存在或未绑机器一律 ValueError（api 层按 404/422 处理）。"""
+    """读容器与所在机器端点 (container, host, port)；不存在或未绑机器一律 ValueError（api 层按 404/422 处理）。"""
     with session_scope(commit=False) as session:
         machine_id = containers_repo.get_machine_id_by_container_id(container_id, session=session)
     if not machine_id:
         raise ValueError("Container not found or not associated with any machine")
     with session_scope(commit=False) as session:
-        machine_ip = machine_repo.get_machine_ip_by_id(machine_id, session=session)
+        machine_ip, machine_port = machine_repo.get_machine_endpoint_by_id(machine_id, session=session)
         container = containers_repo.get_by_id(container_id, session=session)
     if not container:
         raise ValueError("Container not found")
-    return container, machine_ip
+    host, port = resolve_endpoint(machine_ip, machine_port)
+    return container, host, port
 
 
 def _ensure_container_action(container, action: str, *, require_online: bool = False) -> None:
@@ -44,10 +46,10 @@ def _ensure_container_action(container, action: str, *, require_online: bool = F
     _ensure_machine_online_for_operation(container.machine_id, action)
 
 
-def _request_lifecycle_action(machine_ip: str, container_name: str, action: str) -> None:
+def _request_lifecycle_action(host: str, port: int, container_name: str, action: str) -> None:
     """网络出口：POST /{action}_container；Node 报错或非 success 一律上抛。"""
     response = node_comms.send(
-        get_full_url(machine_ip, f"/{action}_container"),
+        get_full_url(host, f"/{action}_container", port),
         {"config": {"container_name": container_name}},
     )
     logger.debug("%s_container: NODE response: %s", action, response)

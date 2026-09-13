@@ -37,7 +37,6 @@ def test_config_reads_deployment_env_overrides(monkeypatch):
     assert config.NetConfig.CTRL_PORT == 5100
     assert config.NetConfig.WEB_PORT == 5273
     assert config.CommsConfig.NODE_PORT == 6789
-    assert config.CommsConfig.NODE_URL_MIDDLE == ":6789/api"
     assert config.AppConfig.SSL_ENABLED is False
     assert config.AppConfig.SSL_CERT_PATH == "certs/custom-ctrl.pem"
     assert config.AppConfig.SSL_KEY_PATH == "certs/custom-ctrl-key.pem"

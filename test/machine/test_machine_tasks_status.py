@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from ...config import CommsConfig
 from ...constant import ContainerStatus, MachineStatus, MachineTypes
 from ...models.containers import Container
 from ...models.machine import Machine
@@ -312,7 +313,7 @@ def test_consume_link_read_timeout_closes_socket(monkeypatch, db_session):
     machine = create_machine(machine_status=MachineStatus.ONLINE)
     with session_scope() as session:
         machine_repo.update_machine(machine.id, node_uid=uid, session=session)
-    monkeypatch.setattr(node_comms.CommsConfig, "WSS_READ_TIMEOUT", 0.01)
+    monkeypatch.setattr(CommsConfig, "WSS_READ_TIMEOUT", 0.01)
 
     class _HangingWebSocket(_ClosingWebSocket):
         async def recv(self):

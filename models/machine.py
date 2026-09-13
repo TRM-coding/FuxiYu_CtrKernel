@@ -8,6 +8,10 @@ class Machine(db.Model):
     id: int = db.Column(db.Integer, primary_key=True)
     machine_name: str = db.Column(db.String(120), unique=True, nullable=False, index=True)
     machine_ip: str = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    # 该宿主机上 Node 的监听端口。留空回落全局 CommsConfig.NODE_PORT，由
+    # node_comms_modules.endpoint 统一解析——写入时不固化默认值，否则日后调整
+    # 全局默认对既有机器会静默失效。machine_ip 仍是纯 IPv4，不承载端口。
+    port: int | None = db.Column(db.Integer, nullable=True)
     machine_type: MachineTypes = db.Column(db.Enum(MachineTypes), nullable=False)
     machine_status: MachineStatus = db.Column(
     db.Enum(MachineStatus, values_callable=lambda obj: [e.value for e in obj]),

@@ -14,6 +14,7 @@ from .operation_log_tasks import log_failure, log_result, log_success
 from ..constant import MachineStatus, OperationType
 from ..models.machine import Machine
 from .container_module.exceptions import NodeServiceError
+from .container_module.node_comms_modules.endpoint import machine_endpoint
 from .container_module.node_comms_modules.enrollment import (
     _default_resource_limits,
     _fetch_enrollment_profile,
@@ -42,6 +43,8 @@ class machine_bref_information(BaseModel):
 class machine_detail_information(BaseModel):
     machine_name:str
     machine_ip:str
+    # 该宿主机上 Node 的监听端口；None 表示用全局默认
+    port: Optional[int] = None
     machine_type:str
     machine_status:str
     is_maintenance: bool = False
@@ -298,30 +301,43 @@ def machine_in_scope(machine_id: int | None) -> bool:
 # 注册机器（TOFU 接入并建档）
 def Register_machine(
     machine_name: str, machine_ip: str, machine_description: str = "", timeout: float = 8.0,
+    port: int | None = None,
 ) -> dict:
     """Enroll a Node from the administrator's trust anchor, then persist its record.
 
     建档即完成接入：机器行落库后，链路进程的下一轮集合对齐会自行拨通它，
     注册流程不再需要任何重载动作。
+
+    port 留空表示该机器用全局默认端口（不把默认值固化进记录）。
     """
     from .container_module.node_comms import get_full_url
+    from .container_module.node_comms_modules.endpoint import bare_host, resolve_port
+    from .container_module.node_comms_modules.enrollment import _validate_node_port
 
     _validate_trust_anchor(machine_name, machine_ip)
+    node_port = _validate_node_port(port)
+    host = bare_host(machine_ip)
+    endpoint_port = resolve_port(node_port)
     client_cert = _get_enrollment_client_cert()
     try:
-        fingerprint, cert_der = _fetch_peer_cert(machine_ip, timeout=timeout)
+        fingerprint, cert_der = _fetch_peer_cert(host, endpoint_port, timeout=timeout)
     except Exception as exc:
         raise NodeServiceError(
             f"register_machine failed: cannot reach {machine_ip} over TLS: {exc}", reason="machine_unreachable",
         ) from exc
     hardware = _request_enrollment_profile(
-        get_full_url(machine_ip, "/node_identity/enrollment_profile"), machine_ip, client_cert, timeout,
+        get_full_url(host, "/node_identity/enrollment_profile", endpoint_port),
+        machine_ip, client_cert, timeout,
     )
     uid = secrets.token_urlsafe(24)
-    _issue_node_uid(get_full_url(machine_ip, "/node_identity/issue_uid"), machine_ip, uid, client_cert, timeout)
+    _issue_node_uid(
+        get_full_url(host, "/node_identity/issue_uid", endpoint_port),
+        machine_ip, uid, client_cert, timeout,
+    )
     _persist_peer_pin(machine_ip, cert_der)
     machine_id = _persist_enrolled_machine(
         machine_name, machine_ip, machine_description, _default_resource_limits(hardware), uid, fingerprint,
+        port=node_port,
     )
     logger.info(
         "machine %s (%s) enrolled: id=%s uid=%s fingerprint=%s hardware=%s",
@@ -371,6 +387,7 @@ def Renew_machine_trust(machine_id: int, operator_user_id: int | None = None, ti
             )
         machine_name = machine.machine_name
         machine_ip = machine.machine_ip
+        host, endpoint_port = machine_endpoint(machine)
         previous_fingerprint = machine.node_cert_fingerprint
         previous_uid = machine.node_uid
 
@@ -394,13 +411,13 @@ def Renew_machine_trust(machine_id: int, operator_user_id: int | None = None, ti
     # ── 阶段一：取齐全部对端证据。任何一步失败都在改动本地状态之前退出 ──
     client_cert = _get_enrollment_client_cert()
     try:
-        fingerprint, cert_der = _fetch_peer_cert(machine_ip, timeout=timeout)
+        fingerprint, cert_der = _fetch_peer_cert(host, endpoint_port, timeout=timeout)
     except Exception as exc:
         _fail("machine_unreachable", f"renew_machine_trust failed: cannot reach {machine_ip} over TLS: {exc}")
 
     try:
         profile = _fetch_enrollment_profile(
-            get_full_url(machine_ip, "/node_identity/enrollment_profile"),
+            get_full_url(host, "/node_identity/enrollment_profile", endpoint_port),
             machine_ip, client_cert, timeout, context="renew_machine_trust",
         )
     except Exception as exc:
@@ -418,7 +435,7 @@ def Renew_machine_trust(machine_id: int, operator_user_id: int | None = None, ti
         new_uid = secrets.token_urlsafe(24)
         try:
             _issue_node_uid(
-                get_full_url(machine_ip, "/node_identity/issue_uid"),
+                get_full_url(host, "/node_identity/issue_uid", endpoint_port),
                 machine_ip, new_uid, client_cert, timeout,
             )
         except Exception as exc:
@@ -577,32 +594,18 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
     if 'disk_size' in fields:
         fields['disk_size_gb'] = fields.pop('disk_size')
 
-    # IP 变更自愈（2026-09）：新 IP 首连 + 证书指纹比对——同一证书换 IP → 自动导出新 pin；
-    # 指纹不匹配（证书也换了）→ 拒绝，防机器记录被劫持到攻击者机器。
-    new_ip = str(fields.get('machine_ip') or '').strip() if fields.get('machine_ip') is not None else None
-    if new_ip and new_ip != getattr(machine, 'machine_ip', None):
-        from ..utils.cert_utils import der_cert_to_pem
-        from .container_module.node_comms import _fetch_peer_cert, _pin_file
-
-        try:
-            fingerprint, cert_der = _fetch_peer_cert(new_ip)
-        except Exception as e:
-            err = ValueError(f"machine_ip change failed: cannot reach {new_ip} over TLS: {e}")
-            setattr(err, 'error_reason', 'ip_change_unreachable')
+    # 端点（machine_ip / port）是**纯登记**：只写记录，不在这里做出站取证或信任判定。
+    # 可达性不是登记的前置条件——「要改地址」的场景往往正是那个端点当前不通的时候。
+    # 登记之后「拨得通吗」由链路进程负责，「对面是不是它」由对端 Node 校验 uid 负责。
+    # 主机地址保持纯 IPv4，端口走独立字段：拒绝 `host:port` 的隐式写法。
+    if fields.get('machine_ip') is not None:
+        new_ip = str(fields.get('machine_ip') or '').strip()
+        if ':' in new_ip:
+            err = ValueError(
+                f"machine_ip must be a bare address without a port, got {new_ip!r}; pass the port separately"
+            )
+            setattr(err, 'error_reason', 'invalid_machine_ip')
             raise err
-        expected = getattr(machine, 'node_cert_fingerprint', None)
-        if not expected or fingerprint != expected:
-            err = ValueError(f"machine_ip change refused: {new_ip} presents a different certificate (re-register instead)")
-            setattr(err, 'error_reason', 'ip_change_fingerprint_mismatch')
-            raise err
-        # 同一证书换 IP → 导出新 pin（Ctrl→Node 链路按 IP 取信任锚）；
-        # 链路进程下一轮集合对齐会按新 IP 重拨，无需重载任何服务端上下文。
-        try:
-            pin_path = _pin_file(new_ip)
-            pin_path.parent.mkdir(parents=True, exist_ok=True)
-            pin_path.write_bytes(der_cert_to_pem(cert_der))
-        except Exception as e:  # pragma: no cover
-            print(f"[machine-ip-change] pin export failed for {new_ip}: {e}")
         fields['machine_ip'] = new_ip
     if str(fields.get('machine_status', '')).lower() == "maintenance":
         raise ValueError("machine_status no longer accepts maintenance; use is_maintenance")
@@ -687,6 +690,7 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
         return machine_detail_information(
             machine_name=machine.machine_name,
             machine_ip=machine.machine_ip,
+            port=getattr(machine, "port", None),
             machine_type=machine.machine_type.value,
             machine_status=_machine_status_value(machine),
             is_maintenance=bool(getattr(machine, "is_maintenance", False)),
@@ -758,6 +762,7 @@ def List_all_machine_bref_information(
             id=machine.id,
             machine_name=machine.machine_name,
             machine_ip=machine.machine_ip,
+            port=getattr(machine, "port", None),
             machine_type=machine.machine_type.value,
             machine_status=_machine_status_value(machine),
             is_maintenance=bool(getattr(machine, "is_maintenance", False)),

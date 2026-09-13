@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from ...services.container_module.exceptions import NodeServiceError
 
 from ...api import machine_api, deps
@@ -42,8 +44,8 @@ def test_register_machine_success_calls_machine_task(client, monkeypatch):
     _auth(monkeypatch)
     calls = []
 
-    def register(name, ip, description):
-        calls.append((name, ip, description))
+    def register(name, ip, description, port=None):
+        calls.append((name, ip, description, port))
         return {"machine_id": 1, "uid": "node-uid", "certificate_fingerprint": "fingerprint", "hardware": {}}
 
     monkeypatch.setattr(machine_api.machine_service, "Register_machine", register)
@@ -54,13 +56,13 @@ def test_register_machine_success_calls_machine_task(client, monkeypatch):
     assert response.status_code == 200
     assert response.json()["machine_id"] == 1
     assert response.json()["uid"] == "node-uid"
-    assert calls == [("node", "10.0.0.1", "GPU host")]
+    assert calls == [("node", "10.0.0.1", "GPU host", None)]
 
 
 def test_register_machine_error_reason_returns_422(client, monkeypatch):
     _auth(monkeypatch)
 
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise NodeServiceError("unreachable", reason="machine_unreachable")
 
     monkeypatch.setattr(machine_api.machine_service, "Register_machine", fail)
@@ -117,6 +119,90 @@ def test_update_machine_success(client, monkeypatch):
     resp = client.post("/api/machines/update_machine", json={"machine_id": 1, "fields": {"machine_name": "new"}} )
 
     assert resp.status_code == 200
+
+
+def test_update_machine_forwards_port(client, monkeypatch):
+    _auth(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(
+        machine_api.machine_service, "Update_machine",
+        lambda machine_id, **fields: seen.update(fields) or True,
+    )
+
+    resp = client.post("/api/machines/update_machine", json={"machine_id": 1, "fields": {"port": 6789}})
+
+    assert resp.status_code == 200
+    assert seen.get("port") == 6789
+
+
+def test_update_machine_explicit_null_clears_port(client, monkeypatch):
+    """显式传 null ≠ 没传这个字段。
+
+    前者是「清空」（端口回落全局默认），后者是「别动它」。接口因此用 exclude_unset
+    取字段——若用 exclude_none，两者不可分辨，端口一旦设过就再也去不掉。
+    """
+    _auth(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(
+        machine_api.machine_service, "Update_machine",
+        lambda machine_id, **fields: seen.update(fields) or True,
+    )
+
+    resp = client.post("/api/machines/update_machine", json={"machine_id": 1, "fields": {"port": None}})
+
+    assert resp.status_code == 200
+    assert "port" in seen and seen["port"] is None
+
+
+def test_update_machine_omitted_port_is_untouched(client, monkeypatch):
+    """没传 port → 落到 Update_machine 的字段里根本没有它。"""
+    _auth(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(
+        machine_api.machine_service, "Update_machine",
+        lambda machine_id, **fields: seen.update(fields) or True,
+    )
+
+    resp = client.post("/api/machines/update_machine", json={"machine_id": 1, "fields": {"machine_name": "new"}})
+
+    assert resp.status_code == 200
+    assert "port" not in seen
+
+
+def test_register_machine_forwards_optional_port(client, monkeypatch):
+    _auth(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(
+        machine_api.machine_service, "Register_machine",
+        lambda name, ip, description, port=None: seen.update(port=port)
+        or {"machine_id": 1, "uid": "u", "certificate_fingerprint": "f", "hardware": {}},
+    )
+
+    resp = client.post(
+        "/api/machines/register_machine",
+        json={"machine_name": "node", "machine_ip": "10.0.0.1", "port": 6789},
+    )
+
+    assert resp.status_code == 200
+    assert seen.get("port") == 6789
+
+
+@pytest.mark.parametrize("bad_port", [0, 65536, -1])
+def test_register_machine_rejects_out_of_range_port(client, monkeypatch, bad_port):
+    _auth(monkeypatch)
+    called = []
+    monkeypatch.setattr(
+        machine_api.machine_service, "Register_machine",
+        lambda *a, **k: called.append(1) or {},
+    )
+
+    resp = client.post(
+        "/api/machines/register_machine",
+        json={"machine_name": "node", "machine_ip": "10.0.0.1", "port": bad_port},
+    )
+
+    assert resp.status_code == 400, "请求体校验失败由框架挡下（本项目用 400）"
+    assert called == [], "越界端口不该走到服务层"
 
 
 def test_update_machine_validation_error_returns_422(client, monkeypatch):

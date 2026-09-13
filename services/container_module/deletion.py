@@ -10,6 +10,7 @@ from .deleted_containers import record_deleted_container_artifacts
 from .exceptions import NodeServiceError, _raise_on_node_error
 from . import node_comms
 from .node_comms import get_full_url
+from .node_comms_modules.endpoint import resolve_endpoint
 from .utils import _container_log_detail
 
 logger = logging.getLogger(__name__)
@@ -37,9 +38,10 @@ def _load_removal_container(container_id: int):
 def _request_node_removal(container) -> None:
     """请求 Node 删容器。not_found（HTTP 404）视同成功：docker 已无残留，本地照删。"""
     with session_scope(commit=False) as session:
-        machine_ip = machine_repo.get_machine_ip_by_id(container.machine_id, session=session)
+        machine_ip, machine_port = machine_repo.get_machine_endpoint_by_id(container.machine_id, session=session)
+    host, port = resolve_endpoint(machine_ip, machine_port)
     response = node_comms.send(
-        get_full_url(machine_ip, "/remove_container"),
+        get_full_url(host, "/remove_container", port),
         {"config": {"container_name": container.name}},
     )
     logger.debug("remove_container: NODE response: %s", response)

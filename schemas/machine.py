@@ -42,11 +42,16 @@ class MachineAllocationLimit(BaseModel):
 
 
 class RegisterMachineByTrustAnchorRequest(BaseModel):
-    """管理员只填最小信任锚，由注册流程完成建档。"""
+    """管理员只填最小信任锚，由注册流程完成建档。
+
+    port 留空（不填或填 null）表示该机器用全局默认端口。不留默认端口号：写入时把
+    当时的默认值固化进记录，会让日后调整全局默认对这台机器静默失效。
+    """
 
     machine_name: str
     machine_ip: str
     machine_description: str = ""
+    port: int | None = Field(default=None, ge=1, le=65535)
 
 
 class RegisterMachineResponse(SuccessMessageResponse):
@@ -112,6 +117,9 @@ class MachineUpdateFields(BaseModel):
 
     machine_name: str | None = None
     machine_ip: str | None = None
+    # 该宿主机上 Node 的监听端口。显式传 null 表示清空（回落全局默认）——与「不传
+    # 这个字段」（保持不动）是两回事，故更新接口用 exclude_unset 取字段。
+    port: int | None = Field(default=None, ge=1, le=65535)
     machine_type: MachineType | None = None
     machine_status: MachineStatus | None = None
     is_maintenance: bool | None = None

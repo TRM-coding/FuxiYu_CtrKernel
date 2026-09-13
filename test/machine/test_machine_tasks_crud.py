@@ -21,7 +21,7 @@ def enrollment_transport(monkeypatch):
     hardware = {"cpu": {"cores": 16}, "memory": {"total_gb": 128}, "disk": {"total_gb": 512}, "gpu": [{"name": "A100"}]}
     monkeypatch.setattr(enrollment, "DEFAULT_RESOURCE_RATIO", 0.5)
     monkeypatch.setattr(machine_tasks, "_get_enrollment_client_cert", lambda: None)
-    monkeypatch.setattr(machine_tasks, "_fetch_peer_cert", lambda ip, timeout: ("fingerprint", b"certificate"))
+    monkeypatch.setattr(machine_tasks, "_fetch_peer_cert", lambda host, port, timeout: ("fingerprint", b"certificate"))
     monkeypatch.setattr(machine_tasks, "_request_enrollment_profile", lambda *args: hardware)
     monkeypatch.setattr(machine_tasks, "_issue_node_uid", lambda *args: None)
     monkeypatch.setattr(machine_tasks, "_persist_peer_pin", lambda *args: None)
@@ -95,7 +95,7 @@ def renew_transport(monkeypatch):
         "unreachable": False,
     }
 
-    def _fetch_peer_cert(machine_ip, timeout=8.0):
+    def _fetch_peer_cert(host, port, timeout=8.0):
         if state["unreachable"]:
             raise OSError("connect refused")
         return state["fingerprint"], state["cert_der"]
@@ -304,44 +304,63 @@ def test_remove_machine_refused_when_machine_has_containers(db_session):
     assert result["blocked"] == []
 
 
-def test_update_machine_ip_change_repins_same_certificate(monkeypatch, db_session):
-    """IP 变更自愈（2026-09）：新 IP 证书指纹与记录一致 → 自动导出新 pin。"""
-    from pathlib import Path
+def test_update_machine_ip_change_is_pure_registration(monkeypatch, db_session):
+    """改地址只写记录，不发出站连接、不动 pin。
 
+    2026-09 曾在此做「新址首连 → 指纹比对 → 相符则导出新 pin」的自愈。那次反转的理由：
+    可达性是连接期的事实，不该成为登记的前置条件——要改地址的场景往往正是端点不通的时候。
+    身份判据落在对端（Node 校验链路携带的 uid），不靠 Ctrl 在写记录时判定。
+    """
     from ...services.container_module import node_comms
 
     machine = create_machine(machine_name="ip_change", machine_ip="10.0.0.1")
     machine.node_cert_fingerprint = "fp-same"
     db_session.commit()
-    pin_dir = Path(comms_transport.PINNED_CERTS_DIR)
-    pin_dir.mkdir(parents=True, exist_ok=True)
 
-    from ...utils import cert_utils
+    def _must_not_be_called(*args, **kwargs):
+        raise AssertionError("登记路径不得发出站取证")
 
-    monkeypatch.setattr(node_comms, "_fetch_peer_cert", lambda ip, timeout=5.0: ("fp-same", b"cert-der-bytes"))
-    monkeypatch.setattr(node_comms, "_pin_file", lambda ip: pin_dir / f"mocked_{ip}.pem")
-    monkeypatch.setattr(cert_utils, "der_cert_to_pem", lambda der: b"pem-" + der)
+    monkeypatch.setattr(node_comms, "_fetch_peer_cert", _must_not_be_called)
 
     assert machine_tasks.Update_machine(machine.id, machine_ip="10.0.0.99") is True
 
     db_session.expire_all()
     assert db_session.get(Machine, machine.id).machine_ip == "10.0.0.99"
-    assert (pin_dir / "mocked_10.0.0.99.pem").read_bytes() == b"pem-cert-der-bytes"
 
 
-def test_update_machine_ip_change_refused_on_fingerprint_mismatch(monkeypatch, db_session):
-    """换 IP 且证书指纹不一致 → 拒绝（防劫持），机器记录不变。"""
-    from ...services.container_module import node_comms
-
-    machine = create_machine(machine_name="ip_hijack", machine_ip="10.0.0.1")
-    machine.node_cert_fingerprint = "fp-original"
+def test_update_machine_ip_change_succeeds_while_new_address_unreachable(monkeypatch, db_session):
+    """新地址当前不可达也能登记成功——可达性不是登记的前置条件。"""
+    machine = create_machine(machine_name="ip_down", machine_ip="10.0.0.1")
     db_session.commit()
 
-    monkeypatch.setattr(node_comms, "_fetch_peer_cert", lambda ip, timeout=5.0: ("fp-attacker", b"x"))
+    assert machine_tasks.Update_machine(machine.id, machine_ip="10.0.0.200") is True
+
+    db_session.expire_all()
+    assert db_session.get(Machine, machine.id).machine_ip == "10.0.0.200"
+
+
+def test_update_machine_rejects_address_carrying_port(db_session):
+    """主机地址保持纯 IPv4：端口走独立字段，拒绝 `host:port` 的隐式写法。"""
+    machine = create_machine(machine_name="ip_with_port", machine_ip="10.0.0.1")
+    db_session.commit()
 
     with pytest.raises(ValueError) as excinfo:
-        machine_tasks.Update_machine(machine.id, machine_ip="10.0.0.99")
+        machine_tasks.Update_machine(machine.id, machine_ip="10.0.0.99:6789")
 
-    assert getattr(excinfo.value, "error_reason") == "ip_change_fingerprint_mismatch"
+    assert getattr(excinfo.value, "error_reason") == "invalid_machine_ip"
     db_session.expire_all()
     assert db_session.get(Machine, machine.id).machine_ip == "10.0.0.1"
+
+
+def test_update_machine_accepts_port_and_can_clear_it(db_session):
+    """端口可设可清：清空即回到「回落全局默认」。"""
+    machine = create_machine(machine_name="port_edit", machine_ip="10.0.0.1")
+    db_session.commit()
+
+    assert machine_tasks.Update_machine(machine.id, port=6789) is True
+    db_session.expire_all()
+    assert db_session.get(Machine, machine.id).port == 6789
+
+    assert machine_tasks.Update_machine(machine.id, port=None) is True
+    db_session.expire_all()
+    assert db_session.get(Machine, machine.id).port is None

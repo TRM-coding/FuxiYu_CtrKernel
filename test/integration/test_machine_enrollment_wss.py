@@ -165,7 +165,6 @@ def test_register_machine_builds_record_and_pin(app, tmp_path, monkeypatch):
     monkeypatch.setenv("CTRL_CERTS_DIR", str(ctrl_certs_dir))
     monkeypatch.setattr(transport, "PINNED_CERTS_DIR", str(pin_dir))
     monkeypatch.setattr(CommsConfig, "NODE_PORT", port)
-    monkeypatch.setattr(CommsConfig, "NODE_URL_MIDDLE", f":{port}/api")
     ctrl_certs = ensure_ctrl_certificates()
 
     with _node_https_server(tmp_path, port, ctrl_certs.ca_cert):
@@ -191,7 +190,7 @@ def test_register_machine_builds_record_and_pin(app, tmp_path, monkeypatch):
             assert machine.cert_pinned_at is not None
 
         status = node_comms.send(
-            node_comms.get_full_url("127.0.0.1", "/machine_status"),
+            node_comms.get_full_url("127.0.0.1", "/machine_status", CommsConfig.NODE_PORT),
             {"config": {}},
             timeout=5.0,
         )

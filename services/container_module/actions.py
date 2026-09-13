@@ -11,6 +11,7 @@ from .exceptions import _raise_on_node_error
 from .lifecycle import _ensure_container_action
 from . import node_comms
 from .node_comms import get_full_url
+from .node_comms_modules.endpoint import resolve_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +63,9 @@ def _request_pause_action(container, action, operation, operator_user_id, extra_
     返回 False 只在"已留过失败审计"的分支——调用方无需再记账；异常分支仍上抛。
     """
     with session_scope(commit=False) as session:
-        machine_ip = machine_repo.get_machine_ip_by_id(container.machine_id, session=session)
-    url = get_full_url(machine_ip, "/pause_container")
+        machine_ip, machine_port = machine_repo.get_machine_endpoint_by_id(container.machine_id, session=session)
+    host, port = resolve_endpoint(machine_ip, machine_port)
+    url = get_full_url(host, "/pause_container", port)
     payload = {"config": {"container_name": container.name, "action": action}}
     try:
         response = node_comms.send(url, payload, timeout=10.0)

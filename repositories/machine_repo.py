@@ -34,6 +34,19 @@ def get_machine_ip_by_id(machine_id: int, *, session: Session) -> str:
     return machine.machine_ip
 
 
+def get_machine_endpoint_by_id(machine_id: int, *, session: Session) -> tuple[str, int | None]:
+    """机器端点原始值 (machine_ip, port)，供出站请求组装 URL。
+
+    port 可能为空 —— 空表示「回落全局默认」。回落与取裸 host 的策略由调用方经
+    `node_comms_modules.endpoint.resolve_endpoint` 完成：仓库层只读列，不做策略。
+    """
+
+    machine = get_by_id(machine_id, session=session)
+    if not machine:
+        raise ValueError(f"Machine with ID {machine_id} not found.")
+    return machine.machine_ip, getattr(machine, "port", None)
+
+
 def get_the_first_free_port(machine_id: int, *, session: Session) -> int:
     used_ports = set(
         session.scalars(
@@ -124,6 +137,7 @@ def update_machine(machine_id: int, *, session: Session, **fields) -> bool:
     allowed = {
         "machine_name",
         "machine_ip",
+        "port",
         "machine_type",
         "machine_status",
         "is_maintenance",
@@ -146,9 +160,12 @@ def update_machine(machine_id: int, *, session: Session, **fields) -> bool:
         "node_cert_fingerprint",
         "cert_pinned_at",
     }
+    # 默认可空字段不被 None 覆盖（None 视为「本次没传」）；列在这里的字段允许显式清空。
+    # port 必须在此：清空即回到「回落全局默认」，否则端口一旦设过就再也去不掉。
+    nullable_clear_fields = {"port"}
     dirty = False
     for key, value in fields.items():
-        if key not in allowed or value is None:
+        if key not in allowed or (value is None and key not in nullable_clear_fields):
             continue
         if getattr(machine, key, None) != value:
             setattr(machine, key, value)

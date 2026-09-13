@@ -45,9 +45,9 @@ def _build_collaborator_payload(container_name: str, user_name: str, *, role=Non
     return {"config": config}
 
 
-def _request_collaborator_action(machine_ip: str, action: str, payload: dict) -> None:
+def _request_collaborator_action(host: str, port: int, action: str, payload: dict) -> None:
     """网络出口：POST /{action}（add_collaborator / remove_collaborator / update_role）。"""
-    response = node_comms.send(get_full_url(machine_ip, f"/{action}"), payload)
+    response = node_comms.send(get_full_url(host, f"/{action}", port), payload)
     _raise_on_node_error(response, action)
     if response.get("success") not in (1, True):
         reason = {

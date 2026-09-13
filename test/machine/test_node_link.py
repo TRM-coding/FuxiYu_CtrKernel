@@ -19,16 +19,16 @@ from ..factories import create_machine
 def _recording_link(record):
     """可记录的链路替身：记下入参后长挂，直到被取消。"""
 
-    async def _run(machine_id, machine_ip, uid):
-        record.append((machine_id, machine_ip, uid))
+    async def _run(machine_id, host, port, uid):
+        record.append((machine_id, host, port, uid))
         await asyncio.sleep(3600)
 
     return _run
 
 
 def _cancel_all(tasks):
-    for task in tasks.values():
-        task.cancel()
+    for entry in tasks.values():
+        entry["task"].cancel()
 
 
 ############################################################
@@ -36,11 +36,17 @@ def _cancel_all(tasks):
 ############################################################
 
 def test_link_url_composes_node_snapshot_endpoint():
-    assert link.link_url("10.0.0.7", "uid-7") == "wss://10.0.0.7:5789/ws/ctrl?uid=uid-7"
+    assert link.link_url("10.0.0.7", 5789, "uid-7") == "wss://10.0.0.7:5789/ws/ctrl?uid=uid-7"
 
 
-def test_link_url_honours_explicit_port_in_machine_ip():
-    assert link.link_url("10.0.0.7:6789", "uid-7") == "wss://10.0.0.7:6789/ws/ctrl?uid=uid-7"
+def test_link_url_uses_given_port_exactly_once():
+    """端口来自端点解析结果，地址里只出现一个端口段。
+
+    曾经支持把端口写进 machine_ip（`host:port`）。那条隐式路径已废弃：地址是纯主机，
+    端口走独立字段，三条出站路径共用同一个解析。若有人把端口又塞回地址，这里会拼出
+    两个端口段——本用例就是那条回归线。
+    """
+    assert link.link_url("10.0.0.7", 6789, "uid-7") == "wss://10.0.0.7:6789/ws/ctrl?uid=uid-7"
 
 
 def test_build_link_ssl_context_without_pin_returns_none(monkeypatch, tmp_path):
@@ -96,8 +102,12 @@ def test_build_link_ssl_context_loads_ctrl_client_certificate(monkeypatch, tmp_p
     assert captured["client_cert"] == ("ctrl.pem", "ctrl-key.pem")
 
 
-def test_build_link_ssl_context_keys_pin_by_bare_host(monkeypatch, tmp_path):
-    """machine_ip 带端口时按裸主机取 pin——与操作通道 transport._resolve_tls 一致。"""
+def test_build_link_ssl_context_keys_pin_by_host(monkeypatch, tmp_path):
+    """按主机取 pin——与操作通道 transport._resolve_tls 的取法一致。
+
+    主机在端点解析时已剥掉端口，故这里按传入值取即可。pin 键与端口无关，
+    所以换端口不会使既有 pin 失效（无需重新建立信任）。
+    """
     seen = []
     pin = tmp_path / "10.0.0.7.pem"
     pin.write_bytes(b"pinned node certificate")
@@ -105,7 +115,7 @@ def test_build_link_ssl_context_keys_pin_by_bare_host(monkeypatch, tmp_path):
     monkeypatch.setattr(link, "_load_client_certificate", lambda: None)
     _recording_ssl_context(monkeypatch)
 
-    assert link.build_link_ssl_context("10.0.0.7:6789") is not None
+    assert link.build_link_ssl_context("10.0.0.7") is not None
     assert seen == ["10.0.0.7"]
 
 
@@ -123,8 +133,8 @@ def test_load_link_targets_includes_offline_machines(db_session):
     targets = link.load_link_targets()
 
     # OFFLINE 同样在清单内——这就是离线发现
-    assert targets[online.id] == (online.machine_ip, "uid-online")
-    assert targets[offline.id] == (offline.machine_ip, "uid-offline")
+    assert targets[online.id] == (online.machine_ip, 5789, "uid-online")
+    assert targets[offline.id] == (offline.machine_ip, 5789, "uid-offline")
 
 
 def test_load_link_targets_skips_machines_without_uid(db_session):
@@ -156,16 +166,16 @@ def test_load_link_targets_pages_through_whole_table(monkeypatch, db_session):
 def test_sync_links_starts_link_for_new_machine(monkeypatch):
     async def _main():
         started = []
-        monkeypatch.setattr(link, "load_link_targets", lambda: {7: ("10.0.0.7", "uid-7")})
+        monkeypatch.setattr(link, "load_link_targets", lambda: {7: ("10.0.0.7", 5789, "uid-7")})
         monkeypatch.setattr(link, "run_machine_link", _recording_link(started))
         tasks = {}
 
         link.sync_links(tasks)
         await asyncio.sleep(0.01)
 
-        assert started == [(7, "10.0.0.7", "uid-7")]
+        assert started == [(7, "10.0.0.7", 5789, "uid-7")]
         _cancel_all(tasks)
-        await asyncio.gather(*tasks.values(), return_exceptions=True)
+        await asyncio.gather(*(e["task"] for e in tasks.values()), return_exceptions=True)
 
     asyncio.run(_main())
 
@@ -175,33 +185,110 @@ def test_sync_links_keeps_live_links_untouched(monkeypatch):
 
     async def _main():
         started = []
-        monkeypatch.setattr(link, "load_link_targets", lambda: {7: ("10.0.0.7", "uid-7")})
+        monkeypatch.setattr(link, "load_link_targets", lambda: {7: ("10.0.0.7", 5789, "uid-7")})
         monkeypatch.setattr(link, "run_machine_link", _recording_link(started))
         tasks = {}
 
         link.sync_links(tasks)
         await asyncio.sleep(0.01)
-        first = tasks[7]
+        first = tasks[7]["task"]
         link.sync_links(tasks)
 
-        assert tasks[7] is first
+        assert tasks[7]["task"] is first
         assert len(started) == 1
         _cancel_all(tasks)
-        await asyncio.gather(*tasks.values(), return_exceptions=True)
+        await asyncio.gather(*(e["task"] for e in tasks.values()), return_exceptions=True)
+
+    asyncio.run(_main())
+
+
+def test_sync_links_restarts_link_when_port_changes(monkeypatch):
+    """端点变了必须重拨——否则活着的任务会一直拨旧端口，机器恒 OFFLINE 直到进程重启。
+
+    这条在改动前是坏的：对齐只按 machine_id 比对，改地址/端口/uid 都不会生效。
+    """
+
+    async def _main():
+        started = []
+        targets = {7: ("10.0.0.7", 5789, "uid-7")}
+        monkeypatch.setattr(link, "load_link_targets", lambda: dict(targets))
+        monkeypatch.setattr(link, "run_machine_link", _recording_link(started))
+        tasks = {}
+
+        link.sync_links(tasks)
+        await asyncio.sleep(0.01)
+        first = tasks[7]["task"]
+
+        targets[7] = ("10.0.0.7", 6789, "uid-7")  # 只换端口
+        link.sync_links(tasks)
+        await asyncio.sleep(0.01)
+
+        assert tasks[7]["task"] is not first, "端点变了应当重建链路"
+        assert started == [(7, "10.0.0.7", 5789, "uid-7"), (7, "10.0.0.7", 6789, "uid-7")]
+        _cancel_all(tasks)
+        await asyncio.gather(*(e["task"] for e in tasks.values()), return_exceptions=True)
+
+    asyncio.run(_main())
+
+
+def test_sync_links_restarts_link_when_host_changes(monkeypatch):
+    """改地址同样触发重拨（不改动前是坏的，本次的回归重点）。"""
+
+    async def _main():
+        started = []
+        targets = {7: ("10.0.0.7", 5789, "uid-7")}
+        monkeypatch.setattr(link, "load_link_targets", lambda: dict(targets))
+        monkeypatch.setattr(link, "run_machine_link", _recording_link(started))
+        tasks = {}
+
+        link.sync_links(tasks)
+        await asyncio.sleep(0.01)
+
+        targets[7] = ("10.0.0.8", 5789, "uid-7")
+        link.sync_links(tasks)
+        await asyncio.sleep(0.01)
+
+        assert started[-1] == (7, "10.0.0.8", 5789, "uid-7")
+        _cancel_all(tasks)
+        await asyncio.gather(*(e["task"] for e in tasks.values()), return_exceptions=True)
+
+    asyncio.run(_main())
+
+
+def test_sync_links_restarts_link_when_uid_changes(monkeypatch):
+    """uid 也是端点三元组的一员：换了身份牌就得按新身份重拨。"""
+
+    async def _main():
+        started = []
+        targets = {7: ("10.0.0.7", 5789, "uid-old")}
+        monkeypatch.setattr(link, "load_link_targets", lambda: dict(targets))
+        monkeypatch.setattr(link, "run_machine_link", _recording_link(started))
+        tasks = {}
+
+        link.sync_links(tasks)
+        await asyncio.sleep(0.01)
+
+        targets[7] = ("10.0.0.7", 5789, "uid-new")
+        link.sync_links(tasks)
+        await asyncio.sleep(0.01)
+
+        assert started[-1] == (7, "10.0.0.7", 5789, "uid-new")
+        _cancel_all(tasks)
+        await asyncio.gather(*(e["task"] for e in tasks.values()), return_exceptions=True)
 
     asyncio.run(_main())
 
 
 def test_sync_links_cancels_link_for_removed_machine(monkeypatch):
     async def _main():
-        targets = {7: ("10.0.0.7", "uid-7")}
+        targets = {7: ("10.0.0.7", 5789, "uid-7")}
         monkeypatch.setattr(link, "load_link_targets", lambda: dict(targets))
         monkeypatch.setattr(link, "run_machine_link", _recording_link([]))
         tasks = {}
 
         link.sync_links(tasks)
         await asyncio.sleep(0.01)
-        removed = tasks[7]
+        removed = tasks[7]["task"]
 
         targets.clear()
         link.sync_links(tasks)
@@ -216,24 +303,24 @@ def test_sync_links_cancels_link_for_removed_machine(monkeypatch):
 def test_sync_links_restarts_dead_link(monkeypatch):
     async def _main():
         started = []
-        monkeypatch.setattr(link, "load_link_targets", lambda: {7: ("10.0.0.7", "uid-7")})
+        monkeypatch.setattr(link, "load_link_targets", lambda: {7: ("10.0.0.7", 5789, "uid-7")})
 
-        async def _dies(machine_id, machine_ip, uid):
+        async def _dies(machine_id, host, port, uid):
             started.append(machine_id)
 
         monkeypatch.setattr(link, "run_machine_link", _dies)
         tasks = {}
 
         link.sync_links(tasks)
-        await asyncio.gather(*tasks.values(), return_exceptions=True)  # 链路自行结束
-        assert tasks[7].done()
+        await asyncio.gather(*(e["task"] for e in tasks.values()), return_exceptions=True)  # 链路自行结束
+        assert tasks[7]["task"].done()
 
         link.sync_links(tasks)
         await asyncio.sleep(0.01)
 
         assert len(started) == 2
         _cancel_all(tasks)
-        await asyncio.gather(*tasks.values(), return_exceptions=True)
+        await asyncio.gather(*(e["task"] for e in tasks.values()), return_exceptions=True)
 
     asyncio.run(_main())
 
@@ -312,7 +399,7 @@ def test_run_links_forever_syncs_until_cancelled(monkeypatch):
     async def _main():
         started = []
         monkeypatch.setattr(link, "LINK_SYNC_INTERVAL", 0.01)
-        monkeypatch.setattr(link, "load_link_targets", lambda: {7: ("10.0.0.7", "uid-7")})
+        monkeypatch.setattr(link, "load_link_targets", lambda: {7: ("10.0.0.7", 5789, "uid-7")})
         monkeypatch.setattr(link, "run_machine_link", _recording_link(started))
 
         manager = asyncio.create_task(link.run_links_forever())
@@ -320,7 +407,7 @@ def test_run_links_forever_syncs_until_cancelled(monkeypatch):
             await asyncio.sleep(0.01)
             if started:
                 break
-        assert started == [(7, "10.0.0.7", "uid-7")]
+        assert started == [(7, "10.0.0.7", 5789, "uid-7")]
 
         manager.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -409,11 +496,11 @@ def test_run_machine_link_marks_online_on_connect_offline_on_close(monkeypatch):
             return False
 
     monkeypatch.setattr(websockets, "connect", lambda url, ssl=None: _Connection())
-    monkeypatch.setattr(link, "build_link_ssl_context", lambda machine_ip: object())
+    monkeypatch.setattr(link, "build_link_ssl_context", lambda host: object())
     monkeypatch.setattr(link, "Update_machine", lambda machine_id, **fields: statuses.append(fields["machine_status"]))
 
     async def _main():
-        task = asyncio.create_task(link.run_machine_link(42, "10.0.0.7", "uid-7"))
+        task = asyncio.create_task(link.run_machine_link(42, "10.0.0.7", 5789, "uid-7"))
         for _ in range(100):
             await asyncio.sleep(0.01)
             if len(statuses) >= 2:
@@ -433,12 +520,12 @@ def test_run_machine_link_does_not_dial_without_pin(monkeypatch):
     dialled = []
     statuses = []
     monkeypatch.setattr(link, "LINK_BACKOFF_MAX", 0.01)
-    monkeypatch.setattr(link, "build_link_ssl_context", lambda machine_ip: None)
+    monkeypatch.setattr(link, "build_link_ssl_context", lambda host: None)
     monkeypatch.setattr(link, "Update_machine", lambda machine_id, **fields: statuses.append(fields["machine_status"]))
     monkeypatch.setattr(websockets, "connect", lambda *a, **k: dialled.append(a))
 
     async def _main():
-        task = asyncio.create_task(link.run_machine_link(42, "10.0.0.7", "uid-7"))
+        task = asyncio.create_task(link.run_machine_link(42, "10.0.0.7", 5789, "uid-7"))
         for _ in range(100):
             await asyncio.sleep(0.01)
             if statuses:

@@ -5,11 +5,11 @@ import logging
 import os
 import ssl
 
-from ....config import CommsConfig
 from ....constant import MachineStatus
 from ....extensions import session_scope
 from ....repositories import machine_repo
 from ...machine_tasks import Update_machine, seed_unavailable_windows_from_last_seen
+from .endpoint import machine_endpoint
 from .transport import _pin_file
 
 logger = logging.getLogger(__name__)
@@ -29,13 +29,6 @@ _MACHINE_PAGE_SIZE = 200
 # 目标解析（machines 表 → 链路目标集合）
 ############################################################
 
-def _split_host_port(machine_ip: str) -> tuple[str, int]:
-    """拆出裸主机与端口；未显式带端口时用 NODE_PORT。"""
-
-    host, _, port_str = machine_ip.partition(":")
-    return host, int(port_str) if port_str else CommsConfig.NODE_PORT
-
-
 def _load_machine_rows() -> list:
     """分页读全量机器行（含 OFFLINE）；读失败按空集合处理，下一轮对齐重试。"""
 
@@ -54,20 +47,23 @@ def _load_machine_rows() -> list:
         return rows
 
 
-def load_link_targets() -> dict[int, tuple[str, str]]:
-    """返回 {machine_id: (machine_ip, uid)}——machines 表即链路清单。
+def load_link_targets() -> dict[int, tuple[str, int, str]]:
+    """返回 {machine_id: (host, port, uid)}——machines 表即链路清单。
 
     表里有行就拨（含 OFFLINE 的机器，这就是离线发现）；未完成注册（无 uid）
     的机器读不到身份牌，跳过。
+
+    三元组就是「链路指向哪里」的完整描述。对齐时比对它，才能分辨「同一台机器、
+    端点变了」与「同一台机器、端点没变」——前者必须重拨，后者绝不能。
     """
 
-    targets: dict[int, tuple[str, str]] = {}
+    targets: dict[int, tuple[str, int, str]] = {}
     for machine in _load_machine_rows():
-        machine_ip = getattr(machine, "machine_ip", None)
+        host, port = machine_endpoint(machine)
         uid = getattr(machine, "node_uid", None)
-        if machine_ip and uid:
-            targets[machine.id] = (machine_ip, uid)
-        elif machine_ip:
+        if host and uid:
+            targets[machine.id] = (host, port, uid)
+        elif host:
             logger.debug("link sync: machine %s has no uid yet; skipped", machine.id)
     return targets
 
@@ -76,10 +72,9 @@ def load_link_targets() -> dict[int, tuple[str, str]]:
 # 传输参数（URL 与 TLS）
 ############################################################
 
-def link_url(machine_ip: str, uid: str) -> str:
+def link_url(host: str, port: int, uid: str) -> str:
     """Ctrl 拨 Node 的 WSS 地址。"""
 
-    host, port = _split_host_port(machine_ip)
     return f"wss://{host}:{port}{LINK_PATH}?uid={uid}"
 
 
@@ -98,15 +93,16 @@ def _load_client_certificate() -> tuple[str, str] | None:
     return None
 
 
-def build_link_ssl_context(machine_ip: str) -> ssl.SSLContext | None:
+def build_link_ssl_context(host: str) -> ssl.SSLContext | None:
     """构造链路 TLS 上下文；该机器尚无 pin 时返回 None（不拨）。
 
-    信任锚取该机器专属 pin 文件——注册时从该 IP 抓到的那张证书本身，TOFU 已把
+    信任锚取该主机专属 pin 文件——注册时从该主机抓到的那张证书本身，TOFU 已把
     身份钉死，故关闭 hostname 校验：Node 自签证书默认 SAN 不含业务 IP，开启会
     让跨机链路必然失败，而链校验已足够。
+
+    pin 键是**裸主机**，与端口无关：故换端口不使既有 pin 失效。
     """
 
-    host, _ = _split_host_port(machine_ip)
     pin = _pin_file(host)
     if not pin.exists():
         logger.warning("link to %s: no pinned cert (machine not enrolled); not dialing", host)
@@ -142,15 +138,13 @@ def _mark_machine_status(machine_id: int, status: MachineStatus) -> None:
 # 故障诊断（把泛化异常翻译成可操作的一句话）
 ############################################################
 
-def _link_error_hint(exc: BaseException, machine_ip: str) -> str:
+def _link_error_hint(exc: BaseException, host: str) -> str:
     """按异常类型给出「该去查什么」。
 
     链路失败最难受的一点是两类完全相反的原因会压成同一句话：
     本端拒了对端证书（pin 失效）与对端拒了本端证书（Node 侧 mTLS），
     在 websockets/ssl 的 str(exc) 里都看不出来。这里分类点破。
     """
-
-    host, _ = _split_host_port(machine_ip)
 
     if isinstance(exc, ssl.SSLCertVerificationError):
         return (
@@ -180,7 +174,7 @@ def _link_error_hint(exc: BaseException, machine_ip: str) -> str:
     return ""
 
 
-def _describe_link_error(exc: BaseException, machine_ip: str) -> str:
+def _describe_link_error(exc: BaseException, host: str) -> str:
     """异常类型 + 因果链 + 排查提示。
 
     只打 str(exc) 会丢掉全部上下文（如 websockets 的 InvalidMessage 只剩一句
@@ -195,15 +189,18 @@ def _describe_link_error(exc: BaseException, machine_ip: str) -> str:
             break
         current = current.__cause__ or current.__context__
     detail = " <- ".join(chain)
-    hint = _link_error_hint(exc, machine_ip)
+    hint = _link_error_hint(exc, host)
     return f"{detail} | {hint}" if hint else detail
 
 
 
-async def run_machine_link(machine_id: int, machine_ip: str, uid: str) -> None:
+async def run_machine_link(machine_id: int, host: str, port: int, uid: str) -> None:
     """单机链路循环；每台机器独立退避，互不影响。
 
     连接成功即判 ONLINE、断开即判 OFFLINE——拨号结果是第一手证据，不再二次探测。
+
+    端点是本任务启动时捕获的参数，循环内不重读：端点变更由 `sync_links` 察觉并
+    重建任务（见那里的对齐规则）。
     """
 
     from .websocket import _consume_link
@@ -217,25 +214,25 @@ async def run_machine_link(machine_id: int, machine_ip: str, uid: str) -> None:
     backoff = LINK_BACKOFF_INITIAL
     while True:
         try:
-            context = build_link_ssl_context(machine_ip)
+            context = build_link_ssl_context(host)
             if context is None:
                 _mark_machine_status(machine_id, MachineStatus.OFFLINE)
                 await asyncio.sleep(LINK_BACKOFF_MAX)
                 continue
-            async with websockets.connect(link_url(machine_ip, uid), ssl=context) as websocket:
-                logger.info("node link established: machine=%s ip=%s", machine_id, machine_ip)
+            async with websockets.connect(link_url(host, port, uid), ssl=context) as websocket:
+                logger.info("node link established: machine=%s host=%s:%s", machine_id, host, port)
                 _mark_machine_status(machine_id, MachineStatus.ONLINE)
                 backoff = LINK_BACKOFF_INITIAL
                 await _consume_link(websocket, uid, machine_id)
-                logger.info("node link closed: machine=%s ip=%s", machine_id, machine_ip)
+                logger.info("node link closed: machine=%s host=%s:%s", machine_id, host, port)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.warning(
                 "node link error: machine=%s url=%s: %s",
                 machine_id,
-                link_url(machine_ip, uid),
-                _describe_link_error(exc, machine_ip),
+                link_url(host, port, uid),
+                _describe_link_error(exc, host),
             )
         _mark_machine_status(machine_id, MachineStatus.OFFLINE)
         await asyncio.sleep(backoff)
@@ -246,21 +243,30 @@ async def run_machine_link(machine_id: int, machine_ip: str, uid: str) -> None:
 # 集合对齐（运行中链路 ↔ machines 表）
 ############################################################
 
-def sync_links(tasks: dict[int, asyncio.Task]) -> None:
+def sync_links(tasks: dict[int, dict]) -> None:
     """把运行中的链路集合对齐到 machines 表全量。
 
-    只对差集动作：新增起链路、消失或已死的停链路；已存在且存活的**绝不重连**
-    ——重连会把 5s 一帧的数据通道打成筛子。
+    只对差集动作：新增起链路、消失或已死的停链路、**端点变了的重建**；
+    端点未变且存活的**绝不重连**——重连会把 5s 一帧的数据通道打成筛子。
+
+    端点三元组 `(host, port, uid)` 是「这条链路指向哪里」的完整描述，也是唯一
+    该触发重连的理由。此前只按 machine_id 对齐，于是改地址/端口/uid 都不会生效：
+    活着的任务会一直拨旧地址，机器恒为 OFFLINE 直到进程重启。
     """
 
     targets = load_link_targets()
-    for machine_id in list(tasks):
-        task = tasks[machine_id]
-        if machine_id not in targets or task.done():
-            tasks.pop(machine_id).cancel()
-    for machine_id, (machine_ip, uid) in targets.items():
+    for machine_id, entry in list(tasks.items()):
+        target = targets.get(machine_id)
+        if target is None or entry["task"].done() or entry["target"] != target:
+            entry["task"].cancel()
+            tasks.pop(machine_id)
+    for machine_id, target in targets.items():
         if machine_id not in tasks:
-            tasks[machine_id] = asyncio.create_task(run_machine_link(machine_id, machine_ip, uid))
+            host, port, uid = target
+            tasks[machine_id] = {
+                "task": asyncio.create_task(run_machine_link(machine_id, host, port, uid)),
+                "target": target,
+            }
 
 
 def _seed_windows_before_first_dial() -> None:
@@ -279,7 +285,7 @@ def _seed_windows_before_first_dial() -> None:
 async def run_links_forever() -> None:
     """常驻：先播种窗口起点，再维持全量链路并周期性对齐集合。"""
 
-    tasks: dict[int, asyncio.Task] = {}
+    tasks: dict[int, dict] = {}
     logger.info("node link manager started: sync_interval=%ss", LINK_SYNC_INTERVAL)
     try:
         _seed_windows_before_first_dial()
@@ -290,7 +296,7 @@ async def run_links_forever() -> None:
         logger.info("node link manager stopping: %s live link(s)", len(tasks))
         raise
     finally:
-        for task in tasks.values():
-            task.cancel()
+        for entry in tasks.values():
+            entry["task"].cancel()
         if tasks:
-            await asyncio.gather(*tasks.values(), return_exceptions=True)
+            await asyncio.gather(*(entry["task"] for entry in tasks.values()), return_exceptions=True)

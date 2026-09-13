@@ -4,8 +4,8 @@ import logging
 
 import requests
 
-from ...config import CommsConfig
 from ...extensions import session_scope
+from .node_comms_modules.endpoint import node_api_base
 from .node_comms_modules import runtime_cache as _runtime_cache
 from .node_comms_modules.runtime_cache import (
     _split_container_runtime_snapshot,
@@ -64,8 +64,15 @@ logger = logging.getLogger(__name__)
 # HTTP Transport
 ############################################################
 
-def get_full_url(machine_ip: str, endpoint: str) -> str:
-    return f"https://{machine_ip}{CommsConfig.NODE_URL_MIDDLE}{endpoint}"
+def get_full_url(host: str, endpoint: str, port: int) -> str:
+    """Node 操作通道的完整 URL。
+
+    端口由调用方从机器记录解析（`node_comms_modules.endpoint`）。本函数**不设默认值**
+    ——漏传的调用点必须编译期就报错，而不是静默退回全局端口：那种静默正是本次要
+    消灭的失败模式（机器设了非默认端口，动作却仍打默认端口）。
+    """
+
+    return f"{node_api_base(host, port)}{endpoint}"
 
 
 def send(url: str, payload: dict, timeout: float = 5.0, *, cert=None, verify=None) -> dict:

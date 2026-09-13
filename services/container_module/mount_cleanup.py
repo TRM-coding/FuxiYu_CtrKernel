@@ -20,6 +20,7 @@ from ..operation_log_tasks import log_failure, log_success
 from .exceptions import NodeServiceError, _raise_on_node_error
 from . import node_comms
 from .node_comms import get_full_url
+from .node_comms_modules.endpoint import resolve_endpoint
 from .utils import _container_log_detail
 
 ####################################################
@@ -146,14 +147,15 @@ def _clean_mount_path_impl(
             include_invalid=True,
         )
         machine_id = getattr(container, "machine_id", None) or cleanup.machine_id
-        machine_ip = machine_repo.get_machine_ip_by_id(machine_id, session=session)
+        machine_ip, machine_port = machine_repo.get_machine_endpoint_by_id(machine_id, session=session)
         mount_path = (
             getattr(container, "bind_mount_path", None)
             or cleanup.mount_path
         )
         container_name = getattr(container, "name", None) or cleanup.container_name
 
-    full_url = get_full_url(machine_ip, "/clean_mount")
+    host, port = resolve_endpoint(machine_ip, machine_port)
+    full_url = get_full_url(host, "/clean_mount", port)
     res = node_comms.send(full_url, {"config": {"mount_path": mount_path}}, timeout=10.0)
     _raise_on_node_error(res, "clean_mount")
     if res.get("success") != 1:

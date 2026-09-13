@@ -38,6 +38,7 @@ def _init_database() -> None:
     _ensure_container_failure_schema()
     _ensure_gpu_columns()
     _ensure_cleanup_deferral_schema()
+    _ensure_machine_endpoint_schema()
     try:
         from .services.rbac_service import seed_rbac_defaults
 
@@ -199,6 +200,30 @@ def _ensure_container_lifecycle_schema() -> None:
                 logger.warning("container lifecycle schema index %s create failed: %s", name, e)
     if missing:
         logger.warning("container lifecycle schema upgraded: added columns %s", ", ".join(missing))
+
+
+def _ensure_machine_endpoint_schema() -> None:
+    """补齐 machines.port（每台宿主机上 Node 的监听端口）。
+
+    可空、无回填：旧行为 NULL 即「回落全局默认」，与改动前行为一致。
+    """
+
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    current_engine = extensions.engine
+    inspector = inspect(current_engine)
+    if not inspector.has_table("machines"):
+        return
+
+    existing = {column["name"] for column in inspector.get_columns("machines")}
+    if "port" in existing:
+        return
+
+    with current_engine.begin() as conn:
+        conn.execute(text("ALTER TABLE machines ADD COLUMN port INTEGER NULL"))
+    logging.getLogger(__name__).warning("machine schema upgraded: added columns port")
 
 
 def _ensure_deleted_container_schema() -> None:

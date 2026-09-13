@@ -221,9 +221,9 @@ def clean_deleted_container_mount(
 ####################################################
 
 def start_container(container_id: int, operator_user_id: int | None = None) -> bool:
-    container, machine_ip = _load_container_target(container_id)
+    container, host, port = _load_container_target(container_id)
     _ensure_container_action(container, "start")
-    _request_lifecycle_action(machine_ip, container.name, "start")
+    _request_lifecycle_action(host, port, container.name, "start")
     _audit_container_action(container, OperationType.START_CONTAINER, operator_user_id)
     return True
 
@@ -259,17 +259,17 @@ def unpause_container(container_id: int, operator_user_id: int | None = None) ->
 
 
 def stop_container(container_id: int, operator_user_id: int | None = None) -> bool:
-    container, machine_ip = _load_container_target(container_id)
+    container, host, port = _load_container_target(container_id)
     _ensure_container_action(container, "stop")
-    _request_lifecycle_action(machine_ip, container.name, "stop")
+    _request_lifecycle_action(host, port, container.name, "stop")
     _audit_container_action(container, OperationType.STOP_CONTAINER, operator_user_id)
     return True
 
 
 def restart_container(container_id: int, operator_user_id: int | None = None) -> bool:
-    container, machine_ip = _load_container_target(container_id)
+    container, host, port = _load_container_target(container_id)
     _ensure_container_action(container, "restart")
-    _request_lifecycle_action(machine_ip, container.name, "restart")
+    _request_lifecycle_action(host, port, container.name, "restart")
     _audit_container_action(container, OperationType.RESTART_CONTAINER, operator_user_id)
     return True
 
@@ -281,13 +281,13 @@ def restart_container(container_id: int, operator_user_id: int | None = None) ->
 def add_collaborator(
     container_id: int, user_id: int, role: ROLE, operator_user_id: int | None = None,
 ) -> bool:
-    container, machine_ip = _load_container_target(container_id)
+    container, host, port = _load_container_target(container_id)
     _ensure_container_action(container, "add_collaborator", require_online=True)
     user_name, _ = _load_collaborator_account(user_id, container_id)
     if role == ROLE.ROOT:
         return False
     payload = _build_collaborator_payload(container.name, user_name, role=role)
-    _request_collaborator_action(machine_ip, "add_collaborator", payload)
+    _request_collaborator_action(host, port, "add_collaborator", payload)
     _add_collaborator_binding(container_id, user_id, user_name, role)
     _audit_collaborator(
         container, user_id, user_name, OperationType.ADD_COLLABORATOR, operator_user_id,
@@ -299,13 +299,13 @@ def add_collaborator(
 def remove_collaborator(
     container_id: int, user_id: int, operator_user_id: int | None = None,
 ) -> bool:
-    container, machine_ip = _load_container_target(container_id)
+    container, host, port = _load_container_target(container_id)
     _ensure_container_action(container, "remove_collaborator", require_online=True)
     user_name, binding = _load_collaborator_account(user_id, container_id)
     if _is_root_binding(binding):
         return False
     payload = _build_collaborator_payload(container.name, user_name)
-    _request_collaborator_action(machine_ip, "remove_collaborator", payload)
+    _request_collaborator_action(host, port, "remove_collaborator", payload)
     _remove_collaborator_binding(container_id, user_id)
     _audit_collaborator(container, user_id, user_name, OperationType.REMOVE_COLLABORATOR, operator_user_id)
     return True
@@ -314,11 +314,11 @@ def remove_collaborator(
 def update_role(
     container_id: int, user_id: int, updated_role: ROLE, operator_user_id: int | None = None,
 ) -> bool:
-    container, machine_ip = _load_container_target(container_id)
+    container, host, port = _load_container_target(container_id)
     _ensure_container_action(container, "update_role", require_online=True)
     user_name, old_binding = _load_collaborator_account(user_id, container_id)
     payload = _build_collaborator_payload(container.name, user_name, updated_role=updated_role)
-    _request_collaborator_action(machine_ip, "update_role", payload)
+    _request_collaborator_action(host, port, "update_role", payload)
     _update_collaborator_binding(container_id, user_id, user_name, updated_role)
     _audit_collaborator(
         container, user_id, user_name, OperationType.UPDATE_COLLABORATOR_ROLE, operator_user_id,

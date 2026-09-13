@@ -47,13 +47,13 @@ class TestMountCleanupTask:
             node_comms, "send",
             lambda url, payload, timeout: sent_payloads.append(url) or {"success": 1}
         )
-        # mock machine_repo to return a valid IP
+        # mock machine_repo to return a valid endpoint
         db_session.commit()
 
         monkeypatch.setattr(
             mount_cleanup_mod.machine_repo,
-            "get_machine_ip_by_id",
-            lambda mid, **kwargs: "10.0.0.2"
+            "get_machine_endpoint_by_id",
+            lambda mid, **kwargs: ("10.0.0.2", None)
         )
         monkeypatch.setattr(
             container_mount_cleanup_task, "machine_in_scope",
@@ -131,8 +131,8 @@ class TestMountCleanupTask:
         )
         monkeypatch.setattr(
             mount_cleanup_mod.machine_repo,
-            "get_machine_ip_by_id",
-            lambda mid, **kwargs: "10.0.0.1"
+            "get_machine_endpoint_by_id",
+            lambda mid, **kwargs: ("10.0.0.1", None)
         )
         monkeypatch.setattr(
             container_mount_cleanup_task, "machine_in_scope",
@@ -163,8 +163,8 @@ class TestMountCleanupTask:
 
         monkeypatch.setattr(
             mount_cleanup_mod.machine_repo,
-            "get_machine_ip_by_id",
-            lambda mid, **kwargs: None  # machine not found
+            "get_machine_endpoint_by_id",
+            lambda mid, **kwargs: (_ for _ in ()).throw(ValueError("machine not found"))
         )
         monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_enabled", lambda: True)
         monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_after_days", lambda: 14)
@@ -256,8 +256,8 @@ class TestMountCleanupTask:
             lambda url, payload, timeout: sent_payloads.append(url) or {"success": 1}
         )
         monkeypatch.setattr(
-            mount_cleanup_mod.machine_repo, "get_machine_ip_by_id",
-            lambda mid, **kwargs: "10.0.0.9"
+            mount_cleanup_mod.machine_repo, "get_machine_endpoint_by_id",
+            lambda mid, **kwargs: ("10.0.0.9", None)
         )
 
         result = container_tasks.clean_deleted_container_mount(

@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta
 
-from ...config import CommsConfig
 from ...services.container_module import node_comms
 from ...services.container_module.utils import _parse_last_ssh_time, build_cleanup_info
 
@@ -69,9 +68,10 @@ def test_build_cleanup_info_clamps_invalid_cleanup_days_to_one():
     assert info["cleanup_after_days"] == 1
 
 
-def test_get_full_url_uses_node_middle_path():
+def test_get_full_url_uses_given_port():
     # TLS 方案：Node uvicorn 已挂 ssl，URL 统一 https
+    # 端口由调用方解析后传入（endpoint.resolve_endpoint），本函数不再有全局默认值
     assert (
-        node_comms.get_full_url("127.0.0.1", "/create_container")
-        == f"https://127.0.0.1{CommsConfig.NODE_URL_MIDDLE}/create_container"
+        node_comms.get_full_url("127.0.0.1", "/create_container", 6789)
+        == "https://127.0.0.1:6789/api/create_container"
     )

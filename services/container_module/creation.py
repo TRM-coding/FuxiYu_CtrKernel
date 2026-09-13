@@ -15,6 +15,7 @@ from .deleted_containers import restore_role_api_value
 from .exceptions import NodeServiceError, _raise_on_node_error
 from . import node_comms
 from .node_comms import get_full_url, _ensure_machine_online_for_operation
+from .node_comms_modules.endpoint import resolve_endpoint
 from .utils import select_gpu_allowance
 
 logger = logging.getLogger(__name__)
@@ -33,8 +34,9 @@ def _ensure_create_target(
     """守卫：机器必须在线；恢复路径额外校验被复用的容器行确实处于软删状态。"""
     _ensure_machine_online_for_operation(machine_id, "create")
     with session_scope(commit=False) as session:
-        machine_ip = machine_repo.get_machine_ip_by_id(machine_id, session=session)
-    full_url = get_full_url(machine_ip, "/create_container")
+        machine_ip, machine_port = machine_repo.get_machine_endpoint_by_id(machine_id, session=session)
+    host, port = resolve_endpoint(machine_ip, machine_port)
+    full_url = get_full_url(host, "/create_container", port)
     with session_scope(commit=False) as session:
         owner_name = user_repo.get_name_by_id(owner_user_id, session=session)
     if not owner_name:
