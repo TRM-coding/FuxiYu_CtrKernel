@@ -8,6 +8,7 @@ from pathlib import Path
 import requests
 
 from ....config import AppConfig, NetConfig
+from .transport import _DIRECT_PROXIES
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,9 @@ def _post_runtime_buffer(endpoint: str, payload: dict) -> bool:
             headers=headers,
             timeout=float(os.getenv("CTRL_RUNTIME_BUFFER_PUSH_TIMEOUT", "0.5")),
             verify=_ctrl_api_internal_verify(),
+            # 回环同样不许走环境代理：requests 在没有 no_proxy 时不 bypass 回环，代理会把
+            # CONNECT 到私网/回环的请求直接重置——运行态帧全丢（理由详见 transport._DIRECT_PROXIES）。
+            proxies=_DIRECT_PROXIES,
         )
         response.raise_for_status()
         return True

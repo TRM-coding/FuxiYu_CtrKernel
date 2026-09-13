@@ -257,6 +257,31 @@ def test_post_node_json_never_uses_environment_proxy(monkeypatch, tmp_path):
     assert seen["plain"]["proxies"] == direct, "TOFU 分支同样不许走环境代理"
 
 
+def test_runtime_buffer_push_never_uses_environment_proxy(monkeypatch):
+    """WSS 子进程 → API 主进程的回环推送同样必须直连。
+
+    它打的是 127.0.0.1，而 requests 在没有 no_proxy 时并不 bypass 回环——代理把 CONNECT 到
+    私网/回环的请求直接重置，运行态帧就全丢了（主进程的运行态缓存只由这一跳喂，没有第二条路）。
+    """
+    from ...services.container_module.node_comms_modules import runtime_push
+
+    captured = {}
+
+    class _Response:
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(runtime_push, "_read_internal_token", lambda: "t")
+    monkeypatch.setattr(
+        runtime_push.requests, "post",
+        lambda url, **kw: captured.update(kw, url=url) or _Response(),
+    )
+
+    assert runtime_push._post_runtime_buffer("machines", {"machine_id": 7, "snapshot": {}}) is True
+    assert captured["proxies"] == {"http": None, "https": None}
+    assert captured["url"].startswith("https://127.0.0.1:") or captured["url"].startswith("http://127.0.0.1:")
+
+
 ############################################################
 # 目标集合解析
 ############################################################
