@@ -219,7 +219,11 @@ async def run_machine_link(machine_id: int, host: str, port: int, uid: str) -> N
                 _mark_machine_status(machine_id, MachineStatus.OFFLINE)
                 await asyncio.sleep(LINK_BACKOFF_MAX)
                 continue
-            async with websockets.connect(link_url(host, port, uid), ssl=context) as websocket:
+            # websockets ≥15 默认 proxy=True（即读环境变量里的代理），与动作通道同理必须直连：
+            # 节点是局域网端点，任何环境代理都不该介入。见 transport._DIRECT_PROXIES。
+            async with websockets.connect(
+                link_url(host, port, uid), ssl=context, proxy=None,
+            ) as websocket:
                 logger.info("node link established: machine=%s host=%s:%s", machine_id, host, port)
                 _mark_machine_status(machine_id, MachineStatus.ONLINE)
                 backoff = LINK_BACKOFF_INITIAL
