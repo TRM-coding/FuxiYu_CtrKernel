@@ -346,6 +346,15 @@ def get_container_disk_usage(container_id: int, timeout: float = 20.0) -> dict |
     return _build_disk_usage_response(container)
 
 
+def get_container_cleanup_state(container) -> dict:
+    """容器清理倒计时（last_ssh + 已结算顺延 + 正在进行的不可用窗口）。
+
+    读侧的唯一口径：详情、提醒、清理任务与接口都走同一份，避免各自拼参数导致偏差
+    （`refresh_last_ssh_login_time` 曾经自己调 build_cleanup_info 且没传顺延）。
+    """
+    return _get_container_cleanup_state(container)
+
+
 def get_container_last_ssh_login_time(container_id: int, timeout: float = 5.0) -> str | None:
     """读 WSS 落库的 SSH 登录快照，不联系 Node。"""
     container_id = _parse_query_container_id(container_id, "SSH login time")

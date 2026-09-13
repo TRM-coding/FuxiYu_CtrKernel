@@ -112,14 +112,20 @@ def test_container_status_api_without_container_id_rejected(client, monkeypatch,
     assert resp.json()["error_reason"] == "invalid_resource_id"
 
 
-def test_refresh_last_ssh_login_time_api_node_endpoint_missing_returns_502(client, monkeypatch, db_session):
+def test_refresh_last_ssh_login_time_api_maps_service_error_to_status(client, monkeypatch, db_session):
+    """服务层错误经 REASON_STATUS_MAP 映射成状态码。
+
+    注：原先这里 mock 的是 get_container_last_ssh_login_time 并以 node_endpoint_not_found
+    为样例——那是它还会联系 Node 的年代留下的。该函数现在只读 WSS 落库的快照、
+    不再出站，接口也改走 get_container_cleanup_state，故改用现存的接缝与样例原因。
+    """
     _auth(monkeypatch)
     container = create_container()
 
-    def _raise(container_id):
+    def _raise(_container):
         raise container_tasks.NodeServiceError("endpoint missing", reason="node_endpoint_not_found")
 
-    monkeypatch.setattr(container_api.container_service, "get_container_last_ssh_login_time", _raise)
+    monkeypatch.setattr(container_api.container_service, "get_container_cleanup_state", _raise)
 
     resp = client.post(
         "/api/containers/refresh_last_ssh_login_time",
@@ -132,7 +138,17 @@ def test_refresh_last_ssh_login_time_api_node_endpoint_missing_returns_502(clien
 def test_refresh_last_ssh_login_time_api_success(client, monkeypatch, db_session):
     _auth(monkeypatch)
     container = create_container()
-    monkeypatch.setattr(container_api.container_service, "get_container_last_ssh_login_time", lambda container_id: "2026-05-25T10:00:00")
+    monkeypatch.setattr(
+        container_api.container_service,
+        "get_container_cleanup_state",
+        lambda _container: {
+            "last_ssh_login_time": "2026-05-25T10:00:00",
+            "cleanup_after_days": 7,
+            "cleanup_at": "2026-06-01T10:00:00",
+            "seconds_until_cleanup": 123,
+            "cleanup_status": "countdown",
+        },
+    )
 
     resp = client.post(
         "/api/containers/refresh_last_ssh_login_time",

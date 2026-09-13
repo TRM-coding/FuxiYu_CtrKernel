@@ -7,7 +7,7 @@ from datetime import datetime
 from ..constant import OperationType
 from ..extensions import session_scope
 from ..repositories import containers_repo, long_term_container_repo, container_cleanup_reminder_repo
-from ..repositories import container_ssh_login_repo
+from ..repositories import container_ssh_login_repo, machine_repo
 from ..services import container_tasks, settings_tasks
 from ..services.machine_tasks import machine_in_scope
 from ..utils.mail import send as send_mail
@@ -137,6 +137,29 @@ def _send_cleanup_reminders_if_needed(container_id: int, info: dict, reminder_ho
                                container_id, email, exc)
 
 
+def _load_unavailable_windows() -> dict[int, object]:
+    """一次性读全量机器的不可用窗口起点 {machine_id: unavailable_since}。
+
+    只看 `deferral_seconds` 是不够的：顺延在窗口关闭时才结算，窗口还开着的那段时间
+    不在里面。把它折进倒计时，维护/断线期间"时钟暂停"才在读的这一刻也成立。
+
+    整表读一次而非逐条记录各查一次——机器数量级远小于 ssh 记录数，且失败只是退回
+    修复前的口径（读数偏低），不该挡住扫描。
+    """
+
+    try:
+        with session_scope(commit=False) as session:
+            machines = list(machine_repo.list_machines(limit=100000, offset=0, session=session))
+    except Exception as exc:
+        logger.warning("[container-cleanup] load unavailable windows failed: %s", exc)
+        return {}
+    return {
+        machine.id: machine.unavailable_since
+        for machine in machines
+        if getattr(machine, "unavailable_since", None) is not None
+    }
+
+
 def cleanup_expired_containers_once(cleanup_after_days: int) -> None:
     """
     单次扫描：查找已过期容器并释放。
@@ -148,13 +171,15 @@ def cleanup_expired_containers_once(cleanup_after_days: int) -> None:
 
     with session_scope(commit=False) as session:
         records = container_ssh_login_repo.list_all(session=session)
+    windows = _load_unavailable_windows()
     for rec in records:
         try:
-            # 顺延口径与详情/提醒一致：有效最后登录 = last_ssh + 机器不可用顺延(deferral)
+            # 顺延口径与详情/提醒一致：有效最后登录 = last_ssh + 已结算顺延 + 正在进行的窗口
             info = container_tasks.build_cleanup_info(
                 rec.last_ssh_login_time,
                 cleanup_after_days,
                 getattr(rec, "deferral_seconds", 0) or 0,
+                windows.get(int(getattr(rec, "machine_id", 0) or 0)),
             )
             cid = int(rec.container_id)
             with session_scope(commit=False) as session:

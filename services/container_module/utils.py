@@ -75,13 +75,23 @@ def build_cleanup_info(
     last_ssh_login_time: str | None,
     cleanup_after_days: int,
     deferral_seconds: int = 0,
+    unavailable_since: datetime | None = None,
 ) -> dict:
     """
     基于上次 SSH 登录时间计算清理时间信息（仅计算，不执行清理）。
 
-    deferral_seconds：机器不可用窗口累计顺延（Ctrl 自有列维护，不随 Node 帧回写）。
+    deferral_seconds：机器不可用窗口**已结算**的累计顺延（Ctrl 自有列维护，不随 Node 帧回写）。
     有效最后登录 = 真实 last_ssh + deferral——宕机/维护期用户无法交互，不计入责任，
     到期时刻（cleanup_at / 倒计时）相应顺延；展示与执行使用同一口径。
+
+    unavailable_since：**正在进行**的不可用窗口起点（unavailable_since IS NOT NULL 即窗口开着）。
+    顺延只在窗口关闭时一次性结算，所以窗口期若只看 deferral_seconds，倒计时会照走、
+    甚至走到"到期"——而它其实会在窗口关闭时被整体拨回。把窗口已持续的时长折进来，
+    "不可用期间时钟不走"才在**读的这一刻**也成立，而不只是终态成立。
+
+    这样做的收益是**读数准确**，不是加一道拦截：提醒邮件与界面倒计时都读同一份 info，
+    算对了它们自然不会再提前报"即将清理"。窗口继续开着时，每次现算得到的都是
+    「若此刻恢复可用」的正确值——这正是"时钟暂停"应有的表现。
     """
     # logger.debug("DEBUG: build_cleanup_info called with last_ssh_login_time='%s' and cleanup_after_days=%s", last_ssh_login_time, cleanup_after_days)
     if cleanup_after_days <= 0:
@@ -96,8 +106,13 @@ def build_cleanup_info(
             "cleanup_status": "unknown",
         }
 
-    if deferral_seconds:
-        last_dt = last_dt + timedelta(seconds=int(deferral_seconds))
+    effective_deferral = int(deferral_seconds or 0)
+    if unavailable_since is not None:
+        # 窗口已持续的时长。负值只在时钟回拨时出现，夹到 0 以免倒扣。
+        elapsed = int((datetime.utcnow() - unavailable_since).total_seconds())
+        effective_deferral += max(0, elapsed)
+    if effective_deferral:
+        last_dt = last_dt + timedelta(seconds=effective_deferral)
     cleanup_at = last_dt + timedelta(days=cleanup_after_days)
     seconds_left = int((cleanup_at - datetime.utcnow()).total_seconds())
     if seconds_left <= 0:

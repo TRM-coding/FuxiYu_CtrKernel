@@ -19,6 +19,7 @@ from ...models.container_ssh_login import ContainerSSHLogin
 from ...models.machine import Machine
 from ...repositories import container_ssh_login_repo, machine_repo
 from ...schedulers import container_cleanup_task
+from ...services import container_tasks
 from ...services import machine_tasks as machine_tasks_mod
 from ...services.container_module import node_comms
 from ...services.container_module.node_comms_modules import snapshots
@@ -244,6 +245,66 @@ class TestCleanupInfoDeferral:
         assert deferred["cleanup_status"] == "countdown"
         assert deferred["seconds_until_cleanup"] > 7 * 86400 - 10
         assert deferred["seconds_until_cleanup"] < 7 * 86400 + 10
+
+    def test_open_window_freezes_the_countdown(self):
+        """窗口**开着**时倒计时应当停住。
+
+        顺延只在窗口关闭时一次性结算，所以窗口期若只看 deferral_seconds，倒计时会照走、
+        甚至走到 due——而它其实会在窗口关闭时被整体拨回。把窗口已持续的时长折进来，
+        「不可用期间时钟不走」才在读的这一刻也成立，而不只是终态成立。
+        """
+        last = (datetime.utcnow() - timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%S")
+
+        assert build_cleanup_info(last, 7)["cleanup_status"] == "due"
+
+        opened = datetime.utcnow() - timedelta(days=10)
+        frozen = build_cleanup_info(last, 7, unavailable_since=opened)
+
+        assert frozen["cleanup_status"] == "countdown"
+        assert 7 * 86400 - 60 < frozen["seconds_until_cleanup"] < 7 * 86400 + 60
+
+    def test_open_window_adds_on_top_of_settled_deferral(self):
+        """两个来源叠加：已结算的 deferral_seconds + 正在进行的窗口，不是二选一。"""
+        last = (datetime.utcnow() - timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%S")
+        opened = datetime.utcnow() - timedelta(days=5)
+
+        settled_only = build_cleanup_info(last, 7, deferral_seconds=5 * 86400)
+        with_window = build_cleanup_info(
+            last, 7, deferral_seconds=5 * 86400, unavailable_since=opened,
+        )
+
+        assert with_window["seconds_until_cleanup"] - settled_only["seconds_until_cleanup"] == pytest.approx(
+            5 * 86400, abs=60,
+        )
+
+    def test_no_open_window_is_byte_for_byte_the_old_behaviour(self):
+        """窗口为 None（从未不可用，或已结算完）→ 与旧口径完全一致。"""
+        last = (datetime.utcnow() - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S")
+
+        assert build_cleanup_info(last, 7) == build_cleanup_info(last, 7, unavailable_since=None)
+
+    def test_window_start_in_the_future_is_clamped(self):
+        """时钟回拨让起点落到未来 → 夹到 0，不倒扣用户时间。"""
+        last = (datetime.utcnow() - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S")
+        future = datetime.utcnow() + timedelta(days=1)
+
+        assert build_cleanup_info(last, 7, unavailable_since=future) == build_cleanup_info(last, 7)
+
+    def test_detail_read_path_picks_up_the_open_window(self, app, db_session):
+        """读侧共用口径：详情/接口走的 get_container_cleanup_state 也认窗口。"""
+        _root, machine, container = create_container_graph()
+        last = (datetime.utcnow() - timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%S")
+        _make_ssh_record(db_session, container, last_ssh_time=last)
+        # 窗口字段不在 update_machine 的白名单里（它不是操作员可编辑字段，由
+        # refresh_unavailable_window 直接写 ORM 对象），测试同样直接赋值。
+        with session_scope() as session:
+            row = machine_repo.get_by_id(machine.id, session=session)
+            row.unavailable_since = datetime.utcnow() - timedelta(days=10)
+
+        state = container_tasks.get_container_cleanup_state(container)
+
+        assert state["cleanup_status"] == "countdown"
+        assert 7 * 86400 - 60 < state["seconds_until_cleanup"] < 7 * 86400 + 60
 
     def test_cleanup_scan_skips_deferred_due_container(self, app, db_session, monkeypatch):
         """调度扫描：ssh 到期但 deferral 覆盖（机器不可用补偿）→ 不触发移除。"""

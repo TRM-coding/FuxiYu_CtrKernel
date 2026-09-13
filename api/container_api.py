@@ -14,7 +14,6 @@ from ..constant import OperationType, ROLE
 from ..extensions import session_scope
 from ..repositories import containers_repo
 from ..services import container_tasks as container_service
-from ..services import settings_tasks
 from ..services.operation_log_tasks import log_failure
 from ..utils.Container import Container_info
 from ..utils.parsers import parse_bool
@@ -885,9 +884,11 @@ def refresh_last_ssh_login_time_api(
     if not container:
         return _error(404, "Container not found", "container_not_found")
     try:
-        last_time = container_service.get_container_last_ssh_login_time(container.id)
-        cleanup_days = settings_tasks.get_container_cleanup_after_days()
-        cleanup_info = container_service.build_cleanup_info(last_time, cleanup_days)
+        # 走读侧同一份工具，而不是自己拼：此前这里调用 build_cleanup_info 时**没传顺延**，
+        # 于是本接口的倒计时一直是"裸"的（不含已结算顺延，也不含正在进行的窗口），
+        # 与详情/提醒/清理的口径不一致。
+        cleanup_info = container_service.get_container_cleanup_state(container)
+        last_time = cleanup_info.get("last_ssh_login_time")
         threading.Thread(
             target=_refresh_disk_async,
             args=(container.id,),

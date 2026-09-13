@@ -101,23 +101,31 @@ def _get_container_freeze_state(container_id: int, *, ignore_errors: bool = Fals
 
 
 def _get_container_cleanup_state(container, *, ignore_errors: bool = False) -> dict:
-    """读清理倒计时：last_ssh + cleanup_after_days + 机器不可用顺延（deferral_seconds）。"""
+    """读清理倒计时：last_ssh + cleanup_after_days + 机器不可用顺延。
+
+    顺延有两个来源，缺一不可：已结算的 `deferral_seconds`，以及**正在进行的窗口**
+    （`unavailable_since`）。只看前者会让维护/断线期间的倒计时照走——它要到窗口关闭
+    才被整体拨回，读的这一刻并不准。
+    """
     try:
         with session_scope(commit=False) as session:
             record = container_ssh_login_repo.get_by_machine_container(
                 container.machine_id, container.id, session=session,
             )
+            machine = machine_repo.get_by_id(container.machine_id, session=session)
     except Exception:
         if not ignore_errors:
             raise
         logger.warning("failed to read ssh login record for container %s", container.id)
         record = None
+        machine = None
     last_login = record.last_ssh_login_time if record else None
     return {
         "last_ssh_login_time": last_login,
         **build_cleanup_info(
             last_login, settings_tasks.get_container_cleanup_after_days(),
             (record.deferral_seconds or 0) if record else 0,
+            getattr(machine, "unavailable_since", None),
         ),
     }
 
