@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import socket
 import ssl
 from pathlib import Path
 
@@ -39,6 +41,92 @@ def _resolve_tls(url: str, cert=None, verify=None):
             logger.warning("send to %s: no pinned cert (machine not enrolled yet); TLS verify disabled", host)
             verify = False
     return cert, verify
+
+
+############################################################
+# TLS 失败诊断（动作通道的"读得懂"报错）
+############################################################
+
+def _split_netloc(url: str) -> tuple[str, int]:
+    """URL → (host, port)。仅用于诊断连接，不参与正常请求组装。"""
+
+    netloc = url.split("://", 1)[-1].split("/", 1)[0]
+    host, _, port_str = netloc.partition(":")
+    try:
+        port = int(port_str)
+    except ValueError:
+        port = 443
+    return host, port
+
+
+def _peer_cert_fingerprint(url: str, timeout: float = 5.0) -> str | None:
+    """**不信任何证书**地握一次手，取对端当前出示证书的 SHA-256 指纹（诊断用）。
+
+    只在链校验失败后被调用：此时正常路径已经走不通，需要一个不设前提的取样，
+    才能回答"它现在拿的是哪张证书"。
+    """
+
+    host, port = _split_netloc(url)
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        # 必须带上本端客户端证书：Node 侧配了 CTRL_CA 就要求 mTLS，裸握手会被直接拒，
+        # 那样取样永远失败、诊断只会说"取不到指纹"——把真正的原因盖住。
+        from ....utils.cert_utils import ctrl_certificate_paths
+        paths = ctrl_certificate_paths()
+        if paths.cert_file.exists() and paths.key_file.exists():
+            ctx.load_cert_chain(certfile=str(paths.cert_file), keyfile=str(paths.key_file))
+        with ctx.wrap_socket(
+            socket.create_connection((host, port), timeout=timeout), server_hostname=host,
+        ) as sock:
+            der = sock.getpeercert(binary_form=True)
+    except Exception as exc:  # pragma: no cover - 诊断失败不该盖住原错误
+        logger.debug("diagnose peer cert failed for %s: %s", url, exc)
+        return None
+    return hashlib.sha256(der).hexdigest() if der else None
+
+
+def _pin_cert_fingerprint(verify) -> str | None:
+    """pin 文件里那张证书的 SHA-256 指纹。"""
+
+    if not isinstance(verify, str):
+        return None
+    try:
+        der = ssl.PEM_cert_to_DER_cert(Path(verify).read_text())
+    except Exception as exc:  # pragma: no cover
+        logger.debug("diagnose pin cert failed for %s: %s", verify, exc)
+        return None
+    return hashlib.sha256(der).hexdigest()
+
+
+def describe_cert_mismatch(url: str, verify) -> str:
+    """链校验失败后，把两组指纹并排给出——这决定了下一步该做什么。
+
+    **对端指纹 ≠ pin 指纹**：Node 换过证书（自签名证书被重新生成）。Ctrl 手里的信任锚
+    已作废 → 需要**重新建立信任**（修复连接），而不是重试。
+
+    **两者相同**：证书没变，失败另有原因（例如 pin 文件本身损坏）→ 不该去按修复连接。
+
+    没有这组信息时，操作员只能看到一句 `self-signed certificate`，无从判断是"该重新
+    装订"还是"别的东西坏了"——这正是本函数存在的理由。
+    """
+
+    live = _peer_cert_fingerprint(url)
+    pinned = _pin_cert_fingerprint(verify)
+    if live is None:
+        return "（诊断：取不到对端证书指纹，对端可能不可达或未启用 TLS）"
+    if pinned is None:
+        return f"（诊断：对端指纹={live[:16]}…，但取不到 pin 指纹）"
+    if live == pinned:
+        return (
+            f"（诊断：对端与 pin 指纹一致 {live[:16]}… —— 证书没变，"
+            "失败另有原因，不要按「修复连接」）"
+        )
+    return (
+        f"（诊断：对端证书已变 —— 对端={live[:16]}… pin={pinned[:16]}…；"
+        "Node 重新生成过自签名证书，Ctrl 的信任锚已作废 → 请点「修复连接」重新建立信任）"
+    )
 
 
 class _PinnedNodeAdapter(HTTPAdapter):

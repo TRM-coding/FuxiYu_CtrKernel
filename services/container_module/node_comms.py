@@ -15,7 +15,10 @@ from .node_comms_modules.runtime_cache import (
     _read_machine_runtime_cache,
 )
 from .node_comms_modules.runtime_push import _post_runtime_buffer, _read_internal_token
-from .node_comms_modules.transport import _pin_file, _resolve_tls, _post_node_json, _decode_node_response
+from .node_comms_modules.transport import (
+    _pin_file, _resolve_tls, _post_node_json, _decode_node_response,
+    describe_cert_mismatch,
+)
 from .node_comms_modules.machine_access import _ensure_machine_online_for_operation
 from .node_comms_modules.enrollment import _fetch_peer_cert
 from .node_comms_modules.snapshots import (
@@ -82,8 +85,16 @@ def send(url: str, payload: dict, timeout: float = 5.0, *, cert=None, verify=Non
         response = _post_node_json(url, payload, timeout, cert, verify)
         return _decode_node_response(response)
     except requests.RequestException as exc:
-        logger.error("Request error: %s", exc)
-        return {"error": str(exc)}
+        # 链校验失败是"信任锚作废"这一类问题，原始 SSL 文案看不出下一步该做什么。
+        # 附带两组指纹，让操作员能直接判断该不该按「修复连接」。
+        hint = ""
+        if "CERTIFICATE_VERIFY_FAILED" in str(exc):
+            try:
+                hint = " " + describe_cert_mismatch(url, verify)
+            except Exception as diag_exc:  # pragma: no cover - 诊断失败不盖住原错误
+                logger.debug("cert mismatch diagnosis failed: %s", diag_exc)
+        logger.error("Request error: %s%s", exc, hint)
+        return {"error": f"{exc}{hint}"}
 
 
 ############################################################

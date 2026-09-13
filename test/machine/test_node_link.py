@@ -685,3 +685,91 @@ def test_run_machine_link_does_not_dial_without_pin(monkeypatch):
 
     assert dialled == []  # 未接入（无 pin）→ 不发起任何连接
     assert statuses == [MachineStatus.OFFLINE]
+
+
+############################################################
+# 动作通道 TLS 失败诊断（把 "self-signed certificate" 变成可操作的提示）
+############################################################
+
+def test_describe_cert_mismatch_reports_both_fingerprints(monkeypatch):
+    """对端换了证书 → 并排给出两组指纹，并指向「修复连接」。"""
+    from ...services.container_module.node_comms_modules import transport
+
+    monkeypatch.setattr(transport, "_peer_cert_fingerprint", lambda url, timeout=5.0: "aa" * 32)
+    monkeypatch.setattr(transport, "_pin_cert_fingerprint", lambda verify: "bb" * 32)
+
+    text = transport.describe_cert_mismatch("https://10.0.0.7:5789/api/x", "/tmp/pin.pem")
+
+    assert "对端证书已变" in text
+    assert "aaaa" in text and "bbbb" in text
+    assert "修复连接" in text
+
+
+def test_describe_cert_mismatch_says_do_not_renew_when_identical(monkeypatch):
+    """指纹一致 → 证书没变，别去按修复连接（否则是在治错病）。"""
+    from ...services.container_module.node_comms_modules import transport
+
+    monkeypatch.setattr(transport, "_peer_cert_fingerprint", lambda url, timeout=5.0: "cc" * 32)
+    monkeypatch.setattr(transport, "_pin_cert_fingerprint", lambda verify: "cc" * 32)
+
+    text = transport.describe_cert_mismatch("https://10.0.0.7:5789/api/x", "/tmp/pin.pem")
+
+    assert "一致" in text
+    assert "不要按" in text
+
+
+def test_describe_cert_mismatch_handles_unreachable_peer(monkeypatch):
+    from ...services.container_module.node_comms_modules import transport
+
+    monkeypatch.setattr(transport, "_peer_cert_fingerprint", lambda url, timeout=5.0: None)
+    monkeypatch.setattr(transport, "_pin_cert_fingerprint", lambda verify: "dd" * 32)
+
+    assert "取不到对端证书指纹" in transport.describe_cert_mismatch("https://10.0.0.7/api/x", "/tmp/pin.pem")
+
+
+def test_split_netloc_handles_port_and_default():
+    from ...services.container_module.node_comms_modules.transport import _split_netloc
+
+    assert _split_netloc("https://10.0.0.7:5789/api/x") == ("10.0.0.7", 5789)
+    assert _split_netloc("https://10.0.0.7/api/x") == ("10.0.0.7", 443)
+
+
+def test_send_appends_diagnosis_on_cert_failure(monkeypatch):
+    """send 的错误文案里要带上诊断——外层 NodeServiceError 直接透传它。
+
+    异常类从门户已引入的 requests 取，本文件不引入该模块：安全契约禁止 test_*.py
+    出现它的 import 语句（那正是「测试自己发真实请求」的入口）。
+    """
+    from ...services.container_module import node_comms
+
+    def _boom(url, payload, timeout, cert, verify):
+        raise node_comms.requests.exceptions.SSLError(
+            "HTTPSConnectionPool: Max retries exceeded (Caused by SSLError("
+            "SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] "
+            "certificate verify failed: self-signed certificate')))"
+        )
+
+    monkeypatch.setattr(node_comms, "_post_node_json", _boom)
+    monkeypatch.setattr(node_comms, "describe_cert_mismatch", lambda url, verify: "（诊断：对端证书已变）")
+
+    result = node_comms.send("https://10.0.0.7:5789/api/create_container", {})
+
+    assert "CERTIFICATE_VERIFY_FAILED" in result["error"]
+    assert "（诊断：对端证书已变）" in result["error"]
+
+
+def test_send_does_not_append_diagnosis_for_other_transport_errors(monkeypatch):
+    """只有链校验失败才附诊断；连不上之类的失败不该被这段抢戏。"""
+    from ...services.container_module import node_comms
+
+    def _refused(url, payload, timeout, cert, verify):
+        raise node_comms.requests.exceptions.ConnectionError("Connection refused")
+
+    called = []
+    monkeypatch.setattr(node_comms, "_post_node_json", _refused)
+    monkeypatch.setattr(node_comms, "describe_cert_mismatch", lambda url, verify: called.append(1))
+
+    result = node_comms.send("https://10.0.0.7:5789/api/x", {})
+
+    assert result["error"] == "Connection refused"
+    assert called == []
