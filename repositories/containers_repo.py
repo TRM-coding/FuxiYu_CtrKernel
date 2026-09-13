@@ -64,7 +64,7 @@ def get_id_by_name_machine(
     machine_id: int,
     *,
     session: Session,
-    include_invalid: bool = False,
+    include_invalid: bool = False,  # 
 ) -> int | None:
     conditions = [
         Container.name == container_name,
@@ -180,7 +180,6 @@ def create_container(
 ) -> Container:
     container = Container(
         name=name,
-        active_name=name,
         is_valid=True,
         image=image,
         machine_id=int(machine_id),
@@ -209,7 +208,6 @@ def update_container(container_id: int, *, session: Session, **fields) -> Contai
 
     allowed = {
         "name",
-        "active_name",
         "is_valid",
         "deleted_at",
         "deleted_trigger",
@@ -236,7 +234,6 @@ def update_container(container_id: int, *, session: Session, **fields) -> Contai
         "failed_detail",
         "status_unknown_since",
         "status_source",
-        "active_name",
         "deleted_at",
         "deleted_trigger",
         "deleted_reason",
@@ -247,11 +244,6 @@ def update_container(container_id: int, *, session: Session, **fields) -> Contai
             continue
         if getattr(container, key) != value:
             setattr(container, key, value)
-            dirty = True
-    if "name" in fields or "is_valid" in fields:
-        expected_active_name = container.name if bool(getattr(container, "is_valid", True)) else None
-        if container.active_name != expected_active_name:
-            container.active_name = expected_active_name
             dirty = True
     if dirty:
         session.flush()
@@ -271,7 +263,6 @@ def delete_container(
         return False
     if bool(getattr(container, "is_valid", True)):
         container.is_valid = False
-        container.active_name = None
         container.deleted_at = datetime.utcnow()
     if deleted_trigger is not None:
         container.deleted_trigger = deleted_trigger
@@ -304,7 +295,6 @@ def restore_container_record(
     if not container:
         return None
     container.name = name
-    container.active_name = name
     container.is_valid = True
     container.deleted_at = None
     container.deleted_trigger = None

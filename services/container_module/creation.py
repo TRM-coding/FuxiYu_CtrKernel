@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # 创建工具族
 # 本文件只放步骤函数，不含业务流程；门户 Create_container 在 services/container_tasks.py。
 # 函数在文件里的排列顺序 = 门户调用顺序，便于对照阅读：
-#   守卫 → 参数校验 → 选卡 → 组包 → 重名检查 → 请求 Node → 落库 → 绑定 → SSH 记录 → 审计
+#   守卫 → 参数校验（含重名）→ 选卡 → 组包 → 请求 Node → 落库 → 绑定 → SSH 记录 → 审计
 # 命名约定：_ensure_ 守卫/校验 · _build_ 组包（纯函数）· _request_ 网络出口 · _persist_ 落库 · _audit_ 审计
 ####################################################
 
@@ -102,22 +102,6 @@ def _build_create_payload(
             if account.get("container_username") or account.get("system_username")
         ]
     return payload
-
-
-def _ensure_create_name_available(container_name: str, machine_id: int) -> None:
-    """重名检查：同机器重名抛 IntegrityError（api 层据此回 409）；查库异常只告警不拦截。"""
-    try:
-        with session_scope(commit=False) as session:
-            existing_id = containers_repo.get_id_by_name_machine(
-                container_name=container_name, machine_id=machine_id, session=session,
-            )
-        if existing_id:
-            message = f"container name '{container_name}' already exists on machine {machine_id} (id={existing_id})"
-            raise IntegrityError(message, params=None, orig=message)
-    except IntegrityError:
-        raise
-    except Exception as exc:
-        logger.warning("failed to check existing container name: %s", exc)
 
 
 ####################################################

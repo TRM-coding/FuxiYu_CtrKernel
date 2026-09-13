@@ -17,7 +17,6 @@ def test_deleted_container_keeps_owner_without_navigation(db_session):
     container = create_container(machine=create_machine(), name="retained")
     bind_user_container(user, container, role="ROOT")
     container.is_valid = False
-    container.active_name = None
     db_session.commit()
     log_success(operation=OperationType.DELETE_CONTAINER, target_type="container", target_id=container.id)
     log = list_operation_logs()["logs"][0]

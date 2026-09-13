@@ -1,5 +1,3 @@
-from sqlalchemy import event
-
 from ..extensions import db
 from ..constant import *
 
@@ -10,7 +8,6 @@ class Container(db.Model):
     id: int = db.Column(db.Integer, primary_key=True)
     created_at = db.Column(db.DateTime, nullable=True)
     name: str = db.Column(db.String(120), nullable=False)
-    active_name: str = db.Column(db.String(120), nullable=True)
     is_valid: bool = db.Column(db.Boolean, nullable=False, default=True, server_default=db.text("1"))
     deleted_at = db.Column(db.DateTime, nullable=True)
     deleted_trigger: str = db.Column(db.String(64), nullable=True)
@@ -79,13 +76,11 @@ class Container(db.Model):
     def __repr__(self) -> str:  # pragma: no cover
         return f"<Container {self.name} on machine={self.machine_id}>"
 
+    # 无 (name, machine_id) 唯一约束：软删要求「删掉即释放名字」，而唯一索引会让已删行
+    # 继续占名（除非再引入一个派生列做 NULL 技巧，那套已废弃）。
+    # 「单机内活容器名唯一」这个不变式的真正守卫在 Node 侧——docker daemon 本身就拒绝
+    # 同名容器，而创建链路是「请求 Node → 成功才落库」，失败发生在落库之前，不会留下重复行。
+    # Ctrl 侧的 validate_create_params → check_duplicate_container_name 只负责给出可读的 409。
     __table_args__ = (
-        db.UniqueConstraint("active_name", "machine_id", name="uq_container_active_name_machine"),
         db.Index("idx_containers_is_valid", "is_valid"),
     )
-
-
-@event.listens_for(Container, "before_insert")
-@event.listens_for(Container, "before_update")
-def _sync_container_active_name(mapper, connection, target) -> None:
-    target.active_name = target.name if getattr(target, "is_valid", True) else None

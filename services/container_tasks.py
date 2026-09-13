@@ -42,7 +42,6 @@ from .container_module.creation import (     # 创建族
     _validate_create_params,
     _select_gpu_cards,
     _build_create_payload,
-    _ensure_create_name_available,
     _request_node_create,
     _persist_container_record,
     _bind_owner_and_restored_accounts,
@@ -101,7 +100,7 @@ from .container_module.lifecycle import (    # 启停族
 
 ####################################################
 # 容器创建
-# 门户保留原始出入参；顺序即契约：守卫 → 参数校验 → 选卡 → 组包 → 重名检查 → 请求 Node
+# 门户保留原始出入参；顺序即契约：守卫 → 参数校验（含重名）→ 选卡 → 组包 → 请求 Node
 # → 落库 → 绑定 → SSH 记录 → 审计。其中"Node 成功才落库"是不可调换的次序。
 ####################################################
 
@@ -122,7 +121,6 @@ def Create_container(
     payload = _build_create_payload(
         container, owner_name, public_key, image_build, restore_mount_path, restore_accounts,
     )
-    _ensure_create_name_available(container.NAME, machine_id)
     _request_node_create(full_url, payload)
     container_id = _persist_container_record(
         container, machine_id, image_build, restore_mount_path, reuse_container_id,

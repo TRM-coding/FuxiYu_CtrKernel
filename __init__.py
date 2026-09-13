@@ -151,7 +151,6 @@ def _ensure_container_lifecycle_schema() -> None:
     logger = logging.getLogger(__name__)
     existing = {column["name"] for column in inspector.get_columns("containers")}
     required_sqlite = {
-        "active_name": "ALTER TABLE containers ADD COLUMN active_name VARCHAR(120) NULL",
         "is_valid": "ALTER TABLE containers ADD COLUMN is_valid BOOLEAN NOT NULL DEFAULT 1",
         "deleted_at": "ALTER TABLE containers ADD COLUMN deleted_at DATETIME NULL",
         "deleted_trigger": "ALTER TABLE containers ADD COLUMN deleted_trigger VARCHAR(64) NULL",
@@ -159,7 +158,6 @@ def _ensure_container_lifecycle_schema() -> None:
         "deleted_by_user_id": "ALTER TABLE containers ADD COLUMN deleted_by_user_id INTEGER NULL",
     }
     required_mysql = {
-        "active_name": "ALTER TABLE containers ADD COLUMN active_name VARCHAR(120) NULL",
         "is_valid": "ALTER TABLE containers ADD COLUMN is_valid BOOLEAN NOT NULL DEFAULT TRUE",
         "deleted_at": "ALTER TABLE containers ADD COLUMN deleted_at DATETIME NULL",
         "deleted_trigger": "ALTER TABLE containers ADD COLUMN deleted_trigger VARCHAR(64) NULL",
@@ -177,10 +175,6 @@ def _ensure_container_lifecycle_schema() -> None:
     }
     schema_names = index_names | constraint_names
     indexes_to_create = {
-        "uq_container_active_name_machine": (
-            "CREATE UNIQUE INDEX uq_container_active_name_machine "
-            "ON containers(active_name, machine_id)"
-        ),
         "idx_containers_is_valid": "CREATE INDEX idx_containers_is_valid ON containers(is_valid)",
     }
 
@@ -188,7 +182,14 @@ def _ensure_container_lifecycle_schema() -> None:
         for name in missing:
             conn.execute(text(required[name]))
         conn.execute(text("UPDATE containers SET is_valid = 1 WHERE is_valid IS NULL"))
-        conn.execute(text("UPDATE containers SET active_name = name WHERE is_valid = 1 AND active_name IS NULL"))
+        # active_name 已废弃：新代码不再写它。旧库上它可能还留着值，
+        # 而残留的 (active_name, machine_id) 唯一索引会把「已删容器占着名字」变成硬阻塞。
+        # 清空即让残留索引失效——新行不再写它（NULL），多个 NULL 在唯一索引下互不冲突。
+        # 删列由 migrations/2026-09_drop_active_name.sql 处理（DDL 必须走在人工迁移里）。
+        if "active_name" in existing:
+            cleared = conn.execute(text("UPDATE containers SET active_name = NULL WHERE active_name IS NOT NULL"))
+            if cleared.rowcount:
+                logger.warning("active_name deprecated: cleared %s stale value(s)", cleared.rowcount)
         for name, ddl in indexes_to_create.items():
             if name in schema_names:
                 continue

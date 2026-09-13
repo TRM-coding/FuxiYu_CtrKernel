@@ -111,7 +111,10 @@ def test_remove_container_records_deleted_snapshot_and_mount_cleanup(db_session,
     retained = containers_repo.get_by_id(container.id, session=db_session, include_invalid=True)
     assert retained is not None
     assert retained.is_valid is False
-    assert retained.active_name is None
+    # 软删即释放名字：活容器集合里不再有这个 name（同名可在同机器重建）
+    assert containers_repo.get_id_by_name_machine(
+        container.name, retained.machine_id, session=db_session,
+    ) is None
     assert retained.deleted_trigger == "api"
     assert {
         item["user_id"]
