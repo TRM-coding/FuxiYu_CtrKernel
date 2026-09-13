@@ -227,7 +227,7 @@ def _derive_hardware_changes(machine, data: dict) -> tuple[dict, dict]:
         if gpu_type:
             fields["gpu_type"] = gpu_type
         # GPU 三集合建模（决策）：gpu_list 是事实（smi 枚举）随帧更新；
-        # 许可（gpu_allow_list）与 max_gpu_number 不自动 trim——GPU index 由
+        # 许可（gpu_allow_list）不自动 trim——GPU index 由
         # nvidia-smi 决定、非系统可控，许可调整走人工（枚举变化时告警见上）。
         gpu_indices = []
         for g in gpus:

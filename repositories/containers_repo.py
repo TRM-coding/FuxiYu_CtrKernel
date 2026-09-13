@@ -23,10 +23,6 @@ from . import machine_repo, user_repo, usercontainer_repo
 # 资源上限
 
 
-def get_max_gpu_number(machine_id: int, *, session: Session) -> int:
-    return machine_repo.get_max_gpu_number(machine_id, session=session)
-
-
 def get_max_shared_gb(machine_id: int, *, session: Session) -> int:
     return machine_repo.get_max_shared_gb(machine_id, session=session)
 
@@ -370,10 +366,10 @@ def ensure_machine_exists(machine_id: int, *, session: Session) -> Any:
 
 
 def validate_gpu_request(machine: Machine, container: Container_info, *, session: Session) -> None:
-    # max_gpu_number 已退役（GPU 三集合决策）：许可数量 = allow_list 长度（配置时）
-    # 或 gpu_number（未配置回退）。GPU_LIST 具体 id 由系统在 allow_list 内生成，不做 id 校验。
-    allow = machine.gpu_allow_list or []
-    max_gpu = len(allow) if allow else int(getattr(machine, "gpu_number", 0) or 0)
+    # 许可数量 = allow_list 长度（配置时）或 gpu_number（未配置回退），规则与详情响应
+    # 共用 machine_repo.gpu_allowance 一处。GPU_LIST 具体 id 由系统在 allow_list 内生成，
+    # 不做 id 校验。
+    max_gpu = machine_repo.gpu_allowance(machine)
     try:
         gpu_list = getattr(container, "GPU_LIST", []) or []
     except Exception:

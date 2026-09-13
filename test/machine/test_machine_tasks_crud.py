@@ -364,3 +364,45 @@ def test_update_machine_accepts_port_and_can_clear_it(db_session):
     assert machine_tasks.Update_machine(machine.id, port=None) is True
     db_session.expire_all()
     assert db_session.get(Machine, machine.id).port is None
+
+
+class TestGpuAllowance:
+    """单容器 GPU 上限的唯一落点：许可列表长度，未配置回退实装卡数。
+
+    旧列 max_gpu_number 已删——它退役后上限改由本规则表达，而那一列既不读也不写，
+    留着只会让人以为改它有效。详情响应仍以 `max_gpu_number` 为名暴露，但值是现算的，
+    所以前端零改动。
+    """
+
+    def test_allow_list_length_wins(self, db_session):
+        machine = create_machine(gpu_number=8, gpu_allow_list=[0, 1, 2, 3, 4])
+
+        assert machine_repo.gpu_allowance(machine) == 5
+
+    def test_falls_back_to_installed_count(self, db_session):
+        machine = create_machine(gpu_number=8, gpu_allow_list=None)
+
+        assert machine_repo.gpu_allowance(machine) == 8
+
+    def test_empty_list_means_unconfigured_not_zero(self, db_session):
+        """空列表 = 未配置（等同全量），不是「一张都不许」。"""
+        machine = create_machine(gpu_number=3, gpu_allow_list=[])
+
+        assert machine_repo.gpu_allowance(machine) == 3
+
+    def test_cpu_machine_reports_zero(self, db_session):
+        machine = create_machine(machine_type=MachineTypes.CPU, gpu_number=0, gpu_allow_list=None)
+
+        assert machine_repo.gpu_allowance(machine) == 0
+
+    def test_detail_response_reports_the_derived_value(self, db_session):
+        """详情响应里的 max_gpu_number 是派生值，不是读列。"""
+        machine = create_machine(gpu_number=8, gpu_allow_list=[0, 1, 2])
+
+        info = machine_tasks.Get_detail_information(machine.id)
+
+        assert info.max_gpu_number == 3
+
+    def test_model_no_longer_declares_the_column(self, db_session):
+        """锁住删除：列不得回来（回来也只会有列没人写，误导改它的人）。"""
+        assert "max_gpu_number" not in Machine.__table__.columns

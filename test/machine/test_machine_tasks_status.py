@@ -723,11 +723,11 @@ def test_list_machine_bref_operator_bypasses_machine_permission(monkeypatch, db_
 
 
 def test_apply_sys_snapshot_drift_updates_db_and_trims_limits(db_session, monkeypatch):
-    """实际硬件缩水 → 更新 DB 实际值 + trim CPU/内存上限（GPU 不 trim，走三集合）。"""
+    """实际硬件缩水 → 更新 DB 实际值 + trim CPU/内存上限（GPU 数量是事实，许可走三集合、不自动 trim）。"""
     machine = create_machine(
         machine_type=MachineTypes.GPU,
         cpu_core_number=8, memory_size_gb=16, gpu_number=2,
-        max_cpu_core_number=8, max_memory_gb=16, max_gpu_number=2,
+        max_cpu_core_number=8, max_memory_gb=16,
     )
     monkeypatch.setattr(node_comms, "_post_runtime_buffer", lambda *a, **k: None)
 
@@ -745,7 +745,6 @@ def test_apply_sys_snapshot_drift_updates_db_and_trims_limits(db_session, monkey
     assert m.max_memory_gb == 7       # trim
     assert m.gpu_number == 0          # 实际更新
     assert m.gpu_list == []           # gpu_list 事实字段更新
-    assert m.max_gpu_number == 2      # GPU 不 trim（决策：许可人工）
     assert m.cpu_core_number == 8     # 无变化不动
     assert m.max_cpu_core_number == 8
     assert m.disk_size_gb == 200      # disk_size_gb 显示字段更新（bind_mount 分区容量）
@@ -766,7 +765,7 @@ def test_alloc_cascade_drift_then_container_trim(db_session, monkeypatch):
     machine = create_machine(
         machine_type=MachineTypes.GPU,
         cpu_core_number=5, memory_size_gb=5, gpu_number=1,
-        max_cpu_core_number=5, max_memory_gb=5, max_gpu_number=1,
+        max_cpu_core_number=5, max_memory_gb=5,
     )
     container = create_container(machine=machine, name="cascade_c", status=ContainerStatus.ONLINE)
     monkeypatch.setattr(node_comms, "_post_runtime_buffer", lambda *a, **k: None)
@@ -795,11 +794,11 @@ def test_alloc_cascade_drift_then_container_trim(db_session, monkeypatch):
 
 
 def test_apply_sys_snapshot_gpu_enum_updates_gpu_list_not_allow(db_session, monkeypatch):
-    """GPU 枚举变化 → 更新 gpu_list/gpu_number（事实），allow_list/max_gpu_number 不动。"""
+    """GPU 枚举变化 → 更新 gpu_list/gpu_number（事实），allow_list 不动。"""
     machine = create_machine(
         machine_type=MachineTypes.GPU,
         cpu_core_number=8, memory_size_gb=16, gpu_number=2,
-        max_cpu_core_number=8, max_memory_gb=16, max_gpu_number=2,
+        max_cpu_core_number=8, max_memory_gb=16,
         gpu_allow_list=[0, 1],
     )
     monkeypatch.setattr(node_comms, "_post_runtime_buffer", lambda *a, **k: None)
@@ -817,7 +816,6 @@ def test_apply_sys_snapshot_gpu_enum_updates_gpu_list_not_allow(db_session, monk
     assert m.gpu_number == 1          # 实际数量更新
     assert m.gpu_list == [0]          # 事实枚举更新
     assert m.gpu_allow_list == [0, 1]  # 许可不动（人工维护）
-    assert m.max_gpu_number == 2      # 不 trim
 
 
 def test_apply_container_status_snapshot_backfills_port_mappings(db_session):

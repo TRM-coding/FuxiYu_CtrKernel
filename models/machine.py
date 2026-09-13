@@ -32,7 +32,6 @@ class Machine(db.Model):
     disk_size_gb: int = db.Column(db.Integer, nullable=True)
     machine_description: str = db.Column(db.String(500), nullable=True)
     max_memory_gb: int = db.Column(db.Integer, nullable=True)
-    max_gpu_number: int = db.Column(db.Integer, nullable=True)
     max_cpu_core_number: int = db.Column(db.Integer, nullable=True)
     # 磁盘上限（2026-08 语义收敛）：max_disk_size_gb = 容器磁盘可用上限（管理员维护，
     # 冻结/容器展示「已用/上限」用它）；disk_size_gb = 显示用（Node 采集 bind_mount 分区容量）。

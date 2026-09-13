@@ -9,7 +9,7 @@ from ..repositories.machine_repo import *
 from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy import String, cast, func, or_, select
-from ..repositories import containers_repo, machine_permission_repo, user_repo
+from ..repositories import containers_repo, machine_permission_repo, machine_repo, user_repo
 from .operation_log_tasks import log_failure, log_result, log_success
 from ..constant import MachineStatus, OperationType
 from ..models.machine import Machine
@@ -711,7 +711,7 @@ def Get_detail_information(machine_id:int)->machine_detail_information|None:
             memory_size_gb=machine.memory_size_gb,
             max_shared_gb=machine.max_shared_gb,
             max_cpu_core_number=machine.max_cpu_core_number,
-            max_gpu_number=machine.max_gpu_number,
+            max_gpu_number=machine_repo.gpu_allowance(machine),
             max_memory_gb=machine.max_memory_gb,
             max_disk_size_gb=machine.max_disk_size_gb,
             disk_size_gb=machine.disk_size_gb,

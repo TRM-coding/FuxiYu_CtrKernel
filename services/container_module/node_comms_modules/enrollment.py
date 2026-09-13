@@ -59,7 +59,6 @@ def _default_resource_limits(hardware: dict) -> dict:
         "max_memory_gb": max(1, int(mem_gb * ratio)),
         "disk_size_gb": disk_gb,
         "gpu_number": len(gpus),
-        "max_gpu_number": len(gpus),
         "gpu_type": (gpus[0].get("name", "") if gpus else ""),
     }
     return limits
@@ -199,7 +198,7 @@ def _persist_enrolled_machine(
                 gpu_type=limits["gpu_type"], memory_size=limits["memory_size_gb"],
                 max_shared_gb=2, disk_size=limits["disk_size_gb"],
                 max_disk_size_gb=limits["disk_size_gb"], max_cpu_core_number=limits["max_cpu_core_number"],
-                max_gpu_number=limits["max_gpu_number"], max_memory_gb=limits["max_memory_gb"], session=session,
+                max_memory_gb=limits["max_memory_gb"], session=session,
             )
             machine_repo.update_machine(
                 machine.id, node_uid=uid, node_cert_fingerprint=fingerprint,

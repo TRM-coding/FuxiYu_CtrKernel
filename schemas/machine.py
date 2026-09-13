@@ -133,7 +133,6 @@ class MachineUpdateFields(BaseModel):
     disk_size: int | None = Field(default=None, ge=0)
     max_shared_gb: int | None = Field(default=None, ge=0)
     max_memory_gb: int | None = Field(default=None, ge=0)
-    max_gpu_number: int | None = Field(default=None, ge=0)
     max_cpu_core_number: int | None = Field(default=None, ge=0)
     max_disk_size_gb: int | None = Field(default=None, ge=0)
 

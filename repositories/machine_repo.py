@@ -94,7 +94,6 @@ def create_machine(
     max_shared_gb: int,
     disk_size: int,
     max_cpu_core_number: int,
-    max_gpu_number: int,
     max_memory_gb: int,
     max_disk_size_gb: int | None = None,
     session: Session,
@@ -110,7 +109,6 @@ def create_machine(
         memory_size_gb=memory_size,
         max_shared_gb=max_shared_gb,
         max_cpu_core_number=max_cpu_core_number,
-        max_gpu_number=max_gpu_number,
         max_memory_gb=max_memory_gb,
         max_disk_size_gb=max_disk_size_gb,
         disk_size_gb=disk_size,
@@ -153,7 +151,6 @@ def update_machine(machine_id: int, *, session: Session, **fields) -> bool:
         "shared_size_gb",
         "max_shared_gb",
         "max_memory_gb",
-        "max_gpu_number",
         "max_cpu_core_number",
         "max_disk_size_gb",
         "node_uid",
@@ -202,13 +199,20 @@ def set_maintenance(machine_id: int, enabled: bool, *, session: Session) -> bool
     return True
 
 
+def gpu_allowance(machine) -> int:
+    """单容器可申请的 GPU 上限（唯一落点）。
+
+    许可列表配了就取其长度，未配置回退到实装卡数——与 select_gpu_allowance 的候选集
+    同源（配了只在列表内选卡，没配则全量）。旧的 max_gpu_number 列已删：它退役后
+    上限改由本规则表达，而该列既不读也不写，留着只会让人以为改它有效。
+    """
+
+    allow = getattr(machine, "gpu_allow_list", None) or []
+    return len(allow) if allow else int(getattr(machine, "gpu_number", 0) or 0)
+
+
 def get_max_cpu_core_number(machine_id: int, *, session: Session) -> int:
     value = session.scalar(select(Machine.max_cpu_core_number).where(Machine.id == machine_id))
-    return int(value) if value is not None else 0
-
-
-def get_max_gpu_number(machine_id: int, *, session: Session) -> int:
-    value = session.scalar(select(Machine.max_gpu_number).where(Machine.id == machine_id))
     return int(value) if value is not None else 0
 
 
