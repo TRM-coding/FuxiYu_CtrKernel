@@ -161,7 +161,11 @@ def mock_external_services(monkeypatch, request):
 
         return _Thread()
 
-    monkeypatch.setattr("requests.post", _blocked_post)
+    # 拦在 Session.request 上，而不是 requests.post：后者只是「新建 Session 再 request」
+    # 的便捷入口。出站请求有两条路径——裸 requests.post，以及带自定义 TLS 适配器的
+    # requests.Session().post（pin 校验时走这条）——只有 Session.request 是两者共同的
+    # 唯一咽喉。钉在 requests.post 上会让第二条静默漏网，测试里真的发出网络请求。
+    monkeypatch.setattr("requests.Session.request", _blocked_post)
     monkeypatch.setattr("smtplib.SMTP", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Real SMTP is blocked in the safe pytest suite")))
     monkeypatch.setattr("smtplib.SMTP_SSL", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Real SMTP_SSL is blocked in the safe pytest suite")))
     monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail._send_smtp", _mail_send)

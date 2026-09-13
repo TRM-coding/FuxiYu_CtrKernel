@@ -120,6 +120,78 @@ def test_build_link_ssl_context_keys_pin_by_host(monkeypatch, tmp_path):
 
 
 ############################################################
+# 操作通道 TLS —— 与链路同口径（验链、不验名字）
+############################################################
+
+def _recording_pinned_context(monkeypatch, transport, captured):
+    """记录 cafile 与开关的 SSLContext 替身，避免测试依赖真实证书字节。"""
+
+    class _Context:
+        check_hostname = True
+        verify_mode = None
+
+    def _create_default_context(cafile=None, **kwargs):
+        captured["cafile"] = cafile
+        return _Context()
+
+    monkeypatch.setattr(transport.ssl, "create_default_context", _create_default_context)
+
+
+def test_pinned_adapter_verifies_chain_but_not_hostname(monkeypatch, tmp_path):
+    """动作通道对 pin 的口径必须与链路一致：验链、不验名字。
+
+    公共 CA 模型下 hostname 校验是承重的（一个 CA 给很多名字签证书）；这里的信任锚
+    只有一张自签证书，链通过即证明对端持有那把私钥——名字既不增加信息，又会在
+    IP/端口变化时误杀，而端点可变正是本系统的常态。
+
+    两个开关都要：ssl 模块一道，urllib3 v2 另有一道独立的 hostname 匹配。
+    """
+    from ...services.container_module.node_comms_modules import transport
+
+    pin = tmp_path / "10.0.0.7.pem"
+    pin.write_bytes(b"pinned node certificate")
+    captured = {}
+    _recording_pinned_context(monkeypatch, transport, captured)
+
+    kw = transport._PinnedNodeAdapter(str(pin)).poolmanager.connection_pool_kw
+
+    assert captured["cafile"] == str(pin), "链必须锚定在 pin 上"
+    assert kw["ssl_context"].check_hostname is False
+    assert kw["ssl_context"].verify_mode == ssl.CERT_REQUIRED
+    assert kw["assert_hostname"] is False, "urllib3 v2 的独立匹配也必须关掉"
+
+
+def test_post_node_json_uses_pinned_adapter_only_when_pin_present(monkeypatch, tmp_path):
+    """有 pin 走自定义适配器；无 pin（TOFU 过渡态）保持原生 requests 行为。"""
+    from ...services.container_module.node_comms_modules import transport
+
+    pin = tmp_path / "10.0.0.7.pem"
+    pin.write_bytes(b"pinned node certificate")
+    _recording_pinned_context(monkeypatch, transport, {})
+    mounted, plain = [], []
+
+    class _Session:
+        def mount(self, prefix, adapter):
+            mounted.append((prefix, type(adapter).__name__))
+
+        def post(self, url, **kwargs):
+            return "via-session"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(transport.requests, "Session", _Session)
+    monkeypatch.setattr(transport.requests, "post", lambda url, **kw: plain.append(url) or "via-plain")
+
+    assert transport._post_node_json("https://10.0.0.7/api/x", {}, 1.0, None, str(pin)) == "via-session"
+    assert mounted == [("https://", "_PinnedNodeAdapter")]
+
+    assert transport._post_node_json("https://10.0.0.7/api/x", {}, 1.0, None, False) == "via-plain"
+    assert plain == ["https://10.0.0.7/api/x"], "无 pin 时不该走适配器"
+    assert len(mounted) == 1
+
+
+############################################################
 # 目标集合解析
 ############################################################
 
