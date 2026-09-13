@@ -187,6 +187,19 @@ def _evaluate_limits(container, usage: dict) -> None:
         logger.info("[disk-check] OK: %s", log_msg)
 
 
+def _days_frozen(freeze_state) -> int:
+    """有效冻结天数 = 自然日 − 机器不可用顺延（宕机/维护期不计入用户责任）。
+
+    与之配套的另外两条期限（ssh 到期清理、挂载保留期）同样按"业务正常时间"计，
+    三处共用同一把尺子，只是实时性要求不同：ssh 倒计时要在窗口期就读，故读侧
+    还要折算正在进行的窗口；冻结升级只在窗口关闭后被动作消费，靠累加器即可。
+    """
+
+    elapsed = datetime.utcnow() - freeze_state.first_frozen_at
+    elapsed -= timedelta(seconds=int(getattr(freeze_state, "deferral_seconds", 0) or 0))
+    return max(0, elapsed.days)
+
+
 def _fmt_bytes(b: int) -> str:
     if b >= 1024**3:
         return f"{b/(1024**3):.1f}G"
@@ -323,7 +336,7 @@ def _handle_hard_limit_with_escalation(container, usage: dict, cache: dict[str, 
                     container.id, getattr(container, 'name', '?'))
 
     # ── 升级判断 ──
-    days_frozen = (datetime.utcnow() - freeze_state.first_frozen_at).days
+    days_frozen = _days_frozen(freeze_state)
     escalation_days = settings_tasks.get_container_disk_freeze_escalation_days()
     if days_frozen >= escalation_days:
         _handle_freeze_escalation(container, usage, cache, days_frozen)
@@ -340,7 +353,7 @@ def _log_freeze_state_if_exists(container) -> None:
     if existing is None:
         return
 
-    days_frozen = (datetime.utcnow() - existing.first_frozen_at).days
+    days_frozen = _days_frozen(existing)
     grace_info = ""
     if existing.grace_until:
         if datetime.utcnow() < existing.grace_until:

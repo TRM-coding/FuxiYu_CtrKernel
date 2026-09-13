@@ -243,6 +243,31 @@ async def run_machine_link(machine_id: int, host: str, port: int, uid: str) -> N
 # 集合对齐（运行中链路 ↔ machines 表）
 ############################################################
 
+def reconcile_unmanaged_machines(targets: dict[int, tuple[str, int, str]]) -> None:
+    """把**不在拨号清单里**的机器置 OFFLINE —— 「我不拨你」本身就是结论。
+
+    这些机器（缺 host 或缺 uid）永远不会被拨，所以 `machine_status` 没有任何写入者，
+    会一直停在迁移/建档时的那个值上——典型表现是**假 ONLINE**。而 ONLINE 的含义是
+    「最近一次拨号成功」，没有拨号证据就不该声称在线。
+
+    不处置的代价不止是显示：`machine_in_scope` 与 `_ensure_machine_online_for_operation`
+    都读这个字段，假 ONLINE 会让两边都放行，于是定时任务对一台永远不会应答的机器
+    反复尝试、每轮留下失败记录。
+
+    每轮对齐时跑，因此「运行中变得不可拨」（例如管理员把 IP 清空）同样会收敛。
+    已推进号状态就跳过——只在真发生时写一次，不制造重复审计。
+    """
+
+    for machine in _load_machine_rows():
+        if machine.id in targets:
+            continue
+        status = getattr(machine, "machine_status", None)
+        value = status.value if hasattr(status, "value") else str(status or "")
+        if value == MachineStatus.OFFLINE.value:
+            continue
+        _mark_machine_status(machine.id, MachineStatus.OFFLINE)
+
+
 def sync_links(tasks: dict[int, dict]) -> None:
     """把运行中的链路集合对齐到 machines 表全量。
 
@@ -255,6 +280,7 @@ def sync_links(tasks: dict[int, dict]) -> None:
     """
 
     targets = load_link_targets()
+    reconcile_unmanaged_machines(targets)
     for machine_id, entry in list(tasks.items()):
         target = targets.get(machine_id)
         if target is None or entry["task"].done() or entry["target"] != target:

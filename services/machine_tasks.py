@@ -202,8 +202,17 @@ def refresh_unavailable_window(machine_id: int, *, session) -> None:
         if since is not None:
             delta = int((datetime.utcnow() - since).total_seconds())
             if delta > 0:
-                from ..repositories import container_ssh_login_repo
+                # 同一段"非业务正常时间"要宽恕该机器上**全部**以时长计的期限——
+                # 它们共用一把尺子，只是实时性要求不同（ssh 倒计时要在窗口期就读，
+                # 故读侧还要折算正在进行的窗口；这两条只在窗口关闭后被动作消费）。
+                from ..repositories import (
+                    container_disk_freeze_state_repo,
+                    container_ssh_login_repo,
+                    deleted_container_restore_snapshot_repo,
+                )
                 container_ssh_login_repo.add_deferral_seconds(machine_id, delta, session=session)
+                container_disk_freeze_state_repo.add_deferral_seconds(machine_id, delta, session=session)
+                deleted_container_restore_snapshot_repo.add_deferral_seconds(machine_id, delta, session=session)
             machine.unavailable_since = None
             session.flush()
 

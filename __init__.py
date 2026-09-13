@@ -39,6 +39,7 @@ def _init_database() -> None:
     _ensure_gpu_columns()
     _ensure_cleanup_deferral_schema()
     _ensure_machine_endpoint_schema()
+    _ensure_freeze_state_schema()
     try:
         from .services.rbac_service import seed_rbac_defaults
 
@@ -226,6 +227,33 @@ def _ensure_machine_endpoint_schema() -> None:
     logging.getLogger(__name__).warning("machine schema upgraded: added columns port")
 
 
+def _ensure_freeze_state_schema() -> None:
+    """补齐 container_disk_freeze_state.deferral_seconds（冻结期内的不可用顺延）。
+
+    与 ssh 到期清理、挂载保留期共用同一把尺子：期限按"业务正常时间"计，宕机/维护期
+    不算数。旧行保持 NULL，读取侧 coalesce 兜底为 0。
+    """
+
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    current_engine = extensions.engine
+    inspector = inspect(current_engine)
+    if not inspector.has_table("container_disk_freeze_state"):
+        return
+
+    existing = {column["name"] for column in inspector.get_columns("container_disk_freeze_state")}
+    if "deferral_seconds" in existing:
+        return
+
+    with current_engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE container_disk_freeze_state ADD COLUMN deferral_seconds INTEGER NULL"
+        ))
+    logging.getLogger(__name__).warning("freeze state schema upgraded: added columns deferral_seconds")
+
+
 def _ensure_deleted_container_schema() -> None:
     """Add deleted-owned mount state and cleanup linkage to existing databases."""
 
@@ -252,6 +280,7 @@ def _ensure_deleted_container_schema() -> None:
         else set()
     )
     deleted_missing = "mount_cleaned" not in deleted_columns
+    deferral_missing = "deferral_seconds" not in deleted_columns
     cleanup_missing = "deleted_id" not in cleanup_columns
 
     with current_engine.begin() as conn:
@@ -259,6 +288,13 @@ def _ensure_deleted_container_schema() -> None:
             conn.execute(text(
                 "ALTER TABLE deleted_container_restore_snapshot "
                 "ADD COLUMN mount_cleaned BOOLEAN NOT NULL DEFAULT 0"
+            ))
+        if deferral_missing:
+            # 挂载保留期按"业务正常时间"计：宕机/维护期用户无法恢复，那段不算数。
+            # 旧行保持 NULL，读取侧 coalesce 兜底为 0，不重写存量行。
+            conn.execute(text(
+                "ALTER TABLE deleted_container_restore_snapshot "
+                "ADD COLUMN deferral_seconds INTEGER NULL"
             ))
         if cleanup_missing and inspector.has_table("container_mount_cleanup"):
             conn.execute(text(

@@ -17,8 +17,13 @@ from ...constant import MachineStatus
 from ...extensions import session_scope
 from ...models.container_ssh_login import ContainerSSHLogin
 from ...models.machine import Machine
-from ...repositories import container_ssh_login_repo, machine_repo
-from ...schedulers import container_cleanup_task
+from ...repositories import (
+    container_disk_freeze_state_repo,
+    container_ssh_login_repo,
+    deleted_container_restore_snapshot_repo,
+    machine_repo,
+)
+from ...schedulers import container_cleanup_task, container_disk_check_task
 from ...services import container_tasks
 from ...services import machine_tasks as machine_tasks_mod
 from ...services.container_module import node_comms
@@ -495,3 +500,151 @@ class TestSeedUnavailableWindows:
             for key, value in fields.items():
                 setattr(row, key, value)
             session.flush()
+
+
+class _FreezeState:
+    """_days_frozen 的入参替身：只需要两个字段，不必建整行。"""
+
+    def __init__(self, *, first_frozen_at, deferral_seconds):
+        self.first_frozen_at = first_frozen_at
+        self.deferral_seconds = deferral_seconds
+
+
+class TestDeferralAppliesToOtherDeadlines:
+    """顺延是「业务正常时间」这把尺子，三条期限共用——不只 ssh 到期清理。
+
+    差异只在实时性：ssh 倒计时要在窗口期就读（故读侧还要折算正在进行的窗口），
+    冻结升级与挂载保留期只在窗口关闭后被动作消费，靠窗口关闭时的累加器即可。
+    """
+
+    def test_window_close_credits_freeze_state(self, app, db_session, monkeypatch):
+        _root, machine, container = create_container_graph()
+        clock = _install_clock(monkeypatch)
+        with session_scope() as session:
+            container_disk_freeze_state_repo.upsert_first_frozen(container.id, session=session)
+
+        machine_tasks_mod.Update_machine(machine.id, machine_status=MachineStatus.OFFLINE)
+        clock.advance(days=10)
+        machine_tasks_mod.Update_machine(machine.id, machine_status=MachineStatus.ONLINE)
+
+        db_session.expire_all()
+        state = container_disk_freeze_state_repo.get(container.id, session=db_session)
+        assert abs((state.deferral_seconds or 0) - 10 * 86400) <= 60
+
+    def test_window_close_credits_pending_deleted_snapshot(self, app, db_session, monkeypatch):
+        _root, machine, container = create_container_graph()
+        clock = _install_clock(monkeypatch)
+        row = deleted_container_restore_snapshot_repo.insert(
+            {"container_id": container.id, "container_name": container.name, "machine_id": machine.id},
+            session=db_session,
+        )
+        db_session.commit()
+
+        machine_tasks_mod.Update_machine(machine.id, machine_status=MachineStatus.OFFLINE)
+        clock.advance(days=10)
+        machine_tasks_mod.Update_machine(machine.id, machine_status=MachineStatus.ONLINE)
+
+        db_session.expire_all()
+        refreshed = deleted_container_restore_snapshot_repo.get_by_id(row.id, session=db_session)
+        assert abs((refreshed.deferral_seconds or 0) - 10 * 86400) <= 60
+
+    def test_already_cleaned_snapshot_is_not_credited(self, app, db_session, monkeypatch):
+        """已清理的记录不再被读，不再累加（避免无意义写入）。"""
+        _root, machine, container = create_container_graph()
+        clock = _install_clock(monkeypatch)
+        row = deleted_container_restore_snapshot_repo.insert(
+            {"container_id": container.id, "container_name": container.name, "machine_id": machine.id},
+            session=db_session,
+        )
+        deleted_container_restore_snapshot_repo.mark_mount_cleaned(row.id, session=db_session)
+        db_session.commit()
+
+        machine_tasks_mod.Update_machine(machine.id, machine_status=MachineStatus.OFFLINE)
+        clock.advance(days=10)
+        machine_tasks_mod.Update_machine(machine.id, machine_status=MachineStatus.ONLINE)
+
+        db_session.expire_all()
+        refreshed = deleted_container_restore_snapshot_repo.get_by_id(row.id, session=db_session)
+        assert (refreshed.deferral_seconds or 0) == 0
+
+    def test_frozen_days_exclude_unavailable_time(self):
+        """有效冻结天数 = 自然日 − 顺延（纯算术，不需要假时钟）。"""
+        now = datetime.utcnow()
+        assert container_disk_check_task._days_frozen(
+            _FreezeState(first_frozen_at=now - timedelta(days=12), deferral_seconds=10 * 86400),
+        ) == 2
+
+    def test_frozen_days_never_negative_when_over_credited(self):
+        """顺延超过自然日（理论上不该发生）时夹到 0，不倒扣。"""
+        now = datetime.utcnow()
+        assert container_disk_check_task._days_frozen(
+            _FreezeState(first_frozen_at=now - timedelta(days=1), deferral_seconds=30 * 86400),
+        ) == 0
+
+    def test_frozen_days_missing_deferral_reads_as_zero(self):
+        """存量行 deferral 为 NULL → 按 0 处理，行为与此前一致。"""
+        now = datetime.utcnow()
+        assert container_disk_check_task._days_frozen(
+            _FreezeState(first_frozen_at=now - timedelta(days=5), deferral_seconds=None),
+        ) == 5
+
+    def test_mount_cleanup_skips_deferred_snapshot(self, app, db_session):
+        """保留期按业务正常时间计：自然日 20 天、其中顺延 15 天 → 未到期。"""
+        _root, machine, container = create_container_graph()
+        old = datetime.utcnow() - timedelta(days=20)
+        row = deleted_container_restore_snapshot_repo.insert(
+            {"container_id": container.id, "container_name": container.name, "machine_id": machine.id},
+            removed_at=old, session=db_session,
+        )
+        row.deferral_seconds = 15 * 86400
+        db_session.commit()
+
+        cutoff = datetime.utcnow() - timedelta(days=14)
+        pending = deleted_container_restore_snapshot_repo.list_pending_mount_cleanup(
+            cutoff, session=db_session,
+        )
+
+        assert row.id not in {r.id for r in pending}
+
+    def test_mount_cleanup_picks_undeferred_snapshot(self, app, db_session):
+        """对照：同样的年龄但没有顺延 → 照常到期（证明上面的过滤不是恒假）。"""
+        _root, machine, container = create_container_graph()
+        old = datetime.utcnow() - timedelta(days=20)
+        row = deleted_container_restore_snapshot_repo.insert(
+            {"container_id": container.id, "container_name": container.name, "machine_id": machine.id},
+            removed_at=old, session=db_session,
+        )
+        db_session.commit()
+
+        cutoff = datetime.utcnow() - timedelta(days=14)
+        pending = deleted_container_restore_snapshot_repo.list_pending_mount_cleanup(
+            cutoff, session=db_session,
+        )
+
+        assert row.id in {r.id for r in pending}
+
+    def test_deferred_row_does_not_starve_younger_ones(self, app, db_session):
+        """顺延大的行 removed_at 最老、排最前。
+
+        若在 SQL 之后用 Python 筛，它会占满 limit 窗口，让真正到期的年轻行永远进不来
+        —— 所以过滤必须落在 SQL 里（本用例用 limit=1 把它钉住）。
+        """
+        _root, machine, container = create_container_graph()
+        now = datetime.utcnow()
+        deferred = deleted_container_restore_snapshot_repo.insert(
+            {"container_id": container.id, "container_name": "deferred", "machine_id": machine.id},
+            removed_at=now - timedelta(days=30), session=db_session,
+        )
+        deferred.deferral_seconds = 30 * 86400
+        eligible = deleted_container_restore_snapshot_repo.insert(
+            {"container_id": container.id, "container_name": "eligible", "machine_id": machine.id},
+            removed_at=now - timedelta(days=15), session=db_session,
+        )
+        db_session.commit()
+
+        cutoff = now - timedelta(days=14)
+        pending = deleted_container_restore_snapshot_repo.list_pending_mount_cleanup(
+            cutoff, limit=1, session=db_session,
+        )
+
+        assert [r.id for r in pending] == [eligible.id]

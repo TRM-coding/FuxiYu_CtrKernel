@@ -398,6 +398,82 @@ def test_sync_links_restarts_dead_link(monkeypatch):
 
 
 ############################################################
+# 不拨的机器 → 置 OFFLINE（「我不拨你」本身就是结论）
+############################################################
+
+def test_undialable_machine_without_uid_is_marked_offline(db_session, monkeypatch):
+    """缺 uid 的机器永远不会被拨，状态无人写 → 必须显式置 OFFLINE，不能留假 ONLINE。"""
+    machine = create_machine(machine_name="no_uid", machine_status=MachineStatus.ONLINE)
+    marked = []
+    monkeypatch.setattr(link, "_mark_machine_status",
+                        lambda mid, st: marked.append((mid, st)))
+
+    link.reconcile_unmanaged_machines(link.load_link_targets())
+
+    assert marked == [(machine.id, MachineStatus.OFFLINE)]
+
+
+def test_undialable_machine_without_ip_is_marked_offline(db_session, monkeypatch):
+    """缺 host 同样进不了清单——配置不完整的两种都算。"""
+    # 注意 create_machine 的 `machine_ip or 默认` 会把空串替换掉，所以清空要直接改字段
+    machine = create_machine(machine_name="no_ip", machine_status=MachineStatus.ONLINE)
+    with session_scope() as session:
+        row = machine_repo.get_by_id(machine.id, session=session)
+        row.machine_ip = ""
+        row.node_uid = "uid-x"
+    marked = []
+    monkeypatch.setattr(link, "_mark_machine_status",
+                        lambda mid, st: marked.append((mid, st)))
+
+    link.reconcile_unmanaged_machines(link.load_link_targets())
+
+    assert (machine.id, MachineStatus.OFFLINE) in marked
+
+
+def test_already_offline_undialable_machine_is_not_rewritten(db_session, monkeypatch):
+    """已经是 OFFLINE 就跳过——只写一次，不制造重复审计。"""
+    create_machine(machine_name="already_off", machine_status=MachineStatus.OFFLINE)
+    marked = []
+    monkeypatch.setattr(link, "_mark_machine_status",
+                        lambda mid, st: marked.append((mid, st)))
+
+    link.reconcile_unmanaged_machines(link.load_link_targets())
+
+    assert marked == []
+
+
+def test_dialable_machine_is_left_alone(db_session, monkeypatch):
+    """清单内的机器交给拨号结果去写状态，这里不许插手。"""
+    machine = create_machine(machine_name="dialable", machine_status=MachineStatus.ONLINE)
+    with session_scope() as session:
+        machine_repo.update_machine(machine.id, node_uid="uid-d", session=session)
+    marked = []
+    monkeypatch.setattr(link, "_mark_machine_status",
+                        lambda mid, st: marked.append((mid, st)))
+
+    link.reconcile_unmanaged_machines(link.load_link_targets())
+
+    assert marked == []
+
+
+def test_reconcile_opens_window_for_never_seen_machine(db_session, monkeypatch):
+    """顺带收益：置 OFFLINE 会走 refresh_unavailable_window → 给从未被采集过的
+    机器（last_seen_at 与窗口都为 NULL）补开窗口，倒计时不再空转。"""
+    from ...services import machine_tasks
+    from ...models.machine import Machine
+
+    machine = create_machine(machine_name="never_seen", machine_status=MachineStatus.ONLINE)
+    assert db_session.get(Machine, machine.id).unavailable_since is None
+
+    link.reconcile_unmanaged_machines(link.load_link_targets())
+
+    db_session.expire_all()
+    refreshed = db_session.get(Machine, machine.id)
+    assert refreshed.machine_status == MachineStatus.OFFLINE
+    assert refreshed.unavailable_since is not None, "置 OFFLINE 应顺带开窗"
+
+
+############################################################
 # 常驻管理器
 ############################################################
 
