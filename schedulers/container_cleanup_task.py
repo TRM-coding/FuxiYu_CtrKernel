@@ -48,6 +48,13 @@ def _format_hours(hours: int) -> str:
 
 
 def _send_cleanup_reminders_if_needed(container_id: int, info: dict, reminder_hours_raw: str | None = None) -> None:
+    """按"最深已提醒档位"判重：档位随时间单调加深，所以只比档位、不比时间。
+
+    想发的那一级 = `min(eligible_hours)`（漏扫时自然落到更近的一级）。若库里记的档位
+    正好是它，说明本周期这一级已经发过 → 跳过；否则发信并把档位推进到它。
+    周期变更（真登录/恢复）由 ssh upsert 把档位打回 NEVER，不在这里处理。
+    """
+
     if info.get("cleanup_status") != "countdown":
         return
 
@@ -68,10 +75,9 @@ def _send_cleanup_reminders_if_needed(container_id: int, info: dict, reminder_ho
     if not eligible_hours:
         return
 
-    # 清理旧的提醒记录（用户重新 SSH 后 cleanup_at 已变，旧记录无意义）
-    if cleanup_at:
-        with session_scope() as session:
-            container_cleanup_reminder_repo.clear_stale(container_id, cleanup_at, session=session)
+    # 旧档位的记录不在这里清：周期变更当下已由 ssh upsert 打回 NEVER（reset_to_never）。
+    # 本函数只读判定，不再自己推断"周期变没变"——旧实现拿 cleanup_at 当判据，
+    # 而顺延会让它每轮扫描都前移，于是每轮都判成新周期、重发一封。
 
     # If an earlier scan was missed, send the nearest reminder that is still relevant.
     for hours in [min(eligible_hours)]:
@@ -104,7 +110,6 @@ def _send_cleanup_reminders_if_needed(container_id: int, info: dict, reminder_ho
                 sent = container_cleanup_reminder_repo.was_sent(
                     container_id,
                     reminder_key,
-                    cleanup_at,
                     email,
                     session=session,
                 )

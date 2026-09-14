@@ -37,7 +37,7 @@ def test_each_failed_mail_retry_is_audited(db_session, monkeypatch, raises):
     assert len(logs) == 4
     assert len(attempts) == 4
     assert not container_cleanup_reminder_repo.was_sent(
-        container.id, "72h", cleanup_at, "owner@example.test", session=db_session)
+        container.id, "72h", "owner@example.test", session=db_session)
 
 
 def test_parse_reminder_hours_filters_invalid_and_deduplicates():
@@ -108,7 +108,7 @@ def test_send_cleanup_reminder_marks_sent_after_mail_success(app, db_session, mo
         },
     )
 
-    assert container_cleanup_reminder_repo.was_sent(container.id, "12h", cleanup_at, "owner@bjtu.edu.cn", session=db_session) is True
+    assert container_cleanup_reminder_repo.was_sent(container.id, "12h", "owner@bjtu.edu.cn", session=db_session) is True
 
 
 def test_send_cleanup_reminder_does_not_mark_sent_after_mail_failure(app, db_session, monkeypatch):
@@ -127,7 +127,7 @@ def test_send_cleanup_reminder_does_not_mark_sent_after_mail_failure(app, db_ses
         },
     )
 
-    assert container_cleanup_reminder_repo.was_sent(container.id, "12h", cleanup_at, "owner@bjtu.edu.cn", session=db_session) is False
+    assert container_cleanup_reminder_repo.was_sent(container.id, "12h", "owner@bjtu.edu.cn", session=db_session) is False
 
 
 @pytest.mark.parametrize("failure_stage", ["flush", "commit"])
@@ -169,12 +169,12 @@ def test_mark_sent_db_failure_rolls_back_and_continues(db_session, monkeypatch, 
     assert rollbacks == [True]
     assert "reminder sent but recording failed" in caplog.text
     assert not container_cleanup_reminder_repo.was_sent(
-        container.id, "12h", cleanup_at, recipients[0], session=db_session)
+        container.id, "12h", recipients[0], session=db_session)
     assert container_cleanup_reminder_repo.was_sent(
-        container.id, "12h", cleanup_at, recipients[1], session=db_session)
+        container.id, "12h", recipients[1], session=db_session)
 
     container_cleanup_task._send_cleanup_reminders_if_needed(container.id, info, "12")
 
     assert attempts == recipients + [recipients[0]]
     assert container_cleanup_reminder_repo.was_sent(
-        container.id, "12h", cleanup_at, recipients[0], session=db_session)
+        container.id, "12h", recipients[0], session=db_session)

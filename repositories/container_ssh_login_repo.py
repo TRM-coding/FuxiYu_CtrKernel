@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..models.container_ssh_login import ContainerSSHLogin
 from ..models.containers import Container
+from . import container_cleanup_reminder_repo
 
 
 def get_by_machine_container(
@@ -66,6 +67,10 @@ def upsert_last_ssh_login_time(
         # 值变化 = 真登录（新基准）：旧顺延清零——同值帧（Node 每 5s 推缓存旧时间）
         # 不清，否则顺延会在下一心跳被抹掉
         record.deferral_seconds = 0
+        # 同一判据、同一时刻：新周期开始，以"周期"为作用域的提醒档位一并打回 NEVER。
+        # 这里是"周期变了"的唯一知情人——顺延清零与提醒复位由这一个比较驱动。
+        # 注意用调用方传进来的 session（同一事务），不要在这里另开 scope。
+        container_cleanup_reminder_repo.reset_to_never(container_id, session=session)
 
     record.last_ssh_login_time = last_ssh_login_time
     record.updated_at = dt.datetime.utcnow()
