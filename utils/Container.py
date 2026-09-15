@@ -8,9 +8,10 @@ class Container_info:
         shared_memory:int
         name:str
         port:int
-        # **无构建时直接运行的镜像标签（退化通路专用）。**
-        # 正常路径（带构建段）下 Node 会用构建出的标签覆盖它，一次都不会被读到；
-        # 只有恢复的"直接运行"分支（无快照、无可用模板）才拿它当唯一依据。
+        # **缓存键 + 运行引用**：这个容器要跑的镜像标签。
+        # 它恒等于同一份构建段里的 image_tag —— 两者都由「归属标识 + 构建版本戳」推导
+        # （services/image_tasks.format_image_build_tag），因此不会分叉。
+        # Node 先拿它做一次命中尝试（命中就跳过构建），再用它起容器。
         # 它同时是 Node 的 wire 契约（Container.Config_info.image），不可改名或删除。
         image:str
     #gpu_list:显卡编号，cpu_number:需要用到的cpu核数，memory:申请的内存大小（GB）
