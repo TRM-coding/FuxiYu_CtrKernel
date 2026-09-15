@@ -5,7 +5,12 @@
 
 venv/
 .env
+.env*
+!.env.example
 .mysql-fix-*.sql
+
+# 运行时备份文件（.env.bak-*、*.bak-*.sql、dev_database.db.bak-* 等），一律不入库
+*.bak-*
 
 /logs/*
 !/logs/.gitkeep
