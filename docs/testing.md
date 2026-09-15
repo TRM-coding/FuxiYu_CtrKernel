@@ -14,7 +14,7 @@ Default tests must not touch:
 - private intranet resources
 
 The pytest fixtures inject a SQLite-only app configuration through `create_app(overrides=...)`.
-Do not use `FLASK_CONFIG=testing` or any runtime testing mode to start the application.
+Do not use a runtime testing mode to start the application.
 
 ## Default Command
 
@@ -62,7 +62,8 @@ Run them only when the required environment is intentionally prepared:
 pytest -m integration
 ```
 
-Legacy tests are also excluded from default runs:
+Legacy marker support remains registered only to prevent accidental collection of
+old local files. Pre-migration tests should be deleted, not maintained:
 
 ```bash
 pytest -m legacy

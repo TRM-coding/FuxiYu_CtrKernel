@@ -1,4 +1,5 @@
 import pytest
+from sqlalchemy import select
 
 from ...constant import ContainerStatus, ROLE
 from ...models.containers import Container
@@ -15,7 +16,7 @@ def test_register_success(db_session):
     assert success is True
     assert user.username == "reg_user"
     assert token is None
-    assert User.query.filter_by(username="reg_user").first() is not None
+    assert db_session.scalars(select(User).where(User.username == "reg_user")).first() is not None
     assert user.password_hash != "Password_123"
 
 
@@ -58,22 +59,24 @@ def test_register_rejects_duplicate_email(db_session):
 
 def test_delete_user_success_unbinds_before_delete(monkeypatch, db_session):
     user = create_user(username="delete_user")
+    user_id = user.id
     calls = []
 
-    monkeypatch.setattr(user_tasks.usercontainer_repo, "remove_user_from_all_containers", lambda user_id: calls.append(user_id) or {"ok": True})
+    monkeypatch.setattr(user_tasks.usercontainer_repo, "remove_user_from_all_containers", lambda user_id, **kwargs: calls.append(user_id) or {"ok": True})
 
     assert user_tasks.Delete_user(user.id) is True
-    assert calls == [user.id]
-    assert User.query.get(user.id) is None
+    assert calls == [user_id]
+    db_session.expire_all()
+    assert db_session.get(User, user_id) is None
 
 
 def test_delete_user_returns_false_when_unbind_fails(monkeypatch, db_session):
     user = create_user(username="delete_fail_user")
 
-    monkeypatch.setattr(user_tasks.usercontainer_repo, "remove_user_from_all_containers", lambda user_id: {"ok": False})
+    monkeypatch.setattr(user_tasks.usercontainer_repo, "remove_user_from_all_containers", lambda user_id, **kwargs: {"ok": False})
 
     assert user_tasks.Delete_user(user.id) is False
-    assert User.query.get(user.id) is not None
+    assert db_session.get(User, user.id) is not None
 
 
 def test_delete_user_raises_wild_containers(monkeypatch, db_session):
@@ -82,14 +85,14 @@ def test_delete_user_raises_wild_containers(monkeypatch, db_session):
     monkeypatch.setattr(
         user_tasks.usercontainer_repo,
         "remove_user_from_all_containers",
-        lambda user_id: {"ok": False, "wild_containers": [144]},
+        lambda user_id, **kwargs: {"ok": False, "wild_containers": [144]},
     )
 
     with pytest.raises(Exception) as excinfo:
         user_tasks.Delete_user(user.id)
 
     assert getattr(excinfo.value, "wild_containers") == [144]
-    assert User.query.get(user.id) is not None
+    assert db_session.get(User, user.id) is not None
 
 
 def test_get_user_detail_information_returns_counts_and_long_term_count(db_session):
@@ -131,6 +134,21 @@ def test_list_all_user_bref_information_normalizes_pagination_and_returns_counts
     assert match.amount_of_managed_container == 1
 
 
+def test_list_all_user_bref_information_filters_by_user_search(db_session):
+    target = create_user(username="search_user", email="search_user@bjtu.edu.cn", graduation_year="2031")
+    create_user(username="other_user", email="other_user@bjtu.edu.cn", graduation_year="2032")
+
+    by_name = user_tasks.List_all_user_bref_information(page_number=1, page_size=10, user_search="search_user")
+    by_email = user_tasks.List_all_user_bref_information(page_number=1, page_size=10, user_search="search_user@bjtu")
+    by_year = user_tasks.List_all_user_bref_information(page_number=1, page_size=10, user_search="2031")
+    by_id = user_tasks.List_all_user_bref_information(page_number=1, page_size=10, user_search=str(target.id))
+
+    assert [u.user_id for u in by_name] == [target.id]
+    assert [u.user_id for u in by_email] == [target.id]
+    assert [u.user_id for u in by_year] == [target.id]
+    assert target.id in [u.user_id for u in by_id]
+
+
 def test_update_user_filters_forbidden_fields(db_session):
     user = create_user(username="update_user", email="update@bjtu.edu.cn", password="old")
     original_hash = user.password_hash
@@ -140,7 +158,6 @@ def test_update_user_filters_forbidden_fields(db_session):
         username="updated_user",
         email="changed@bjtu.edu.cn",
         password_hash="plain",
-        permission="operator",
         graduation_year="2027",
     )
 
@@ -171,7 +188,7 @@ def test_compute_user_container_counts_handles_real_bindings(db_session):
     bind_user_container(user, online, role=ROLE.ROOT)
     bind_user_container(user, offline, role=ROLE.COLLABORATOR)
 
-    counts = usercontainer_repo.compute_user_container_counts(user.id)
+    counts = usercontainer_repo.compute_user_container_counts(user.id, session=db_session)
 
     assert counts["total"] == 2
     assert counts["functional"] == 1

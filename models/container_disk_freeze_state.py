@@ -27,5 +27,9 @@ class ContainerDiskFreezeState(db.Model):
     created_at = db.Column(
         db.DateTime, default=dt.datetime.utcnow, nullable=False
     )
+    # 冻结期内机器不可用的累计时长（"业务正常时间"之外的时长不计入冻结天数）。
+    # 窗口关闭时累加，读侧用 now - first_frozen_at - deferral 得有效冻结天数。
+    # 随记录生灭：容量回落重置会删除整行，故不需要单独清零。
+    deferral_seconds = db.Column(db.Integer, nullable=True, default=0, server_default=db.text("0"))
 
     container = db.relationship("Container")

@@ -1,5 +1,7 @@
 # 容器磁盘用量检测与管控 — 收口合约
 
+> 2026-09 ??????????? `CONTAINER_*` / `ANNOUNCEMENT_*` env ??????????????????? `system_settings`??????? `settings_tasks.SETTING_DEFINITIONS` ????????? `settings_tasks.get_*` getter ???`.env.example` ?????? settings ????
+
 ## Phase 1：只读检测（两路求和）
 
 ### 0. 常量定义
@@ -16,7 +18,7 @@ CONTAINER_DISK_CHECK_INTERVAL_SECONDS = int(os.getenv("CONTAINER_DISK_CHECK_INTE
 | 文件 | 操作 |
 |---|---|
 | `/home/wyw/FuxiYu_NodeKernel/services/container_service.py` | 新增 `get_disk_usage()` |
-| `/home/wyw/FuxiYu_NodeKernel/blueprints/__init__.py` | 新增 `POST /api/check_disk_usage` |
+| `/home/wyw/FuxiYu_NodeKernel/network/api.py` | 新增 `POST /api/check_disk_usage` |
 | `/home/wyw/FuxiYu_CtrKernel/services/container_tasks.py` | 新增 `get_container_disk_usage()` |
 | `/home/wyw/FuxiYu_CtrKernel/schemas/container_disk_check_task.py` | **新建** 定期任务 |
 | `/home/wyw/FuxiYu_CtrKernel/config.py` | 新增 2 个配置项 |
@@ -81,7 +83,7 @@ NodeKernel
 
 #### 3.2 NodeKernel 端点
 
-**文件**: `/home/wyw/FuxiYu_NodeKernel/blueprints/__init__.py`
+**文件**: `/home/wyw/FuxiYu_NodeKernel/network/api.py`
 
 ```
 POST /api/check_disk_usage
@@ -119,7 +121,7 @@ start_container_disk_check_scheduler(app, interval_seconds=900)
 
 check_all_containers_disk_usage_once(page_size=200)
   → 分页遍历 containers_repo.list_containers()
-  → parallel_node_calls() 并发查询
+  → 读取 WSS 已落库的磁盘快照字段，不再并发请求 Node
   → 只 print 日志，不做限制操作
 ```
 
@@ -245,7 +247,7 @@ CONTAINER_DISK_HARD_LIMIT_PERCENT = int(os.getenv("CONTAINER_DISK_HARD_LIMIT_PER
 
 | 文件 | 操作 |
 |---|---|
-| `/home/wyw/FuxiYu_NodeKernel/blueprints/__init__.py` | 新增 `POST /api/pause_container` |
+| `/home/wyw/FuxiYu_NodeKernel/network/api.py` | 新增 `POST /api/pause_container` |
 | `/home/wyw/FuxiYu_CtrKernel/schemas/container_disk_check_task.py` | 扩展检测逻辑，加入 soft/hard 判断 |
 | `/home/wyw/FuxiYu_CtrKernel/config.py` | 新增 2 个配置项 |
 
@@ -272,7 +274,7 @@ CONTAINER_DISK_HARD_LIMIT_PERCENT = int(os.getenv("CONTAINER_DISK_HARD_LIMIT_PER
 
 #### 3.1 `POST /api/pause_container`
 
-**文件**: `/home/wyw/FuxiYu_NodeKernel/blueprints/__init__.py`
+**文件**: `/home/wyw/FuxiYu_NodeKernel/network/api.py`
 
 ```
 入参:  { config: { container_name: str, action: "pause" | "unpause" } }
@@ -369,3 +371,4 @@ CtrKernel
 | `test_disk_usage_limit_zero` | limit=0 时前端不显示百分比避免除零 |
 | `test_disk_usage_display_normal` | `total=5GB limit=10GB` → 显示 50% |
 | `test_disk_usage_display_over` | `total=11GB limit=10GB` → 显示 110% 超限状态 |
+

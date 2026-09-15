@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import sys
 from logging.handlers import TimedRotatingFileHandler
 
@@ -30,14 +31,64 @@ class _StreamToLogger:
         return False
 
 
+class _HeartbeatAccessFilter(logging.Filter):
+    """过滤 Node 心跳的 uvicorn access 行（每 5s ×2 端点刷屏，值接近零）。"""
+
+    _HEARTBEAT_RE = re.compile(r'"(?:GET|POST|PUT|DELETE|PATCH) /api/internal/runtime/')
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            return not self._HEARTBEAT_RE.search(record.getMessage())
+        except Exception:
+            return True
+
+
+class _UvicornStreamToLogger(_StreamToLogger):
+    """Map uvicorn stderr lines back to their textual log level."""
+
+    _LEVEL_RE = re.compile(r"^\s*(?P<level>TRACE|DEBUG|INFO|WARNING|ERROR|CRITICAL):\s+(?P<message>.*)$")
+    _LEVELS = {
+        "TRACE": logging.DEBUG,
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+    }
+
+    def _emit_line(self, line: str) -> None:
+        match = self._LEVEL_RE.match(line)
+        if match:
+            self.logger.log(self._LEVELS[match.group("level")], match.group("message"))
+            return
+        self.logger.log(self.level, line)
+
+    def write(self, message: str) -> int:
+        self._buffer += message
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            if line:
+                self._emit_line(line)
+        return len(message)
+
+    def flush(self) -> None:
+        if self._buffer:
+            self._emit_line(self._buffer)
+            self._buffer = ""
+
+
 def configure_daily_logging(app) -> None:
     global _CONFIGURED
 
-    app.logger.handlers = []
-    app.logger.propagate = True
+    app_logger = getattr(app, "logger", logging.getLogger("FuxiYu_CtrKernel"))
+    app_logger.handlers = []
+    app_logger.propagate = True
 
     if _CONFIGURED:
-        app._daily_logging_configured = True
+        try:
+            app._daily_logging_configured = True
+        except Exception:
+            pass
         return
 
     base_dir = os.path.dirname(os.path.abspath(os.path.join(__file__, "..")))
@@ -71,7 +122,11 @@ def configure_daily_logging(app) -> None:
     logging.getLogger("werkzeug").setLevel(level)
 
     sys.stdout = _StreamToLogger(logging.getLogger("stdout"), logging.INFO)
-    sys.stderr = _StreamToLogger(logging.getLogger("stderr"), logging.ERROR)
+    sys.stderr = _UvicornStreamToLogger(logging.getLogger("stderr"), logging.ERROR)
+    logging.getLogger("stdout").addFilter(_HeartbeatAccessFilter())
 
     _CONFIGURED = True
-    app._daily_logging_configured = True
+    try:
+        app._daily_logging_configured = True
+    except Exception:
+        pass
