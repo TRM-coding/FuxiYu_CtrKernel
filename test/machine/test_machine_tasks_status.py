@@ -351,7 +351,10 @@ def test_consume_frames_applies_snapshot_and_delete(monkeypatch):
 
     async def _run():
         task = asyncio.create_task(node_comms._consume_frames(q, "uid", machine_id=7))
-        await asyncio.sleep(0.05)
+        # 帧处理走 asyncio.to_thread（真实执行器往返），固定时长的 sleep 在负载高的
+        # CI 上可能赶不上第二帧 → 改为等"队列被消费完"（task_done 驱动），这才是
+        # 契约本身；真卡死则按超时响亮失败，而不是静默丢帧。
+        await asyncio.wait_for(q.join(), timeout=5)
         task.cancel()
         try:
             await task
