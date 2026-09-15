@@ -114,8 +114,15 @@ def _ensure_image_template_schema() -> None:
     index_rows = {idx["name"]: idx for idx in inspector.get_indexes("images") if idx.get("name")}
     name_index = index_rows.get("ix_images_name")
     if name_index is not None and name_index.get("unique"):
+        # DROP INDEX 语法两方言不同：SQLite 不带表名，MySQL 必须写 `DROP INDEX 名 ON 表`。
+        # 曾误用 SQLite 单方言形式，MySQL 上 1064 启动即崩（2026-09-15 实测）。
+        drop_ddl = (
+            "DROP INDEX ix_images_name"
+            if current_engine.dialect.name == "sqlite"
+            else "DROP INDEX ix_images_name ON images"
+        )
         with current_engine.begin() as conn:
-            conn.execute(text("DROP INDEX ix_images_name"))
+            conn.execute(text(drop_ddl))
             conn.execute(text("CREATE INDEX ix_images_name ON images(name)"))
         logging.getLogger(__name__).warning(
             "images.name unique index dropped: uniqueness now enforced in application layer"

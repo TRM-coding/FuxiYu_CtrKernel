@@ -37,6 +37,9 @@ def _start_wss_receiver() -> subprocess.Popen | None:
     env = os.environ.copy()
     pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = parent_dir if not pythonpath else f"{parent_dir}{os.pathsep}{pythonpath}"
+    # 看护标记：run_node_links 只在受本进程看护时启用「随父进程死亡」防护
+    # （见 run_node_links._arm_parent_death_signal），手工启动不受影响。
+    env["FUXI_CTRL_SUPERVISED"] = "1"
 
     return subprocess.Popen(
         [sys.executable, "-m", "FuxiYu_CtrKernel.run_node_links"],

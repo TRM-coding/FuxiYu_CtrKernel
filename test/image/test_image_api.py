@@ -47,6 +47,27 @@ def test_legacy_image_table_is_upgraded_before_list(client, monkeypatch):
     assert resp.json()["total_number"] >= 1
 
 
+def test_legacy_images_unique_name_index_is_relaxed(client, monkeypatch):
+    """旧库 images.name 是唯一索引时，启动自愈应降为普通索引（唯一性移交应用层）。"""
+    _auth(monkeypatch, user_id=7)
+    with extensions.engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS user_images"))
+        conn.execute(text("DROP TABLE IF EXISTS images"))
+        conn.execute(text(
+            "CREATE TABLE images ("
+            "id INTEGER PRIMARY KEY, name VARCHAR(120) NOT NULL,"
+            "description VARCHAR(500) NULL, base_image VARCHAR(255) NOT NULL,"
+            "dockerfile_body TEXT NOT NULL, status VARCHAR(8) NOT NULL,"
+            "created_by_user_id INTEGER NULL, created_at DATETIME NOT NULL,"
+            "updated_at DATETIME NOT NULL)"
+        ))
+        conn.execute(text("CREATE UNIQUE INDEX ix_images_name ON images(name)"))
+
+    _ensure_image_template_schema()
+    indexes = {idx["name"]: idx for idx in inspect(extensions.engine).get_indexes("images")}
+    assert not indexes["ix_images_name"]["unique"]  # SQLite 报 0，MySQL 报 False，都当假值
+
+
 def test_create_image_success(client, monkeypatch):
     _auth(monkeypatch, user_id=7)
 

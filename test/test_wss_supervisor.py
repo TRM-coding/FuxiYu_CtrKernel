@@ -120,3 +120,58 @@ def test_watch_wss_process_real_subprocess_respawn(monkeypatch):
         for proc in spawned:
             if proc.poll() is None:
                 proc.kill()
+
+
+def test_arm_parent_death_signal_requires_supervision_marker(monkeypatch):
+    """孤儿防护只在受 run.py 看护时启用：无标记时连 prctl 都不碰。"""
+    import ctypes as ctypes_module
+
+    from FuxiYu_CtrKernel import run_node_links
+
+    loaded = []
+    monkeypatch.setattr(ctypes_module, "CDLL", lambda name: loaded.append(name) or _FakeLibc())
+    monkeypatch.delenv("FUXI_CTRL_SUPERVISED", raising=False)
+    run_node_links._arm_parent_death_signal()
+    assert loaded == []
+
+
+def test_arm_parent_death_signal_arms_prctl_and_stays(monkeypatch):
+    """受看护且父进程存活：注册 PDEATHSIG（SIGTERM），不退出。"""
+    import ctypes as ctypes_module
+
+    from FuxiYu_CtrKernel import run_node_links
+
+    calls = []
+    monkeypatch.setattr(ctypes_module, "CDLL", lambda name: _FakeLibc(calls))
+    monkeypatch.setenv("FUXI_CTRL_SUPERVISED", "1")
+    monkeypatch.setattr(run_node_links.os, "getppid", lambda: 4242)
+    exited = []
+    monkeypatch.setattr(run_node_links.os, "_exit", lambda code: exited.append(code))
+    run_node_links._arm_parent_death_signal()
+    assert calls and calls[0][0] == 1  # PR_SET_PDEATHSIG
+    assert exited == []
+
+
+def test_arm_parent_death_signal_exits_when_already_orphaned(monkeypatch):
+    """父进程在 prctl 注册与核对之间死亡（竞态）：PPID 已归 init 时直接退出。"""
+    import ctypes as ctypes_module
+
+    from FuxiYu_CtrKernel import run_node_links
+
+    monkeypatch.setattr(ctypes_module, "CDLL", lambda name: _FakeLibc())
+    monkeypatch.setenv("FUXI_CTRL_SUPERVISED", "1")
+    monkeypatch.setattr(run_node_links.os, "getppid", lambda: 1)
+    exited = []
+    monkeypatch.setattr(run_node_links.os, "_exit", lambda code: exited.append(code))
+    run_node_links._arm_parent_death_signal()
+    assert exited == [0]
+
+
+class _FakeLibc:
+    def __init__(self, calls=None):
+        self.calls = calls
+
+    def prctl(self, *args):
+        if self.calls is not None:
+            self.calls.append(args)
+        return 0
