@@ -32,13 +32,13 @@ def test_ctrl_e2e_user_login_machine_permission_container_create_and_list(
         json={
             "user_name": user.username,
             "machine_id": machine.id,
+            "image_id": 1,
             "container": {
                 "GPU_LIST": [],
                 "CPU_NUMBER": 2,
                 "MEMORY": 8,
                 "SHARED_MEM": 2,
                 "NAME": "e2e_container",
-                "image": "ubuntu:22.04",
             },
         }
     )

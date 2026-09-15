@@ -18,5 +18,6 @@ from .auth_group import AuthGroup, AuthGroupEntity  # noqa: F401
 from .user_group import UserGroup  # noqa: F401
 from .image import Image  # noqa: F401
 from .userimage import UserImage  # noqa: F401
+from .machine_image import MachineImage  # noqa: F401
 from .user_managed_user import UserManagedUser  # noqa: F401
 from .system_setting import SystemSetting  # noqa: F401

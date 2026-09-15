@@ -15,7 +15,8 @@ _GB = 1024 ** 3
 
 def _fake_container(**overrides):
     values = dict(
-        id=1, name="c1", image="ubuntu:22.04", created_at=None, machine_id=2, port=0,
+        id=1, name="c1", image_id=None, last_build_at=None, created_at=None,
+        machine_id=2, port=0,
         port_mappings=None, gpu_chosen_list=None, container_status="online",
         failed_reason=None, failed_detail=None,
         disk_total_bytes=2 * _GB, disk_overlay_rw_bytes=_GB, disk_bind_mount_bytes=_GB,
@@ -120,7 +121,10 @@ def test_common_fields_carry_identity_accounts_and_effective_status(db_session):
 
     assert fields["container_id"] == container.id
     assert fields["container_name"] == container.name
-    assert fields["container_image"] == container.image
+    # 裸镜像容器（无归属、无版本戳）推不出标签 → None。**不编造**：编一个就等于指着
+    # 一个从未存在过的制品。见 test_image_tag_is_never_fabricated。
+    assert fields["container_image"] is None
+    assert fields["image_id"] == container.image_id
     assert fields["machine_id"] == machine.id
     assert fields["machine_ip"] == machine.machine_ip
     assert fields["accounts"] == [

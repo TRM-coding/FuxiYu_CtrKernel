@@ -76,6 +76,12 @@ REASON_STATUS_MAP = {
     # 「机器正在维护中」——动作类路径（start/stop/remove）由有效状态机先拦，不受影响。
     "machine_maintenance": 503,
     "machine_offline": 503,
+    # 镜像准入族：创建容器时模板不可用。
+    # 「已停用」与「不属于该用户」都必须与「模板不存在」区分开——笼统报 not_found
+    # 会让用户去查一个明明存在的模板。
+    "image_not_found": 404,
+    "image_access_denied": 403,
+    "image_not_ready": 400,
     "machine_not_found": 404,
     "container_not_found": 404,
     "machine_permission_denied": 403,
@@ -192,6 +198,14 @@ def create_container_api(
                 "machine_permission_denied",
             )
 
+    # 镜像模板必填（2026-09 决策）：容器必须能回答「重建时用哪个模板」，否则重建/恢复
+    # 只能拿 tag 赌 Node 上的旧制品还在（制品被 prune 即永久失去恢复能力）。
+    # 校验放在 API 边界而非 service 门户：恢复链路复用同一个门户，而它的 legacy 通路
+    # （快照无 image_id / 模板已删）必须放行。也不做成 pydantic 必填 —— 那会返回 422，
+    # 而本仓库统一的错误形状是 400 + error_reason。
+    if image_id is None:
+        return _error(400, "image_id is required", "invalid_payload")
+
     container_raw = data.get("container") or {}
     if not container_raw:
         container_raw = {
@@ -199,24 +213,26 @@ def create_container_api(
             "CPU_NUMBER": data.get("CPU_NUMBER", 0),
             "MEMORY": data.get("MEMORY", 0),
             "NAME": data.get("NAME", ""),
-            "image": data.get("image", ""),
         }
 
     public_key = data.get("public_key") or None
-    image_build = None
     try:
-        if image_id is not None:
-            from ..services import image_tasks as image_service
+        from ..services import image_tasks as image_service
 
-            image_allowed = image_service.Can_use_image_for_container(operator_user_id, image_id)
-            if image_allowed is None:
-                return _error(404, f"image {image_id} not found", "image_not_found")
-            if not image_allowed:
-                return _error(403, "image access denied", "image_access_denied")
-            image_build = image_service.build_image_payload(image_id)
-            if image_build is None:
-                return _error(404, f"image {image_id} not found", "image_not_found")
-            container_raw["image"] = image_build["image_tag"]
+        usability = image_service.Can_use_image_for_container(operator_user_id, image_id)
+        if usability is image_service.ImageUsability.NOT_FOUND:
+            return _error(404, f"image {image_id} not found", "image_not_found")
+        if usability is image_service.ImageUsability.DISABLED:
+            return _error(400, f"image {image_id} is not ready for use", "image_not_ready")
+        if usability is image_service.ImageUsability.DENIED:
+            return _error(403, "image access denied", "image_access_denied")
+        build = image_service.resolve_image_build(image_id)
+        if build is None:
+            return _error(404, f"image {image_id} not found", "image_not_found")
+        image_build = build.payload
+        # 镜像 tag 一律由平台从模板解析，请求体里带的 image / IMAGE 不再采信 ——
+        # 那是模板出现前的旧通路（客户端自选任意镜像，且绕开平台注入）。
+        container_raw["image"] = image_build["image_tag"]
 
         gpu_list = container_raw.get("GPU_LIST") or container_raw.get("gpu_list") or []
         cpu_number = int(container_raw.get("CPU_NUMBER") or container_raw.get("cpu_number") or 0)
@@ -228,7 +244,8 @@ def create_container_api(
             or 0
         )
         name = container_raw.get("NAME") or container_raw.get("name") or ""
-        image = container_raw.get("image") or container_raw.get("IMAGE") or ""
+        # 上面已无条件写入平台解析出的 tag；请求体里没有第二个来源可回落
+        image = container_raw["image"]
         container_obj = Container_info(
             gpu_list=gpu_list,
             cpu_number=cpu_number,
@@ -248,6 +265,11 @@ def create_container_api(
             public_key=public_key,
             operator_user_id=operator_user_id,
             image_build=image_build,
+            image_id=image_id,
+            # 本次构建所依据的模板版本时刻与实际使用的配方 —— 两者都要落成
+            # 容器上的留痕，用于判定"是否落后"与精确还原。
+            image_version_at=build.version_at,
+            dockerfile_parts=build.dockerfile_parts,
         ):
             log_failure(
                 operation=OperationType.CREATE_CONTAINER,
@@ -373,10 +395,16 @@ def resurrect_container_api(
 ):
     data = _payload_data(payload)
     deleted_id = int(data.get("deleted_id", 0) or 0)
+    # 内容来源只在「模板 READY 但容器落后」那一支必需（后端不设默认，默认预选属于界面）。
+    # 传了但落在别的分支时被忽略——那些分支内容不会改变或无从选择。
+    content_source = data.get("content_source") or None
+    if content_source is not None and content_source not in container_service.RESTORE_MODES:
+        return _error(400, f"invalid content_source: {content_source}", "invalid_payload")
     try:
         result = container_service.resurrect_container(
             deleted_id=deleted_id,
             operator_user_id=operator_user_id,
+            content_source=content_source,
         )
     except container_service.NodeServiceError as e:
         reason = getattr(e, "reason", None)
@@ -388,6 +416,11 @@ def resurrect_container_api(
         "success": 1,
         "message": "container resurrect requested",
         "container_id": result.get("container_id"),
+    } if not result.get("requires_choice") else {
+        # 二选一：**没有恢复**，把两份内容交回调用方选。容器留痕只在这里出去。
+        "success": 1,
+        "message": "restore requires a choice: snapshot or current template",
+        **result,
     }
 
 

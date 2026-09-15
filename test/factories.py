@@ -114,7 +114,8 @@ def create_container(
     *,
     machine: Machine | None = None,
     name: str | None = None,
-    image: str = "ubuntu:22.04",
+    image_id: int | None = None,
+    last_build_at=None,
     status: ContainerStatus = ContainerStatus.ONLINE,
     port: int | None = None,
     memory_gb: int = 8,
@@ -122,11 +123,20 @@ def create_container(
     gpu_number: int = 0,
     cpu_number: int = 2,
 ) -> Container:
+    """造容器行。**没有 image 形参**：运行标签是派生值（`image_id` + `last_build_at`），
+    行上不存它——要造"跑过某模板某版本"的容器，传 `image_id` 与 `last_build_at`。
+
+    image_id 默认 None（裸镜像存量容器）；要造模板容器请传 seed 的 id=1。
+
+    注意 SQLite 已开 PRAGMA foreign_keys=ON：传了 image_id 就必须指向真实 images 行，
+    否则 IntegrityError。
+    """
     machine = machine or create_machine()
     idx = next(_ids)
     container = Container(
         name=name or f"container_{idx}",
-        image=image,
+        image_id=image_id,
+        last_build_at=last_build_at,
         machine_id=machine.id,
         container_status=status,
         port=port or (20000 + idx),

@@ -179,29 +179,79 @@ def build_long_term_container_state(container_id: int, bindings: list | None = N
     }
 
 
+def is_version_behind(image_version_at, template_updated_at) -> bool:
+    """容器是否落后于模板：其构建版本戳早于模板的当前版本。
+
+    **刻意不看容器的 `created_at`**：恢复路径不更新创建时间，用它会把一个刚按最新模板
+    重建的容器误判为"落后"，从而展示错误的运行基底。
+
+    展示出口与恢复判定共用这一个比较——两处对"是否落后"必须是同一口径，否则会出现
+    「详情页说它是最新的、恢复却按落后的分支问你」这种自相矛盾。
+    """
+    if template_updated_at is None:
+        return False
+    if image_version_at is None:
+        # 没有留痕 = 无法证明它是当前版本 → 按落后处理（展示快照更诚实）。
+        return True
+    return image_version_at < template_updated_at
+
+
+def container_dockerfile_parts(container):
+    """读容器行上的配方留痕，补上当下的平台注入，凑成一份完整的渲染输入；没有留痕返回 None。
+
+    容器行上只有**模板侧的两项**（FROM 与业务片段）；平台注入不落库，这里现取当下的
+    系统设置——它不是用户的内容而是平台设施，容器该带的是现在这一版，不是当年那版。
+
+    判"有没有留痕"看 `base_image`：FROM 是 Dockerfile 的结构必需项，业务片段可以合法为空
+    （内置模板就是空的）——所以不能拿"整段文本非空"当判据。
+
+    **不回落模板。** 恢复链路靠这个 None 走"没有配方可还原"的拒绝分支；回落等于把当前
+    模板冒充成该容器跑过的那份。展示出口要的回落是另一回事，见 container_image_dockerfile。
+    """
+    base_image = getattr(container, "base_image", None)
+    if not base_image:
+        return None
+    from .. import settings_tasks
+    from ..image_tasks import DockerfileParts
+
+    return DockerfileParts(
+        base_image=base_image,
+        platform_injection=settings_tasks.get_image_platform_injection_content() or "",
+        dockerfile_body=getattr(container, "dockerfile_body", None),
+    )
+
+
 def container_image_dockerfile(container) -> str | None:
-    """按平台 image tag 反查镜像模板，render 完整 Dockerfile。"""
+    """容器运行基底的**唯一展示出口**（design D8）。
 
-    if not getattr(container, "image", None):
+    **一律展示容器侧的留痕**——该容器实际使用的那份配方，现渲染成文本。
+
+    为什么不做"没落后就展示当前模板渲染"：平台注入是**独立于 `images.updated_at`** 的
+    系统设置。注入变了而模板版本没变时，判据会说"不落后"，于是展示的是**新注入**，
+    而容器跑的是**旧注入**——展示就此撒谎。留痕是容器实际跑的那一份，不存在这个问题，
+    规则也因此从三支收成一支。
+
+    无归属与存量容器（本次变更上线前的，没有留痕）回落为当前模板渲染——那是有损的：
+    它展示模板**现在**的样子。可接受的退化，只影响这批容器。
+
+    取模板走 `get_by_id` 原语，**不受停用过滤影响**：停用只挡"用于新建"，不该让历史
+    容器的运行基底变空——那会把停用变成一个破坏历史可读性的操作。
+    """
+    parts = container_dockerfile_parts(container)
+    if parts is not None:
+        return parts.render()
+    image_id = getattr(container, "image_id", None)
+    if not image_id:
         return None
-    m = re.match(r"^fuxi/image-(\d+):", container.image)
-    if not m:
-        return None
+    return _render_template_dockerfile(image_id)
+
+
+def _render_template_dockerfile(image_id: int) -> str | None:
     try:
-        from ...repositories import image_repo
-        from ..image_tasks import render_final_dockerfile
-        from .. import settings_tasks
+        from ..image_tasks import resolve_image_build
 
-        with session_scope(commit=False) as session:
-            image = image_repo.get_by_id(int(m.group(1)), session=session)
-        if image is None:
-            return None
-        platform_injection = settings_tasks.get_image_platform_injection_content()
-        return render_final_dockerfile(
-            base_image=image.base_image,
-            platform_injection=platform_injection,
-            dockerfile_body=image.dockerfile_body,
-        )
+        build = resolve_image_build(int(image_id))
+        return None if build is None else build.dockerfile_parts.render()
     except Exception as e:
         logger.warning("container image dockerfile render failed: %s", e)
         return None

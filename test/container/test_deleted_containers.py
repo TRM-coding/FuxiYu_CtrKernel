@@ -16,6 +16,20 @@ from ..factories import create_container, create_container_graph, create_machine
 from .conftest import NODE_REMOVE_SUCCESS
 
 
+def _bind_to_default_template(db_session, container) -> None:
+    """把容器绑到内置模板上并补齐构建版本戳。
+
+    恢复需要运行标签，而标签是**派生值**（归属标识 + 构建版本戳），没有回落可退。
+    干净设计下每个容器都该有这两样——工厂造的裸容器没有，测试要自己补上。
+    版本戳取模板当前版本 ⇒ 不落后 ⇒ 恢复直接走模板分支，不询问调用方。
+    """
+    from ...repositories import image_repo
+
+    container.image_id = 1
+    container.last_build_at = image_repo.get_by_id(1, session=db_session).updated_at
+    db_session.commit()
+
+
 @pytest.mark.parametrize("kwargs,reason", [
     ({}, "invalid_payload"),
     ({"mount_cleanup_id": 9999}, "not_found"),
@@ -264,6 +278,7 @@ def test_resurrect_container_reuses_snapshot_mount_and_restores_bindings(db_sess
     container.bind_mount_path = f"/home/{root.username}/containers/{container.name}_data"
     container.gpu_chosen_list = [1]
     container.gpu_number = 1
+    _bind_to_default_template(db_session, container)
     db_session.commit()
     sent = []
 
@@ -308,6 +323,7 @@ def test_resurrect_container_renames_when_original_name_is_reused(db_session, mo
     root, machine, container = create_container_graph()
     container.name = "restore_taken"
     container.bind_mount_path = f"/home/{root.username}/containers/{container.name}_data"
+    _bind_to_default_template(db_session, container)
     db_session.commit()
     sent = []
 

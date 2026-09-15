@@ -32,6 +32,10 @@ def _init_database() -> None:
     from . import models  # noqa: F401
 
     db.create_all()
+    # 必须排在其余自愈之前：这一步含 containers.image → runtime_image 的改名，
+    # 改名未完成时任何 select(Container) 都会枚举到不存在的列而报 no such column。
+    _ensure_container_image_schema()
+    _strip_legacy_snapshot_image_key()
     _ensure_container_lifecycle_schema()
     _ensure_deleted_container_schema()
     _ensure_image_template_schema()
@@ -84,7 +88,7 @@ def _ensure_image_template_schema() -> None:
 
     existing = {column["name"] for column in inspector.get_columns("images")}
     required_sqlite = {
-        "base_image": "ALTER TABLE images ADD COLUMN base_image VARCHAR(255) NOT NULL DEFAULT 'ubuntu:22.04'",
+        "base_image": "ALTER TABLE images ADD COLUMN base_image VARCHAR(255) NOT NULL DEFAULT 'ubuntu:24.04'",
         "dockerfile_body": "ALTER TABLE images ADD COLUMN dockerfile_body TEXT NOT NULL DEFAULT ''",
         "status": "ALTER TABLE images ADD COLUMN status VARCHAR(8) NOT NULL DEFAULT 'draft'",
         "created_by_user_id": "ALTER TABLE images ADD COLUMN created_by_user_id INTEGER NULL",
@@ -92,7 +96,7 @@ def _ensure_image_template_schema() -> None:
         "updated_at": "ALTER TABLE images ADD COLUMN updated_at DATETIME NULL",
     }
     required_mysql = {
-        "base_image": "ALTER TABLE images ADD COLUMN base_image VARCHAR(255) NOT NULL DEFAULT 'ubuntu:22.04'",
+        "base_image": "ALTER TABLE images ADD COLUMN base_image VARCHAR(255) NOT NULL DEFAULT 'ubuntu:24.04'",
         "dockerfile_body": "ALTER TABLE images ADD COLUMN dockerfile_body TEXT NOT NULL",
         "status": "ALTER TABLE images ADD COLUMN status ENUM('draft', 'ready', 'disabled') NOT NULL DEFAULT 'draft'",
         "created_by_user_id": "ALTER TABLE images ADD COLUMN created_by_user_id INT NULL",
@@ -102,6 +106,21 @@ def _ensure_image_template_schema() -> None:
     required = required_sqlite if current_engine.dialect.name == "sqlite" else required_mysql
 
     missing = [name for name in required if name not in existing]
+
+    # 模板名唯一性移交应用层（2026-09 决策）：模板的移除是停用而非删除，停用行会继续
+    # 占用名字，唯一约束会让该名字永久不可复用。模型已去掉 unique，但旧库上的唯一性
+    # 是**独立索引**（create_all 对 unique=True + index=True 生成 ix_images_name），
+    # 因此可以直接删掉重建为非唯一索引，无需重建表。幂等：只在它仍唯一时才动。
+    index_rows = {idx["name"]: idx for idx in inspector.get_indexes("images") if idx.get("name")}
+    name_index = index_rows.get("ix_images_name")
+    if name_index is not None and name_index.get("unique"):
+        with current_engine.begin() as conn:
+            conn.execute(text("DROP INDEX ix_images_name"))
+            conn.execute(text("CREATE INDEX ix_images_name ON images(name)"))
+        logging.getLogger(__name__).warning(
+            "images.name unique index dropped: uniqueness now enforced in application layer"
+        )
+
     if not missing:
         return
 
@@ -450,6 +469,354 @@ def _backfill_container_created_at(current_engine) -> None:
             ))
     except Exception as e:  # pragma: no cover
         logging.getLogger(__name__).warning("container created_at backfill failed: %s", e)
+
+
+def _ensure_container_image_schema() -> None:
+    """容器镜像归属与构建留痕自愈（2026-09）。
+
+    create_all 只建新表、不改旧表；旧库仍是单列 image。本函数幂等地补齐：
+    改名 → 补列（image_id / last_build_at / 配方两项）→ 建索引 → 清悬挂 → 回填归属
+    → 回填配方 → 退役 image_dockerfile → 退役 runtime_image。每一步都可在任意库上重复执行。
+
+    必须在任何针对 containers 的 ORM 查询之前跑完：改名未完成时 select(Container)
+    会枚举到 containers.runtime_image 而报 no such column。
+    """
+
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    current_engine = extensions.engine
+    inspector = inspect(current_engine)
+    if not inspector.has_table("containers"):
+        return
+
+    logger = logging.getLogger(__name__)
+    existing = {column["name"] for column in inspector.get_columns("containers")}
+    renamed = "image" in existing and "runtime_image" not in existing
+    index_names = {index["name"] for index in inspector.get_indexes("containers") if index.get("name")}
+    # 补列清单：INTEGER / DATETIME / VARCHAR / TEXT 两方言同形，故无需方言分支。
+    required_columns = {
+        "image_id": "ALTER TABLE containers ADD COLUMN image_id INTEGER NULL",
+        "last_build_at": "ALTER TABLE containers ADD COLUMN last_build_at DATETIME NULL",
+        "base_image": "ALTER TABLE containers ADD COLUMN base_image VARCHAR(255) NULL",
+        "dockerfile_body": "ALTER TABLE containers ADD COLUMN dockerfile_body TEXT NULL",
+    }
+    missing = [name for name in required_columns if name not in existing]
+
+    with current_engine.begin() as conn:
+        # ① 旧单列改名：数据原地不动（需 SQLite >= 3.25 / MySQL 8.0）。
+        #    这一步现在只为一个目的存在——让下面的回填有一个**确定的列名**可读（旧库叫
+        #    `image`，后来叫 `runtime_image`）。该列在本次自愈的最后会被退役（⑧），
+        #    因此不会留下任何过渡期状态；它的 NOT NULL 也随之消失。
+        if renamed:
+            conn.execute(text("ALTER TABLE containers RENAME COLUMN image TO runtime_image"))
+        # ② 补列
+        for name in missing:
+            conn.execute(text(required_columns[name]))
+        # ③ 索引：DDL 吞异常只 warning，与 _ensure_container_lifecycle_schema 同口径。
+        if "ix_containers_image_id" not in index_names:
+            try:
+                conn.execute(text("CREATE INDEX ix_containers_image_id ON containers(image_id)"))
+            except Exception as e:
+                logger.warning("container image schema index create failed: %s", e)
+        # ④ 清悬挂：外键只在新库里由 create_all 建出，旧库（SQLite 无法 ALTER 加外键）
+        #    没有它。模板现在只停用不删除，因此新的悬挂值产生不了；这一步只清理
+        #    历史遗留（旧行为下模板被物理删除留下的指向空行的值），并让新库能加上外键。
+        if inspector.has_table("images"):
+            dangling = conn.execute(text(
+                "UPDATE containers SET image_id = NULL"
+                " WHERE image_id IS NOT NULL AND image_id NOT IN (SELECT id FROM images)"
+            ))
+            if dangling.rowcount:
+                logger.warning("container image_id cleared (legacy dangling): %s row(s)", dangling.rowcount)
+    if renamed or missing:
+        logger.warning("container image schema upgraded: renamed=%s added=%s", renamed, missing)
+
+    # 顺序是硬约束：回填都要读旧列，所以退役必须排在最后一个回填之后。
+    _backfill_container_image_id(current_engine)
+    unconvertible = _backfill_container_dockerfile_parts(current_engine)
+    if "image_dockerfile" in existing and unconvertible == 0:
+        _retire_container_image_dockerfile(current_engine)
+    _retire_runtime_image(current_engine)
+
+
+def _retire_runtime_image(current_engine) -> None:
+    """退役 containers.runtime_image（2026-09 二次决策）。
+
+    它存的是"本次实跑制品的标签"——一个**派生值**（归属标识 + 版本戳一算就有）。标签改由
+    `image_tasks.format_image_build_tag` 纯推导之后，它唯一的读点是展示回落，而那个回落在
+    推导成功时永远轮不到；写点却还在每一行上抄一份，正是本变更一路在清理的"第二来源"。
+
+    **这一步不只是清理，是必须做的**：旧库里这一列（由 `image` 改名而来）是 NOT NULL，
+    新代码不再写它 —— 不删掉，新容器根本插不进去。
+
+    排在所有回填之后：`_backfill_container_image_id` 正是从这一列反解归属与版本戳的。
+    删列失败（SQLite < 3.35）只报 ERROR 不抛错，但那是**必须人工处理**的状态：调用方会
+    因此插不进新行。所以日志写清怎么办，而不是只丢一句 warning。
+    """
+
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    logger = logging.getLogger(__name__)
+    inspector = inspect(current_engine)
+    if not inspector.has_table("containers"):
+        return
+    columns = {column["name"] for column in inspector.get_columns("containers")}
+    if "runtime_image" not in columns:
+        return
+    try:
+        with current_engine.begin() as conn:
+            conn.execute(text("ALTER TABLE containers DROP COLUMN runtime_image"))
+    except Exception as e:
+        logger.error(
+            "containers.runtime_image drop FAILED (%s). 该列在旧库是 NOT NULL 而新代码不再写它——"
+            "不删掉就插不进新容器行。请手工执行：ALTER TABLE containers DROP COLUMN runtime_image;",
+            e,
+        )
+        return
+    logger.warning("containers.runtime_image retired (tag is derived, not stored)")
+
+
+def _backfill_container_dockerfile_parts(current_engine) -> int | None:
+    """配方留痕的存量回填（2026-09 二次决策）：从旧的单列 image_dockerfile 转出。
+
+    旧列存的是**渲染后**的整段文本，输入不可从文本里反解（渲染结果是纯文本，段边界没有
+    标记，反解只会引入脆弱的启发式）。所以这里不做反解，做的是**验证性对齐**：
+
+        取该容器 image_id 对应模板此刻的配方，渲染一份，与存量文本逐字节比对；
+        相同 ⇒ 那就说明当初写进去的就是这一份，输入已知，写入。
+
+    对不上就不写（模板改过、注入改过、或本来就是裸镜像容器）。这些行的配方无从重建，
+    恢复会以 `data_not_recoverable` 拒绝——那是诚实的，比拿当前模板冒充它跑过的那份好。
+
+    **返回值是"没能转出的行数"**，`None` 表示数不出来（读失败）。调用方只在拿到 0 时
+    才退役旧列——还有行转不出来、或压根数不清，旧列就是它们配方的唯一留存，不能删。
+
+    幂等：只补 base_image 为空的行；失败仅 warning。
+    """
+
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    logger = logging.getLogger(__name__)
+    inspector = inspect(current_engine)
+    if not inspector.has_table("containers"):
+        return 0
+    columns = {column["name"] for column in inspector.get_columns("containers")}
+    if "image_dockerfile" not in columns or "base_image" not in columns:
+        return 0
+
+    # 读与写分两次事务：中间要跑 ORM 查询（resolve_image_build 自带 session），
+    # 和写事务挤在同一个连接上会在 SQLite 上演成锁等待。
+    try:
+        with current_engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT id, image_id, image_dockerfile FROM containers"
+                " WHERE image_dockerfile IS NOT NULL AND base_image IS NULL"
+            )).all()
+    except Exception as e:  # pragma: no cover
+        logger.warning("container dockerfile parts backfill read failed: %s", e)
+        return None
+    if not rows:
+        return 0
+
+    from .services.image_tasks import resolve_image_build
+
+    by_template: dict[int, object] = {}
+    updates = []
+    for container_id, image_id, legacy_text in rows:
+        if image_id is None:
+            continue
+        if image_id not in by_template:
+            build = resolve_image_build(int(image_id))
+            by_template[image_id] = build.dockerfile_parts if build is not None else None
+        parts = by_template[image_id]
+        if parts is None or parts.render() != legacy_text:
+            continue
+        updates.append({
+            "container_id": container_id,
+            "base_image": parts.base_image,
+            "dockerfile_body": parts.dockerfile_body,
+        })
+    unconvertible = len(rows) - len(updates)
+    if updates:
+        try:
+            with current_engine.begin() as conn:
+                for values in updates:
+                    conn.execute(
+                        text(
+                            "UPDATE containers SET base_image = :base_image,"
+                            " dockerfile_body = :dockerfile_body WHERE id = :container_id"
+                        ),
+                        values,
+                    )
+        except Exception as e:  # pragma: no cover
+            logger.warning("container dockerfile parts backfill write failed: %s", e)
+            return None
+    logger.warning(
+        "container dockerfile parts backfilled: %s/%s row(s), %s left unconvertible",
+        len(updates), len(rows), unconvertible,
+    )
+    return unconvertible
+
+
+def _retire_container_image_dockerfile(current_engine) -> None:
+    """退役 containers.image_dockerfile：一列渲染结果 → 两项输入（2026-09 二次决策）。
+
+    渲染结果是**派生值**，落库就等于给同一个事实造了第二个来源——本变更要消灭的正是
+    这个。它的两个消费者（展示出口、恢复的内容来源）现在都改读两项输入现场渲染。
+
+    与 runtime_image 那个过渡残留不同，这里**直接删列**：该列是本次变更新引入的，
+    从未随任何版本发布过，没有"旧库还在依赖它"这回事；而留着它会让派生值继续留在库里。
+    调用方只在**所有存量行都转出成功**时才调到这里（还有转不出来的行，旧列就是它们配方
+    的唯一留存）。删列失败（SQLite < 3.35）只 warning：列留着不参与任何业务。
+    """
+
+    import logging
+
+    from sqlalchemy import text
+
+    logger = logging.getLogger(__name__)
+    try:
+        with current_engine.begin() as conn:
+            conn.execute(text("ALTER TABLE containers DROP COLUMN image_dockerfile"))
+    except Exception as e:
+        logger.warning("containers.image_dockerfile drop skipped: %s", e)
+
+
+def _backfill_container_image_id(current_engine) -> None:
+    """容器镜像留痕的存量回填（2026-09）：从 runtime_image 的 tag 反解归属与版本戳。
+
+    tag 形如 `fuxi/image-<模板id>:<版本戳>`，一段字符串里编码了两个事实：
+
+    - 模板 id → 回填 `image_id`（归属）
+    - 版本戳 → 回填 `last_build_at`（本次构建所依据的模板版本时刻）
+
+    只认这个形式；裸镜像 tag（如 ubuntu:24.04）无从推断归属，两项都保持 NULL —— 不猜。
+    回填 `image_id` 前确认 images 行仍在，不制造悬挂值。幂等：只补 NULL；失败仅 warning。
+
+    解析放在 Python 侧而非 SQL：MySQL 的 REGEXP 与 SQLite 无正则会把同一规则撕裂成
+    两份方言实现。这是全仓库仅存的 tag 正则，只服务于这一次性迁移 ——
+    新代码一律直接读 image_id，不再反解字符串。
+    """
+
+    import logging
+    import re
+    from datetime import datetime
+
+    from sqlalchemy import inspect, text
+
+    logger = logging.getLogger(__name__)
+    inspector = inspect(current_engine)
+    if not (inspector.has_table("containers") and inspector.has_table("images")):
+        return
+    # 该列退役之后这一步就无事可做 —— 早退，否则每次启动都会因为查了不存在的列而报一次
+    # "backfill failed"，把一条正常状态伪装成故障。
+    if "runtime_image" not in {c["name"] for c in inspector.get_columns("containers")}:
+        return
+    patched = 0
+    stamped = 0
+    try:
+        with current_engine.begin() as conn:
+            # 两类补口一起取：归属缺、或版本戳缺（存量两样都缺）。
+            rows = conn.execute(text(
+                "SELECT id, runtime_image, image_id, last_build_at FROM containers"
+                " WHERE runtime_image IS NOT NULL"
+                "   AND (image_id IS NULL OR last_build_at IS NULL)"
+            )).all()
+            if not rows:
+                return
+            known_ids = {row[0] for row in conn.execute(text("SELECT id FROM images")).all()}
+            for container_id, runtime_image, current_image_id, current_stamp in rows:
+                match = re.match(r"^fuxi/image-(\d+):(\d{8}T\d{6}Z)$", runtime_image or "")
+                if not match:
+                    continue
+                image_id = int(match.group(1))
+                # 版本戳与归属相互独立：模板行没了也只是不补归属，版本戳照补——
+                # 它是"这个容器当初按哪个版本建的"这个事实，与模板是否还在无关。
+                if current_stamp is None:
+                    try:
+                        stamp = datetime.strptime(match.group(2), "%Y%m%dT%H%M%SZ")
+                    except ValueError:
+                        stamp = None
+                    if stamp is not None:
+                        conn.execute(
+                            text("UPDATE containers SET last_build_at = :stamp WHERE id = :container_id"),
+                            {"stamp": stamp, "container_id": container_id},
+                        )
+                        stamped += 1
+                if current_image_id is not None or image_id not in known_ids:
+                    continue
+                conn.execute(
+                    text("UPDATE containers SET image_id = :image_id WHERE id = :container_id"),
+                    {"image_id": image_id, "container_id": container_id},
+                )
+                patched += 1
+    except Exception as e:  # pragma: no cover
+        logger.warning("container image backfill failed: %s", e)
+        return
+    if patched or stamped:
+        logger.warning(
+            "container image backfilled: image_id=%s last_build_at=%s row(s)", patched, stamped
+        )
+
+
+def _strip_legacy_snapshot_image_key() -> None:
+    """清掉已删容器快照 JSON 里的 `image` 键（2026-09 决策）。
+
+    那个键存的是删除当刻的运行标签字符串。它有两个消费者，都已改掉：
+
+    - 恢复路径曾拿它当"标签推导失败时的回落"——标签是**派生值**（归属标识 + 构建版本戳），
+      两个输入都在容器行上，从 JSON 里再抄一份既多余又会让异常状态被静默掩盖；
+    - 已删列表出参曾直接把它当展示值——同样改成了由容器行推导，与容器列表同一口径。
+
+    消费者没了，留在数据里就是无意义保留（还是会被抄进每一份新快照的派生值）。
+    就地删除，幂等：只剩这个键已不存在时不动那一行。
+
+    与 `active_name` 的清空同款处理——数据层面的退役也走启动自愈，人工迁移不必重复一遍。
+    """
+
+    import json
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    current_engine = extensions.engine
+    inspector = inspect(current_engine)
+    if not inspector.has_table("deleted_container_restore_snapshot"):
+        return
+
+    logger = logging.getLogger(__name__)
+    stripped = 0
+    try:
+        with current_engine.begin() as conn:
+            rows = conn.execute(
+                text("SELECT id, snapshot FROM deleted_container_restore_snapshot")
+            ).all()
+            for row_id, snapshot in rows:
+                data = snapshot
+                if isinstance(data, str):
+                    try:
+                        data = json.loads(data)
+                    except (TypeError, ValueError):
+                        continue
+                if not isinstance(data, dict) or "image" not in data:
+                    continue
+                data.pop("image", None)
+                conn.execute(
+                    text("UPDATE deleted_container_restore_snapshot SET snapshot = :snapshot WHERE id = :row_id"),
+                    {"snapshot": json.dumps(data, ensure_ascii=False), "row_id": row_id},
+                )
+                stripped += 1
+    except Exception as e:  # pragma: no cover
+        logger.warning("legacy snapshot image key cleanup failed: %s", e)
+        return
+    if stripped:
+        logger.warning("legacy snapshot image key stripped: %s row(s)", stripped)
 
 
 def _should_start_background_tasks() -> bool:

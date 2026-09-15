@@ -14,7 +14,11 @@ class Image(db.Model):
     __tablename__ = "images"
 
     id: int = db.Column(db.Integer, primary_key=True)
-    name: str = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    # 无唯一约束（2026-09 决策）：模板的移除是停用而非删除，停用行会继续占用名字，
+    # 唯一约束会让该名字永久不可复用。唯一性由应用层在「未停用」的模板之间判定
+    # （image_repo 的创建/改名路径）。containers 表为此废弃过 active_name 派生列，
+    # 这里不再重蹈——镜像没有 Node 侧 docker daemon 那样的外部守卫，约束必须自己承担。
+    name: str = db.Column(db.String(120), nullable=False, index=True)
     description: str | None = db.Column(db.String(500), nullable=True)
     base_image: str = db.Column(db.String(255), nullable=False)
     dockerfile_body: str = db.Column(db.Text, nullable=False, default="")

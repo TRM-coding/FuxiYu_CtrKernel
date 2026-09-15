@@ -41,13 +41,16 @@ class _CompatBaseModel(BaseModel):
 
 
 class ContainerConfigInput(_CompatBaseModel):
-    """创建容器时的配置块，兼容旧版大写字段。"""
+    """创建容器时的配置块，兼容旧版大写字段。
+
+    无 image 字段：镜像只能由 image_id 指定（平台据此渲染 Dockerfile 并注入平台设施），
+    调用方自带的镜像名一律不采信。旧客户端仍会发 IMAGE，由 extra="ignore" 静默丢弃。
+    """
 
     gpu_list: list[int] = Field(default_factory=list, alias="GPU_LIST")
     cpu_number: int = Field(default=0, ge=0, alias="CPU_NUMBER")
     memory: int = Field(default=0, ge=0, alias="MEMORY")
     name: str = Field(default="", alias="NAME")
-    image: str = Field(default="", alias="IMAGE")
     shared_memory: int = Field(default=0, ge=0, alias="SHARED_MEM")
 
 
@@ -55,6 +58,8 @@ class CreateContainerRequest(_CompatBaseModel):
     """创建容器请求。
 
     优先使用 container 配置块；顶层大写字段保留给旧调用兼容。
+    image_id 必填（API 边界校验，不在这里用 Field(...) 表达，否则会返回 422
+    而不是本仓库统一的 400 + error_reason）。
     """
 
     owner_user_id: int = Field(default=0, ge=0)
@@ -66,7 +71,6 @@ class CreateContainerRequest(_CompatBaseModel):
     CPU_NUMBER: int = Field(default=0, ge=0)
     MEMORY: int = Field(default=0, ge=0)
     NAME: str = ""
-    image: str = ""
     SHARED_MEM: int = Field(default=0, ge=0)
 
     if field_validator is not None:
@@ -104,7 +108,11 @@ class DeletedContainerRecord(_CompatBaseModel):
     deleted_id: int | str
     original_container_id: int | None = None
     container_name: str | None = None
-    image: str | None = None
+    # 镜像标签由容器行推导（归属标识 + 构建版本戳），与容器列表同一口径。
+    # 字段名与容器列表的出参保持一致，避免前端出现"这里叫 image、那里叫 container_image"
+    # 的双口径——也杜绝了"从快照 JSON 里读内嵌副本"的消费方式。
+    container_image: str | None = None
+    image_id: int | None = None
     machine_id: int | None = None
     machine_name: str | None = None
     machine_ip: str | None = None
@@ -137,11 +145,52 @@ class CleanDeletedContainerMountResponse(SuccessMessageResponse):
 
 
 class ResurrectContainerRequest(_CompatBaseModel):
+    """恢复容器请求。
+
+    `content_source` 是**可选的内容来源**（`snapshot` / `template`），只在响应里回了
+    `requires_choice=True`（后端没有恢复、交回两份内容）之后才需要带上。
+
+    ⚠ 它必须在这里显式声明：`_CompatBaseModel` 是 `extra="ignore"`，没声明的字段会被
+    **静默丢弃** —— 曾经漏过一次，表现为"传了 template 也永远走快照"，而且不报错。
+    """
+
     deleted_id: int = Field(..., ge=1)
+    content_source: str | None = None
+
+
+class DockerfileSectionDiff(_CompatBaseModel):
+    """差异里的一个 Dockerfile 分段（基础镜像 / 业务片段）。
+
+    分段呈现是刻意的：两份完整的 Dockerfile 摊在一起，用户很难看出到底哪一块不一样。
+
+    没有平台注入段：它两侧都取当下的系统设置，按构造恒等（见 models/containers.py）。
+    """
+
+    name: str
+    changed: bool
+
+
+class RestoreContentPreview(_CompatBaseModel):
+    """二选一时给出的一份内容（完整 Dockerfile 文本）。"""
+
+    dockerfile: str = ""
 
 
 class ResurrectContainerResponse(SuccessMessageResponse):
+    """恢复容器的响应。**同一个接口承担两件事**（design D14）：
+
+    - 正常恢复 → `container_id` 有值。
+    - 存在二选一 → `requires_choice=True`，并带上两份内容与分段差异；**此时没有恢复**，
+      调用方选完再带 `content_source` 调一次。
+
+    容器留痕只在这个响应里交出去 —— 没有"谁都能调一下就把配方读走"的独立查询接口。
+    """
+
     container_id: int | None = None
+    requires_choice: bool = False
+    snapshot: RestoreContentPreview | None = None
+    template: RestoreContentPreview | None = None
+    sections: list[DockerfileSectionDiff] = Field(default_factory=list)
 
 
 class SetLongTermContainerRequest(_CompatBaseModel):
@@ -252,6 +301,8 @@ class ContainerBriefInformation(_CompatBaseModel):
     container_id: int | None = None
     container_name: str | None = None
     container_image: str | None = None
+    # 镜像模板归属（逻辑真源）；container_image 只是本次实跑制品的展示快照
+    image_id: int | None = None
     # 容器创建时间（2026-09）：id 在 SQLite 删除后可复用，created_at 作新旧区分锚
     created_at: str | None = None
     machine_id: int | None = None
@@ -293,9 +344,12 @@ class ContainerDetailInformation(_CompatBaseModel):
     container_id: int | None = None
     container_name: str | None = None
     container_image: str | None = None
+    # 镜像模板归属（逻辑真源）；container_image 只是本次实跑制品的展示快照
+    image_id: int | None = None
     # 容器创建时间（2026-09）：id 在 SQLite 删除后可复用，created_at 作新旧区分锚
     created_at: str | None = None
-    # 完整 Dockerfile（由镜像模板 render，非平台镜像/已删为 None）
+    # 完整 Dockerfile：由**该容器自己的配方留痕**现场渲染（`base_image` + `dockerfile_body`
+    # + 当下的平台注入）。无留痕的存量容器回落为当前模板渲染；无归属且无留痕则为 None。
     image_dockerfile: str | None = None
     machine_id: int | None = None
     machine_ip: str | None = None

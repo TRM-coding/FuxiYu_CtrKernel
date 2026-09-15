@@ -5,6 +5,7 @@ import math
 
 from ...constant import ROLE
 from ...repositories.containers_repo import derive_port_mappings
+from ..image_tasks import format_image_build_tag
 from . import node_comms
 from .pydantic_models import container_bref_information, _derive_effective_status
 from .utils import container_image_dockerfile, derive_allocated_limits
@@ -72,7 +73,13 @@ def _build_container_common_fields(container, machine, bindings) -> dict:
     return {
         "container_id": container.id,
         "container_name": container.name,
-        "container_image": container.image,
+        # container_image 是推导出的运行镜像标签（归属标识 + 构建版本戳），不是库存字段——
+        # 标签是派生值，存一份就等于制造第二个可漂移的真值来源。判断归属只看 image_id。
+        # 推不出来（裸镜像存量容器）时是 None，**不编造**：编一个就指着一个没跑过的制品。
+        "container_image": format_image_build_tag(
+            getattr(container, "image_id", None), getattr(container, "last_build_at", None)
+        ),
+        "image_id": getattr(container, "image_id", None),
         "created_at": container.created_at.isoformat() if container.created_at else None,
         "machine_id": container.machine_id,
         "machine_ip": machine.machine_ip if machine else "",

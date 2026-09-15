@@ -13,6 +13,7 @@ from ...repositories import (
     usercontainer_repo,
 )
 from ...repositories.containers_repo import derive_port_mappings
+from ..image_tasks import format_image_build_tag
 from .exceptions import NodeServiceError
 
 
@@ -117,7 +118,11 @@ def build_container_restore_snapshot(
     return {
         "container_id": container.id,
         "container_name": container.name,
-        "image": container.image,
+        # 只存**归属标识**，不存运行标签：标签是派生值（归属标识 + 构建版本戳），
+        # 存一份就等于把派生值当事实，而容器行上那两个事实一直都在。
+        # 这里曾经存过一个 "image" 键（删除当刻的 tag 字符串），恢复路径拿它当标签回落、
+        # 已删列表拿它当展示值——两个消费者都改成了从容器行推导，那个键因而绝迹。
+        "image_id": getattr(container, "image_id", None),
         "machine_id": container.machine_id,
         "machine_ip": getattr(machine, "machine_ip", None),
         "machine_name": getattr(machine, "machine_name", None),
@@ -326,7 +331,21 @@ def serialize_deleted_container_record(row, cleanup, *, context: dict | None = N
         "deleted_id": row.id,
         "original_container_id": row.original_container_id,
         "container_name": context.get("container_name") or row.container_name,
-        "image": (row.snapshot or {}).get("image"),
+        # 镜像标签由**容器行**推导（归属标识 + 构建版本戳），与容器列表用的是同一个口径。
+        # 曾从快照 JSON 的 "image" 键取——那是把派生值又抄了一份进 JSON 再读出来，
+        # 既会与容器行失真，也让前端养成"消费 JSON 内嵌副本"的习惯。
+        "container_image": (
+            format_image_build_tag(
+                getattr(context["container"], "image_id", None),
+                getattr(context["container"], "last_build_at", None),
+            )
+            if context.get("container")
+            else None
+        ),
+        "image_id": (
+            getattr(context.get("container"), "image_id", None)
+            or (row.snapshot or {}).get("image_id")
+        ),
         "machine_id": context.get("machine_id") or row.machine_id,
         "machine_name": context.get("machine_name"),
         "machine_ip": context.get("machine_ip"),

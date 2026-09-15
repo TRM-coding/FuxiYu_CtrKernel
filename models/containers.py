@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from ..extensions import db
 from ..constant import *
 
@@ -13,7 +15,40 @@ class Container(db.Model):
     deleted_trigger: str = db.Column(db.String(64), nullable=True)
     deleted_reason: str = db.Column(db.String(255), nullable=True)
     deleted_by_user_id: int = db.Column(db.Integer, nullable=True)
-    image: str = db.Column(db.String(200), nullable=False)
+    # ── 镜像归属与构建留痕（2026-09 决策） ──
+    # image_id：逻辑真源。容器由哪个镜像模板（images.id）而来；重建/恢复据此解析。
+    #   此前是拿 tag 字符串正则反解 id —— 格式一变就断。
+    #   外键**不带 ondelete**（默认 NO ACTION）：模板的移除表现为「停用」而非删除
+    #   （见 image-template-lifecycle），因此外键永不触发，归属标识的值也永不改变。
+    #   "当初构建自哪个模板"是一个**事实**，不能因为模板被移除就抹掉。
+    image_id: int | None = db.Column(
+        db.Integer, db.ForeignKey("images.id"), nullable=True, index=True
+    )
+    # last_build_at：本次构建所依据的**模板版本时刻**（= 派发构建时读到的 images.updated_at，
+    #   不是 now()）。承担两件事：判定容器是否落后于模板；让镜像标签可推导
+    #   （fuxi/image-{image_id}:{last_build_at}），因此标签本身不落库。
+    last_build_at: datetime | None = db.Column(db.DateTime, nullable=True)
+    # ── 本次构建的配方留痕：模板侧的两个输入（2026-09 二次决策） ──
+    # 存**输入**而不是渲染后的整段文本：渲染结果是派生值（拼一下就有的东西），落库就等于
+    # 给同一个事实造第二个来源。名字与 images 表的列、与渲染函数的形参逐一对应：
+    #   base_image      ← images.base_image（FROM 那一段）
+    #   dockerfile_body ← images.dockerfile_body（业务片段那一段）
+    #
+    # **平台注入不在这里**，它永远取当下的系统设置
+    # （services/settings_tasks.get_image_platform_injection_content）。理由是它不是用户的
+    # 内容而是平台设施：容器该带的是**现在这一版** sshd 那套注入，不是它当年那版。因此
+    # 存一份旧的就成了"谁也不需要的历史副本"，而它偏偏还是会被抄进每一行新数据的派生值。
+    #
+    # 判"有没有留痕"看 base_image：FROM 是 Dockerfile 的结构必需项，业务片段可以合法为空
+    # （内置模板就是空的）。渲染文本由 services/container_module/utils 的
+    # container_image_dockerfile 现算，不落库。
+    # 两者 MUST NOT 参与身份与新鲜度的判断：归属只看 image_id，落后只看 last_build_at。
+    base_image: str | None = db.Column(db.String(255), nullable=True)
+    dockerfile_body: str | None = db.Column(db.Text, nullable=True)
+    # 这里曾有 runtime_image（旧版写入的镜像标签字符串）。已退役：标签是**派生值**
+    #   （format_image_build_tag 由归属标识 + 版本戳算出），存一份就是本变更一路在清理的
+    #   那种"第二来源"。它的读点（展示回落）本就在推导成功时永远轮不到，写点却每行都抄一份。
+    #   退役时机见 __init__._retire_runtime_image——旧库里它是 NOT NULL，不删掉就插不进新行。
     # 外键列：引用 machines.id
     machine_id: int = db.Column(
         db.Integer, db.ForeignKey("machines.id", ondelete="CASCADE"), nullable=False, index=True

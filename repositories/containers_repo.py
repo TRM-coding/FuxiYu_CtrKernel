@@ -160,7 +160,6 @@ def count_containers(
 
 def create_container(
     name: str,
-    image: str,
     machine_id: int,
     memory_gb: int,
     shared_gb: int,
@@ -171,13 +170,20 @@ def create_container(
     gpu_chosen_list: list | None = None,
     bind_mount_path: str | None = None,
     port_mappings: list | None = None,
+    image_id: int | None = None,
+    last_build_at=None,
+    base_image: str | None = None,
+    dockerfile_body: str | None = None,
     *,
     session: Session,
 ) -> Container:
     container = Container(
         name=name,
         is_valid=True,
-        image=image,
+        image_id=image_id,
+        last_build_at=last_build_at,
+        base_image=base_image,
+        dockerfile_body=dockerfile_body,
         machine_id=int(machine_id),
         memory_gb=memory_gb,
         shared_gb=shared_gb,
@@ -209,7 +215,7 @@ def update_container(container_id: int, *, session: Session, **fields) -> Contai
         "deleted_trigger",
         "deleted_reason",
         "deleted_by_user_id",
-        "image",
+        "image_id",
         "machine_id",
         "container_status",
         "failed_reason",
@@ -275,7 +281,6 @@ def restore_container_record(
     *,
     session: Session,
     name: str,
-    image: str,
     machine_id: int,
     memory_gb: int,
     shared_gb: int,
@@ -286,6 +291,10 @@ def restore_container_record(
     gpu_chosen_list: list | None = None,
     bind_mount_path: str | None = None,
     port_mappings: list | None = None,
+    image_id: int | None = None,
+    last_build_at=None,
+    base_image: str | None = None,
+    dockerfile_body: str | None = None,
 ) -> Container | None:
     container = get_by_id(container_id, session=session, include_invalid=True)
     if not container:
@@ -296,7 +305,16 @@ def restore_container_record(
     container.deleted_trigger = None
     container.deleted_reason = None
     container.deleted_by_user_id = None
-    container.image = image
+    # 复活是全量物化：镜像的归属、版本戳与配方都要写。漏写会造成静默数据损失——
+    # 归属丢失（复活一个容器等于丢一个标识）、版本戳不刷新（刚重建的容器被判定为落后，
+    # 展示旧配方）、配方不更新（展示与实际内容不符）。
+    # 三者都不报错，因此每一项都要有对应断言。
+    # 配方两项整体覆盖（含置空）：复活写的就是本次采用的那份，不保留上一次的残段——
+    # 留一段旧的进来，渲染出的文本就成了两次构建的拼接体。
+    container.image_id = image_id
+    container.last_build_at = last_build_at
+    container.base_image = base_image
+    container.dockerfile_body = dockerfile_body
     container.machine_id = int(machine_id)
     container.memory_gb = memory_gb
     container.shared_gb = shared_gb
@@ -471,8 +489,6 @@ def validate_names_and_lengths(container: Container_info, public_key: str | None
         raise ValueError(f"container name too long (max 115): length={len(name)}")
     if len(name) < 2:
         raise ValueError(f"container name too short (min 2): length={len(name)}")
-    if getattr(container, "image", None) and len(container.image) > 195:
-        raise ValueError(f"container image name too long (max 195): length={len(container.image)}")
     if public_key and len(public_key) > 495:
         raise ValueError(f"public_key too long (max 495): length={len(public_key)}")
 

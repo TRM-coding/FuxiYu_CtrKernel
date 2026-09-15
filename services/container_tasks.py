@@ -1,7 +1,14 @@
+import logging
+
 from ..constant import OperationType, ROLE
+from ..extensions import session_scope
+from ..repositories import machine_image_repo
 from ..utils.Container import Container_info
 from . import settings_tasks
 from .container_module.exceptions import NodeServiceError
+from .image_tasks import DockerfileParts
+
+logger = logging.getLogger(__name__)
 
 # container_module 工具族：按"容器操作族"分组导入。
 # 每族对外只暴露 _load_ / _ensure_ / _build_ / _request_ / _persist_ / _audit_ 这类步骤函数，
@@ -64,6 +71,9 @@ from .container_module.actions import (      # 冻结 / 解冻族（磁盘超限
 from .container_module.restore import (      # 恢复族（复活软删容器）
     _load_restore_target,
     _load_restore_accounts,
+    _resolve_restore_image,
+    RESTORE_MODES,
+    build_restore_choice,
     _build_restore_container,
     _get_restored_container_id,
     _restore_long_term_state,
@@ -111,6 +121,9 @@ def Create_container(
     public_key=None,
     operator_user_id: int | None = None,
     image_build: dict | None = None,
+    image_id: int | None = None,
+    image_version_at=None,
+    dockerfile_parts: DockerfileParts | None = None,
     restore_mount_path: str | None = None,
     restore_accounts: list[dict] | None = None,
     reuse_container_id: int | None = None,
@@ -124,11 +137,32 @@ def Create_container(
     _request_node_create(full_url, payload)
     container_id = _persist_container_record(
         container, machine_id, image_build, restore_mount_path, reuse_container_id,
+        image_id, image_version_at, dockerfile_parts,
     )
+    _record_machine_image(machine_id, image_build)
     _bind_owner_and_restored_accounts(container_id, owner_user_id, public_key, restore_accounts)
     _seed_initial_ssh_record(machine_id, container_id)
-    _audit_create(container_id, container, machine_id, operator_user_id, reuse_container_id)
+    _audit_create(container_id, container, machine_id, operator_user_id, reuse_container_id, image_id)
     return True
+
+
+def _record_machine_image(machine_id: int, image_build: dict | None) -> None:
+    """登记"Ctrl 请求过这台机器构建这个标签"（纯观测，不在执行链上）。
+
+    写入时机是**派发之后**——语义是"请求过"，不是"建成过"，因此构建失败也会留痕。
+    没有构建段的通路（直接运行）不写：那次根本没有派发构建。
+    失败只 warning 不阻断：这张表是观测层，它的可用性不该影响创建容器。
+    """
+    if not image_build:
+        return
+    image_tag = image_build.get("image_tag")
+    if not image_tag:
+        return
+    try:
+        with session_scope() as session:
+            machine_image_repo.record_dispatch(machine_id, image_tag, session=session)
+    except Exception as e:  # pragma: no cover
+        logger.warning("machine_image record failed: machine=%s tag=%s error=%s", machine_id, image_tag, e)
 
 
 ####################################################
@@ -172,23 +206,54 @@ def remove_container(container_id: int, operator_user_id: int | None = None) -> 
     return True
 
 
-def resurrect_container(deleted_id: int, operator_user_id: int | None = None) -> dict:
-    """恢复软删容器：走 container:manage 方法级权限，不做资源级鉴权（已删记录无法通过在线资源校验）。"""
+
+def resurrect_container(
+    deleted_id: int,
+    operator_user_id: int | None = None,
+    content_source: str | None = None,
+) -> dict:
+    """恢复软删容器：走 container:manage 方法级权限，不做资源级鉴权（已删记录无法通过在线资源校验）。
+
+    **同一个接口承担两件事**（design D14）：
+
+    - **不带 `content_source`**：若这台容器不存在二选一（模板没变，或模板非 READY，或没有
+      留痕可比），直接按默认（快照）恢复，返回 `container_id`。
+      若**确实存在二选一**，则**不恢复**，改为返回两份内容与分段差异（`requires_choice=True`）
+      —— 由调用方选完再带 `content_source` 调一次。
+    - **带 `content_source`**：按指定来源恢复。
+
+    **公布面只有这一处**：容器留痕不是靠一个独立的查询接口交出去的，而是要真的发起恢复、
+    且这台容器确实面临二选一时才会被返回。没有"谁都能调一下就把配方读走"的入口。
+    """
     try:
         target = _load_restore_target(deleted_id)
         root_account, accounts = _load_restore_accounts(target.snapshot)
-        container, renamed = _build_restore_container(target)
+        resolved = _resolve_restore_image(target, content_source)
+
+        # 不带内容来源 + 确实有二选一 → 交回两份内容让调用方选，**不恢复**。
+        if content_source is None and resolved.needs_choice:
+            return {"requires_choice": True, **build_restore_choice(target)}
+
+        container, renamed = _build_restore_container(target, resolved.image_tag)
         Create_container(
             owner_user_id=int(root_account["user_id"]), machine_id=target.machine_id,
             container=container, public_key=root_account.get("public_key"),
             operator_user_id=operator_user_id, restore_mount_path=target.mount_path,
             restore_accounts=accounts, reuse_container_id=target.container_id,
+            image_build=resolved.image_build, image_id=resolved.image_id,
+            image_version_at=resolved.version_at,
+            dockerfile_parts=resolved.dockerfile_parts,
         )
         container_id = _get_restored_container_id(container.NAME, target.machine_id)
         _restore_long_term_state(container_id, target.snapshot, operator_user_id)
         _delete_restore_artifacts(int(deleted_id), target.mount_cleanup_id)
         _audit_restore_success(
             int(deleted_id), target, container_id, container, renamed, len(accounts) + 1, operator_user_id,
+            restore_image={
+                "restore_image_mode": resolved.mode,
+                "image_id": resolved.image_id,
+                "image_tag": resolved.image_tag,
+            },
         )
         return {"container_id": container_id}
     except Exception as exc:

@@ -329,9 +329,15 @@ def test_list_container_bref_disk_limit_derives_from_machine_max(monkeypatch, db
     from ...services.container_module import node_comms
 
     monkeypatch.setattr(node_comms, "get_cached_container_runtime_metrics", lambda machine_id, name: None)
+    from ...repositories import image_repo
+
     operator = create_user(operator=True)
     machine = create_machine(max_disk_size_gb=80)
-    container = create_container(machine=machine, name="disk_limit_bref", image="ubuntu:24.04")
+    # 造一个"按 seed 模板的某版本建过"的容器：归属 + 版本戳是标签的全部输入
+    container = create_container(
+        machine=machine, name="disk_limit_bref", image_id=1,
+        last_build_at=image_repo.get_by_id(1, session=db_session).updated_at,
+    )
     container.disk_total_bytes = int(40 * 1024**3)
     db_session.commit()
 
@@ -345,8 +351,9 @@ def test_list_container_bref_disk_limit_derives_from_machine_max(monkeypatch, db
     item = result["containers"][0]
     assert item.disk_limit_gb == 80.0
     assert item.disk_usage_percent == 50.0
-    # 卡片镜像名：bref 直接携带（前端 Home 卡片只消费 bref，无 detail 兜底）
-    assert item.container_image == "ubuntu:24.04"
+    # 卡片镜像名：bref 直接携带（前端 Home 卡片只消费 bref，无 detail 兜底）。
+    # 它是**推导**出来的（归属 + 版本戳），行上不存。
+    assert item.container_image is not None and item.container_image.startswith("fuxi/image-1:")
 
 
 def test_list_container_bref_derives_ssh_port_mapping_from_port(monkeypatch, db_session):

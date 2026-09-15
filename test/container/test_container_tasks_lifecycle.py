@@ -66,6 +66,7 @@ def test_create_container_with_image_build_records_building_and_forwards_payload
         machine_id=machine.id,
         container=container_info,
         image_build=image_build,
+        image_id=1,
     ) is True
 
     created = db_session.scalars(
@@ -74,6 +75,10 @@ def test_create_container_with_image_build_records_building_and_forwards_payload
     assert created is not None
     assert created.container_status == ContainerStatus.BUILDING
     assert calls[0]["payload"]["image_build"] == image_build
+    # 落在行上的是**事实**：归属标识与配方两项。运行标签是派生值（归属 + 版本戳一算就有），
+    # 行上不存副本——它只进下发载荷与审计。
+    assert created.image_id == 1
+    assert created.base_image is None and created.dockerfile_body is None  # 本用例没传配方
 
 
 def test_create_container_rejects_single_char_name(db_session, container_info, mock_node_send):
@@ -397,7 +402,7 @@ def test_create_container_gpu_chosen_rotates_away_from_used(db_session, containe
     with session_scope() as session:
         for i, chosen in enumerate(([0], [1])):
             containers_repo.create_container(
-                name=f"pre_{i}", image="ubuntu:22.04", machine_id=machine.id,
+                name=f"pre_{i}", machine_id=machine.id,
                 memory_gb=1, shared_gb=0, gpu_number=1, cpu_number=1,
                 port=30000 + i, gpu_chosen_list=chosen, session=session,
             )

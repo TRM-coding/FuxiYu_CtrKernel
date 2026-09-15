@@ -9,6 +9,8 @@ class container_bref_information(BaseModel):
     container_id: int # 加入这个 只是为了方便调取详细信息
     container_name:str
     container_image: str | None = None
+    # 镜像模板归属（逻辑真源）；container_image 只是本次实跑制品的展示快照
+    image_id: int | None = None
     created_at: str | None = None
     machine_id:int
     machine_ip:str
@@ -47,6 +49,8 @@ class container_detail_information(BaseModel):
     container_id: int # 与上方结构对称
     container_name:str
     container_image:str
+    # 镜像模板归属（逻辑真源）；container_image 只是本次实跑制品的展示快照
+    image_id: int | None = None
     created_at: str | None = None
     machine_id:int
     machine_ip:str

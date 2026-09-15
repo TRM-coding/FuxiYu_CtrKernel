@@ -180,15 +180,19 @@ def test_build_payload_includes_platform_injection(client, monkeypatch):
     )
     image_id = image_resp.json()["image_id"]
 
-    from ...services.image_tasks import build_image_payload
+    from ...services.image_tasks import resolve_image_build
 
-    payload = build_image_payload(image_id)
+    build = resolve_image_build(image_id)
 
-    assert payload is not None
+    assert build is not None
+    payload = build.payload
     assert payload["image_tag"].startswith(f"fuxi/image-{image_id}:")
     assert "FROM ubuntu:24.04" in payload["dockerfile_text"]
     assert "openssh-server" in payload["dockerfile_text"]
     assert "RUN echo hello" in payload["dockerfile_text"]
+    # 留痕与 payload 同源：落库的配方渲染出来必须就是发给 Node 的那一份文本
+    assert build.dockerfile_parts.render() == payload["dockerfile_text"]
+    assert build.version_at is not None
 
 
 def test_image_build_tag_uses_second_level_utc_timestamp():

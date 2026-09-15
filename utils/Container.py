@@ -8,6 +8,10 @@ class Container_info:
         shared_memory:int
         name:str
         port:int
+        # **无构建时直接运行的镜像标签（退化通路专用）。**
+        # 正常路径（带构建段）下 Node 会用构建出的标签覆盖它，一次都不会被读到；
+        # 只有恢复的"直接运行"分支（无快照、无可用模板）才拿它当唯一依据。
+        # 它同时是 Node 的 wire 契约（Container.Config_info.image），不可改名或删除。
         image:str
     #gpu_list:显卡编号，cpu_number:需要用到的cpu核数，memory:申请的内存大小（GB）
     def __init__(self, gpu_list: list, cpu_number: int, memory: int, name: str, image: str, port: int = 0, shared_memory: int = 0):

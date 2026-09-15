@@ -10,6 +10,7 @@ from ...extensions import session_scope
 from ...repositories import containers_repo, machine_repo, user_repo, usercontainer_repo
 from ...repositories import container_ssh_login_repo
 from ...utils.Container import Container_info
+from ..image_tasks import DockerfileParts
 from ..operation_log_tasks import log_success
 from .deleted_containers import restore_role_api_value
 from .exceptions import NodeServiceError, _raise_on_node_error
@@ -129,13 +130,34 @@ def _persist_container_record(
     image_build: dict | None,
     restore_mount_path: str | None,
     reuse_container_id: int | None,
+    image_id: int | None = None,
+    image_version_at=None,
+    dockerfile_parts: DockerfileParts | None = None,
 ) -> int:
-    """落库：新建容器行；恢复路径（reuse_container_id）改为复活原软删行，返回 container_id。"""
+    """落库：新建容器行；恢复路径（reuse_container_id）改为复活原软删行，返回 container_id。
+
+    镜像的留痕语义各不相同（见 design D2/D5/D7）：
+
+    - `image_id`：归属标识。API 边界必填保证新建时非空；无归属的存量容器可能为空。
+    - `image_version_at`：**本次采用的配方所对应的模板版本时刻**。模板路径下是当前
+      `images.updated_at`；快照路径下沿用该容器原有的值（内容没变）。
+      它既用于判定"是否落后"，也用于推导镜像标签。
+    - `dockerfile_parts`：本次采用的**配方**（FROM / 平台注入 / 业务片段）。只用于展示与
+      精确还原，绝不参与身份或新鲜度判断。落库只写其中模板侧的两项（FROM 与业务片段）；
+      平台注入不落库——它永远取当下的系统设置（见 models/containers.py）。
+
+    运行标签**不落库**：它由归属标识 + 版本戳推导（`image_tasks.format_image_build_tag`），
+    创建与恢复都只把推导结果发进构建段，不在行上留副本。
+    """
     gpu_list = getattr(container, "GPU_LIST", None)
+    parts = dockerfile_parts
     # 端口由 docker 自动分配，先占位 0，创建后由 WSS 快照回填。
     values = dict(
         name=container.NAME,
-        image=container.image,
+        image_id=image_id,
+        last_build_at=image_version_at,
+        base_image=parts.base_image if parts else None,
+        dockerfile_body=parts.dockerfile_body if parts else None,
         machine_id=machine_id,
         memory_gb=container.MEMORY,
         shared_gb=int(getattr(container, "SHARED_MEMORY", getattr(container, "shared_memory", 0)) or 0),
@@ -193,6 +215,7 @@ def _seed_initial_ssh_record(machine_id: int, container_id: int) -> None:
 def _audit_create(
     container_id: int, container: Container_info, machine_id: int,
     operator_user_id: int | None, reuse_container_id: int | None,
+    image_id: int | None = None,
 ) -> None:
     """审计：恢复路径不在这里记账（resurrect_container 待长期态与快照清退完成后统一记一次）。"""
     if reuse_container_id is None:
@@ -200,7 +223,9 @@ def _audit_create(
             operator_user_id=operator_user_id, operation=OperationType.CREATE_CONTAINER,
             target_type="container", target_id=container_id,
             detail={
-                "name": container.NAME, "machine_id": machine_id, "image": container.image,
+                "name": container.NAME, "machine_id": machine_id,
+                # 审计记的是**这次实际下发的**标签（容器行上不留它，只能在这里留痕）
+                "image_id": image_id, "image_tag": container.image,
                 "memory_gb": container.MEMORY, "cpu_number": container.CPU_NUMBER,
                 "gpu_number": len(getattr(container, "GPU_LIST", None) or []),
             },

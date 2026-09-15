@@ -122,11 +122,11 @@ def test_seed_image_defaults_idempotent(client, monkeypatch):
     body = client.get("/api/images/list_image_bref_information?image_search=Ubuntu").json()
     assert body["total_number"] == 1
     img = body["images"][0]
-    assert img["name"] == "Ubuntu 22.04 · 基础"
+    assert img["name"] == "Ubuntu 24.04 · 基础"
     assert img["status"] == "ready"
 
     detail = client.get(f"/api/images/get_image_detail_information?image_id={img['image_id']}").json()
-    assert detail["image"]["base_image"] == "ubuntu:22.04"
+    assert detail["image"]["base_image"] == "ubuntu:24.04"
     assert detail["image"]["dockerfile_body"] == ""
 
 
@@ -165,7 +165,7 @@ def test_system_image_visible_to_normal_user(client, monkeypatch):
 
     body = client.get("/api/images/list_image_bref_information?page_size=50").json()
     names = [img["name"] for img in body["images"]]
-    assert "Ubuntu 22.04 · 基础" in names
+    assert "Ubuntu 24.04 · 基础" in names
     assert "private-img" not in names
 
 
@@ -205,7 +205,7 @@ def test_mine_only_list_uses_user_image_binding_not_created_by(client, monkeypat
     images = {item["name"]: item for item in body["images"]}
     assert "shared-to-editor" in images
     assert images["shared-to-editor"]["created_by_user_id"] == 7
-    assert "Ubuntu 22.04 · 基础" not in images
+    assert "Ubuntu 24.04 · 基础" not in images
 
 
 def test_update_other_private_image_still_denied_without_resource(client, monkeypatch):
