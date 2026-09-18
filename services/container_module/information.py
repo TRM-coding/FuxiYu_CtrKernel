@@ -77,7 +77,9 @@ def _build_container_common_fields(container, machine, bindings) -> dict:
         # 标签是派生值，存一份就等于制造第二个可漂移的真值来源。判断归属只看 image_id。
         # 推不出来（裸镜像存量容器）时是 None，**不编造**：编一个就指着一个没跑过的制品。
         "container_image": format_image_build_tag(
-            getattr(container, "image_id", None), getattr(container, "last_build_at", None)
+            getattr(container, "image_id", None),
+            getattr(container, "last_build_at", None),
+            getattr(container, "machine_id", None),
         ),
         "image_id": getattr(container, "image_id", None),
         "created_at": container.created_at.isoformat() if container.created_at else None,

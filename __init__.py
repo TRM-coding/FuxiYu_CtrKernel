@@ -44,6 +44,7 @@ def _init_database() -> None:
     _ensure_cleanup_deferral_schema()
     _ensure_machine_endpoint_schema()
     _ensure_freeze_state_schema()
+    _ensure_machine_image_schema()
     try:
         from .services.rbac_service import seed_rbac_defaults
 
@@ -824,6 +825,93 @@ def _strip_legacy_snapshot_image_key() -> None:
         return
     if stripped:
         logger.warning("legacy snapshot image key stripped: %s row(s)", stripped)
+
+
+def _ensure_machine_image_schema() -> None:
+    """machine_image 行身份自愈（2026-09）：从 (machine_id, image_tag) 收敛到
+    (machine_id, image_id)。
+
+    标签是**派生值**（归属标识 + 版本戳），不能承担身份——拿它做检索，格式一变即断。
+    旧库上这张表的唯一键落在标签上，本函数幂等地：补 image_id 列 → 从既存标签反解回填
+    → 清掉回填不出来的行 → 换唯一键。
+
+    反解只服务这一次性迁移，理由同 `_backfill_container_image_id`：存量数据只有标签
+    这一个载体，别无他途。新代码一律按 `(machine_id, image_id)` 检索，不再反解字符串。
+
+    顺序是硬约束：换唯一键必须在回填**之后**，否则 (machine_id, image_id) 上有 NULL 重复
+    的行会当场撞新约束。
+    """
+
+    import logging
+    import re
+
+    from sqlalchemy import inspect, text
+
+    logger = logging.getLogger(__name__)
+    current_engine = extensions.engine
+    inspector = inspect(current_engine)
+    if not inspector.has_table("machine_image"):
+        return
+    is_sqlite = current_engine.dialect.name == "sqlite"
+    columns = {column["name"] for column in inspector.get_columns("machine_image")}
+    index_names = {
+        index["name"] for index in inspector.get_indexes("machine_image") if index.get("name")
+    }
+
+    with current_engine.begin() as conn:
+        if "image_id" not in columns:
+            conn.execute(text("ALTER TABLE machine_image ADD COLUMN image_id INTEGER NULL"))
+        # 回填：只认 fuxi/image-<模板id>:… 这个形式；模板行不在了的也不留（会成悬挂值）。
+        rows = conn.execute(text(
+            "SELECT id, image_tag FROM machine_image WHERE image_id IS NULL"
+        )).all()
+        known_ids = (
+            {row[0] for row in conn.execute(text("SELECT id FROM images")).all()}
+            if inspector.has_table("images")
+            else set()
+        )
+        patched = 0
+        for row_id, image_tag in rows:
+            match = re.match(r"^fuxi/image-(\d+):", image_tag or "")
+            if not match or int(match.group(1)) not in known_ids:
+                continue
+            conn.execute(
+                text("UPDATE machine_image SET image_id = :image_id WHERE id = :row_id"),
+                {"image_id": int(match.group(1)), "row_id": row_id},
+            )
+            patched += 1
+
+        # 回填不出来的行：身份无从确定，且在复合键语义下不会被任何检索命中。删掉。
+        # （它们的存在只会让新唯一键建不上。）
+        unresolvable = conn.execute(
+            text("DELETE FROM machine_image WHERE image_id IS NULL")
+        ).rowcount
+
+        # 唯一键：旧名落在标签上，必须换。MySQL 是独立索引，可直接换；
+        # SQLite 的 UNIQUE 是内联表约束，ALTER 删不掉（同 2026-09_container_soft_delete_strict_ids.sql
+        # 的口径）——那边由"写点永不产生重复标签"兜住，不阻塞。
+        if "uq_machine_image_tag" in index_names:
+            conn.execute(text("DROP INDEX uq_machine_image_tag ON machine_image"))
+        if "uq_machine_image_machine_id_image_id" not in index_names:
+            try:
+                conn.execute(text(
+                    "CREATE UNIQUE INDEX uq_machine_image_machine_id_image_id"
+                    " ON machine_image(machine_id, image_id)"
+                ))
+            except Exception as e:
+                logger.warning("machine_image unique index create failed: %s", e)
+        if not is_sqlite:
+            # 回填 + 清理之后不该再有空值；MySQL 可收紧，SQLite 改不了列约束。
+            try:
+                conn.execute(text("ALTER TABLE machine_image MODIFY image_id INTEGER NOT NULL"))
+            except Exception as e:
+                logger.warning("machine_image image_id NOT NULL failed: %s", e)
+
+    if patched or unresolvable:
+        logger.warning(
+            "machine_image composite key migrated: backfilled=%s removed=%s row(s)",
+            patched, unresolvable,
+        )
 
 
 def _should_start_background_tasks() -> bool:

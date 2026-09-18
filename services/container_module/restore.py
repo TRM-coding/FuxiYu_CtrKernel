@@ -323,6 +323,11 @@ def _restore_from_snapshot(target: _RestoreTarget) -> _RestoreImage:
     # 标签由「归属标识 + 构建版本戳」推导（format_image_build_tag），没有回落：那个回落曾读
     # 已删快照 JSON 里的 tag，是让多余载体参与业务，还会掩盖"推导不出来"这种异常状态。
     # 推不出来就让它推不出来，由 _build_restore_container 的非空校验拦下。
+    #
+    # ⚠ **刻意不传 machine_id**：这条路径的配方是**容器自己那份**（target.dockerfile_parts），
+    # 而新鲜度预检查返回的是机器级的**当前**标签。两者拼在一起就成了"新标签配旧内容"——
+    # 与"旧标签配新内容"同样是让同一个标签指向不同内容，同样破坏 Node 的标签缓存。
+    # 版本戳必须沿用该容器原有的值，标签也必须由同一对输入推出。
     tag = format_image_build_tag(target.image_id, target.image_version_at)
     parts = target.dockerfile_parts
     if parts is None:
@@ -377,7 +382,7 @@ def _resolve_restore_image(
     if not target.image_id:
         return _restore_from_snapshot(target)
 
-    build = resolve_image_build(int(target.image_id))
+    build = resolve_image_build(int(target.image_id), target.machine_id)
     template = _load_template_status(int(target.image_id))
 
     # ── 分支①续：模板不存在或非 READY ──

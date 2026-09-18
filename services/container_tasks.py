@@ -139,30 +139,37 @@ def Create_container(
         container, machine_id, image_build, restore_mount_path, reuse_container_id,
         image_id, image_version_at, dockerfile_parts,
     )
-    _record_machine_image(machine_id, image_build)
+    _record_machine_image(machine_id, image_id, image_build)
     _bind_owner_and_restored_accounts(container_id, owner_user_id, public_key, restore_accounts)
     _seed_initial_ssh_record(machine_id, container_id)
     _audit_create(container_id, container, machine_id, operator_user_id, reuse_container_id, image_id)
     return True
 
 
-def _record_machine_image(machine_id: int, image_build: dict | None) -> None:
-    """登记"Ctrl 请求过这台机器构建这个标签"（纯观测，不在执行链上）。
+def _record_machine_image(machine_id: int, image_id: int | None, image_build: dict | None) -> None:
+    """登记"Ctrl 请求过这台机器构建这个模板的制品"（纯观测，不在执行链上）。
 
     写入时机是**派发之后**——语义是"请求过"，不是"建成过"，因此构建失败也会留痕。
     没有构建段的通路（直接运行）不写：那次根本没有派发构建。
     失败只 warning 不阻断：这张表是观测层，它的可用性不该影响创建容器。
+
+    行身份是 `(machine_id, image_id)`；`image_tag` 只作为值随行落库。
     """
-    if not image_build:
+    if not image_build or image_id is None:
         return
     image_tag = image_build.get("image_tag")
     if not image_tag:
         return
     try:
         with session_scope() as session:
-            machine_image_repo.record_dispatch(machine_id, image_tag, session=session)
+            machine_image_repo.record_dispatch(
+                machine_id, int(image_id), image_tag, session=session
+            )
     except Exception as e:  # pragma: no cover
-        logger.warning("machine_image record failed: machine=%s tag=%s error=%s", machine_id, image_tag, e)
+        logger.warning(
+            "machine_image record failed: machine=%s image=%s tag=%s error=%s",
+            machine_id, image_id, image_tag, e,
+        )
 
 
 ####################################################

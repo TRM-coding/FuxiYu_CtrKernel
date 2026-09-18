@@ -338,6 +338,7 @@ def serialize_deleted_container_record(row, cleanup, *, context: dict | None = N
             format_image_build_tag(
                 getattr(context["container"], "image_id", None),
                 getattr(context["container"], "last_build_at", None),
+                getattr(context["container"], "machine_id", None),
             )
             if context.get("container")
             else None

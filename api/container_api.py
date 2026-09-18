@@ -226,7 +226,8 @@ def create_container_api(
             return _error(400, f"image {image_id} is not ready for use", "image_not_ready")
         if usability is image_service.ImageUsability.DENIED:
             return _error(403, "image access denied", "image_access_denied")
-        build = image_service.resolve_image_build(image_id)
+        # machine_id 透传：标签解析先看该机器上是否已有未过时的派发记录（预检查）
+        build = image_service.resolve_image_build(image_id, machine_id)
         if build is None:
             return _error(404, f"image {image_id} not found", "image_not_found")
         image_build = build.payload

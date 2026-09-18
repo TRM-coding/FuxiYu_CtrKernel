@@ -182,7 +182,7 @@ def test_create_container_with_image_id_builds_payload(client, monkeypatch):
 
     monkeypatch.setattr(
         "FuxiYu_CtrKernel.services.image_tasks.resolve_image_build",
-        lambda image_id: build if image_id == 7 else None,
+        lambda image_id, machine_id=None: build if image_id == 7 else None,
     )
     monkeypatch.setattr(
         "FuxiYu_CtrKernel.services.image_tasks.Can_use_image_for_container",
@@ -240,7 +240,7 @@ def test_create_container_with_system_image_does_not_require_user_image_binding(
     monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_resource", _resource_check)
     monkeypatch.setattr(
         "FuxiYu_CtrKernel.services.image_tasks.resolve_image_build",
-        lambda image_id: build if image_id == image.id else None,
+        lambda image_id, machine_id=None: build if image_id == image.id else None,
     )
     monkeypatch.setattr(container_api.container_service, "Create_container", lambda **kwargs: captured.update(kwargs) or True)
 

@@ -57,16 +57,73 @@ def _serialize(image, *, include_content: bool = False) -> dict:
     return result
 
 
-def format_image_build_tag(image_id: int | None, version_at: datetime | None) -> str | None:
+def _dispatched_tag_if_fresh(machine_id: int, image_id: int) -> str | None:
+    """该 (机器, 模板) 已派发过的制品标签——**仅当它相对模板当前版本没过时**才返回。
+
+    过时判据 = `machine_image.created_at <= images.updated_at`（**严格大于才算新鲜**）。
+    写点在改写时刷新 `created_at`，所以那一行记的是"最近一次派发的时刻"；它若严格晚于
+    模板的最后一次修改，就说明这个制品正是当前模板版本产出的——此时
+    `format_image_build_tag` 由同一对输入算出的值必然是它，提前返回因此**不会**造成
+    "旧标签配新内容"。
+
+    为什么是严格大于：DATETIME 列在 MySQL 上截断到秒。若派发与模板修改落在同一秒，
+    `created_at == updated_at` 无法区分先后，判"新鲜"就可能把一个**早于**本次修改的
+    标签当成当前值——那正是要杜绝的组合。判"过时"只会退回推导链路（结果恒正确），
+    代价仅是少一次提前返回。
+
+    过时、无行、表不可用：一律返回 None，交给正常推导链路。失败只 warning 不阻断——
+    这条预检查是加速项，它的可用性不该影响创建容器或展示。
+    """
+
+    import logging
+
+    from ..repositories import machine_image_repo
+
+    logger = logging.getLogger(__name__)
+    try:
+        with session_scope(commit=False) as session:
+            row = machine_image_repo.get_by_machine_image(
+                int(machine_id), int(image_id), session=session
+            )
+            if row is None:
+                return None
+            image = image_repo.get_by_id(int(image_id), session=session)
+            if image is None or row.created_at is None or image.updated_at is None:
+                return None
+            if row.created_at <= image.updated_at:
+                return None
+            return row.image_tag
+    except Exception as e:  # pragma: no cover
+        logger.warning("machine_image pre-check failed: machine=%s image=%s: %s", machine_id, image_id, e)
+        return None
+
+
+def format_image_build_tag(
+    image_id: int | None,
+    version_at: datetime | None,
+    machine_id: int | None = None,
+) -> str | None:
     """由「归属标识 + 版本戳」推导 Docker tag；两者缺一就推不出来，返回 None。
 
     这是**唯一**的标签构造实现：创建/恢复时填 Node 的 `config.image` 与 `image_build.image_tag`
     用它，展示出口也用它。公式只有一份，两边不可能漂。
 
-    刻意**不**用 now() 兜底：那会编出一个从未存在过的标签。标签是 Node 侧的缓存键，
+    刻意**不**用 now() 兜底：那会编出一个从未出现过的标签。标签是 Node 侧的缓存键，
     编一个假的比返回空坏得多——展示会指着一个没跑过的制品，构建会去命中一个不存在的东西。
     推不出来就是推不出来，由调用方各自决定是拒绝还是留空。
+
+    `machine_id` 给定时先做一次**预检查**（见 `_dispatched_tag_if_fresh`）：该 (机器, 模板)
+    已派发过且没过时，就直接返回那个标签，不再推导。按契约它与推导值相等——两者的输入
+    是同一对（归属标识 + 模板当前版本戳），预检查只是省掉一次推导。
+
+    ⚠ **配方是"该容器自己那份"的调用点不要传 machine_id**：预检查返回的是机器级的当前
+    标签，与容器自己的旧配方拼在一起就成了"新标签配旧内容"，与"旧标签配新内容"同样
+    破坏 Node 的标签缓存（见 services/container_module/restore.py 的快照分支）。
     """
+    if machine_id is not None and image_id is not None:
+        fresh = _dispatched_tag_if_fresh(int(machine_id), int(image_id))
+        if fresh is not None:
+            return fresh
     if image_id is None or version_at is None:
         return None
     version_time = version_at
@@ -135,7 +192,7 @@ class ImageBuild:
     dockerfile_parts: DockerfileParts
 
 
-def resolve_image_build(image_id: int) -> ImageBuild | None:
+def resolve_image_build(image_id: int, machine_id: int | None = None) -> ImageBuild | None:
     """按 image_id 解析出一次构建的全部留痕。
 
     payload 只回 Node 真正读的两个键（ImageBuildConfig 的 dockerfile_text / image_tag）。
@@ -144,6 +201,9 @@ def resolve_image_build(image_id: int) -> ImageBuild | None:
 
     取模板走 `image_repo.get_by_id` 原语，**不受停用过滤影响**：恢复链路要用已停用
     模板的内容判定分支，管理路径也要能取到停用行。
+
+    `machine_id` 透传给 `format_image_build_tag` 的新鲜度预检查（见该函数）。调用方只
+    取 `dockerfile_parts` 时可以不给——那时标签根本不被使用，给了只会多一次查询。
     """
 
     with session_scope(commit=False) as session:
@@ -155,7 +215,7 @@ def resolve_image_build(image_id: int) -> ImageBuild | None:
             platform_injection=settings_tasks.get_image_platform_injection_content() or "",
             dockerfile_body=image.dockerfile_body,
         )
-        image_tag = format_image_build_tag(image.id, image.updated_at)
+        image_tag = format_image_build_tag(image.id, image.updated_at, machine_id)
         if image_tag is None:  # pragma: no cover - images.updated_at 是 NOT NULL，构造上不可达
             raise ValueError(f"image {image.id} has no version timestamp to derive a tag from")
         return ImageBuild(
