@@ -47,6 +47,8 @@ def _serialize(image, *, include_content: bool = False) -> dict:
         "name": image.name,
         "description": image.description,
         "base_image": image.base_image,
+        # 归一后再出参：NULL 与 "" 在库里都可能存在，读侧一律折成 None（= 平台默认）
+        "entrypoint": (image.entrypoint or "").strip() or None,
         "status": _status_value(image.status),
         "created_by_user_id": image.created_by_user_id,
         "created_at": image.created_at.isoformat() if image.created_at else None,
@@ -134,8 +136,47 @@ def format_image_build_tag(
     return f"fuxi/image-{int(image_id)}:{stamp}"
 
 
-def render_final_dockerfile(*, base_image: str, platform_injection: str, dockerfile_body: str | None = None) -> str:
-    """拼出最终 Dockerfile 文本。"""
+# 容器里跑什么的**平台默认**：保持容器存活，等你 SSH 进来。
+# 它是 Ctrl 的策略，因此只写在这里一处——Node 不持有它、也不做任何回落。
+PLATFORM_DEFAULT_ENTRYPOINT = "tail -f /dev/null"
+
+
+def render_final_dockerfile(
+    *,
+    base_image: str,
+    platform_injection: str,
+    dockerfile_body: str | None = None,
+    entrypoint: str | None = None,
+) -> str:
+    """拼出最终 Dockerfile 文本。
+
+    四段，顺序是硬约束：FROM → 平台注入 → 用户业务片段 → **ENTRYPOINT**。
+
+    ENTRYPOINT 排在最后有两个作用，都靠 Docker 自己的规则生效，不需要运行期做任何事：
+
+    1. **后写的 ENTRYPOINT 覆盖先写的** —— 用户在业务片段里自己写了 ENTRYPOINT 也不生效，
+       平台那行说了算（构建时会有一条 MultipleInstructionsDisallowed 警告，无害）。
+    2. **shell 形式比 exec 形式更能挡住外面的干扰**（四种组合都实测过）：
+
+       | 干扰源 | shell 形式 | exec 形式 |
+       |---|---|---|
+       | 镜像里残留的 CMD | **被忽略** | 被追加成参数 |
+       | `docker run` 传的命令 | 成为 shell 的 `$0/$1`，**脚本本身不变** | 追加成真参数 |
+
+       注意第 2 行不是"什么都不发生"：`/proc/1/cmdline` 里看得见那些参数，但它们落在
+       positional 参数上，而这行命令不引用 `$1/$@`——所以**实际执行的仍然是这一行**。
+
+    所以"容器跑什么"在**构建期**就锁死了。这正是把启动命令放进 Dockerfile 而不是走
+    运行期参数的原因：运行期要覆盖镜像入口得额外置空 Entrypoint 字段，而那条路一旦漏掉
+    就会被镜像入口吃掉命令（2026-09 实测复现过）。
+
+    另注（既有行为，与本决策无关）：容器 PID 1 被内核特例对待——**没装 handler 的信号一律
+    忽略**，所以 `docker stop` 会走满 Node 的 `stop_container(timeout=10)` 才 SIGKILL。
+    改动前 PID 1 是 tail 时同样是 10.3s（实测），不是本次引入的。
+
+    留空即平台默认（`PLATFORM_DEFAULT_ENTRYPOINT`）。默认值在这里兜底意味着**渲染出来的
+    Dockerfile 必定带 ENTRYPOINT**，"镜像自描述"这条永远成立。
+    """
 
     parts: list[str] = [f"FROM {base_image}".strip()]
     injection = (platform_injection or "").strip()
@@ -144,24 +185,30 @@ def render_final_dockerfile(*, base_image: str, platform_injection: str, dockerf
     body = (dockerfile_body or "").strip()
     if body:
         parts.append(body)
+    # shell 形式（不写方括号）是刻意的：见 docstring 第 2 条，它是唯一能挡住运行期传参的形态。
+    parts.append(f"ENTRYPOINT {(entrypoint or '').strip() or PLATFORM_DEFAULT_ENTRYPOINT}")
     return "\n\n".join(parts).rstrip() + "\n"
 
 
 @dataclass(frozen=True)
 class DockerfileParts:
-    """一份 Dockerfile 的三段输入——渲染**之前**的形态。
+    """一份 Dockerfile 的四段输入——渲染**之前**的形态。
 
-    三个字段名与 `render_final_dockerfile` 的形参、以及 images 表的列名逐一对应，
+    字段名与 `render_final_dockerfile` 的形参、以及 images / containers 表的列名逐一对应，
     刻意不另起名：同一件事在库里、在这个类里、在渲染函数里都叫同一个名字。
 
-    **它有三个字段，但容器行只落库其中两个**（`base_image` / `dockerfile_body`）；
+    **四个字段，但容器行只落库其中三个**（`base_image` / `dockerfile_body` / `entrypoint`）；
     `platform_injection` 每次渲染现取系统设置，因此从容器读回来的那份里，这个字段
     装的是**当下**的注入，不是当年的（见 models/containers.py）。
+
+    `entrypoint` 是**构建段**而不是运行期参数（2026-09 决策）：它渲染成 Dockerfile 的最后
+    一行，因此决定了镜像内容，也参与"这份配方能否精确还原"。
     """
 
     base_image: str
     platform_injection: str
     dockerfile_body: str | None = None
+    entrypoint: str | None = None
 
     def render(self) -> str:
         """渲染成最终 Dockerfile 文本（就是发给 Node 的那份）。"""
@@ -169,6 +216,7 @@ class DockerfileParts:
             base_image=self.base_image,
             platform_injection=self.platform_injection,
             dockerfile_body=self.dockerfile_body,
+            entrypoint=self.entrypoint,
         )
 
 
@@ -214,6 +262,8 @@ def resolve_image_build(image_id: int, machine_id: int | None = None) -> ImageBu
             base_image=image.base_image,
             platform_injection=settings_tasks.get_image_platform_injection_content() or "",
             dockerfile_body=image.dockerfile_body,
+            # NULL 与 "" 都折成 None——渲染时再兜平台默认，调用方只见两态
+            entrypoint=(image.entrypoint or "").strip() or None,
         )
         image_tag = format_image_build_tag(image.id, image.updated_at, machine_id)
         if image_tag is None:  # pragma: no cover - images.updated_at 是 NOT NULL，构造上不可达
@@ -302,6 +352,7 @@ def Create_image(
     dockerfile_body: str = "",
     description: str | None = None,
     status: str | ImageStatus | None = None,
+    entrypoint: str | None = None,
     operator_user_id: int | None = None,
 ) -> int:
     """创建镜像模板，并把创建者绑定到 user-i。
@@ -323,6 +374,8 @@ def Create_image(
                 description=description,
                 base_image=base_image,
                 dockerfile_body=dockerfile_body,
+                # 空串/纯空白一律归一成 NULL——"空即默认"只该有一种空值形态
+                entrypoint=(entrypoint or "").strip() or None,
                 status=status_enum or ImageStatus.DRAFT,
                 created_by_user_id=operator_user_id,
                 session=session,
@@ -356,6 +409,7 @@ def Update_image(
     description: str | None = None,
     base_image: str | None = None,
     dockerfile_body: str | None = None,
+    entrypoint: str | None = None,
     status: str | ImageStatus | None = None,
 ) -> bool:
     """更新镜像模板元数据或内容。"""
@@ -383,6 +437,10 @@ def Update_image(
         }
         if dockerfile_body is not None:
             fields["dockerfile_body"] = dockerfile_body
+        if entrypoint is not None:
+            # 传空串 = **清除**（回到平台默认）。None 仍是"不提供"，两者语义不同：
+            # 前端要清空这一栏时发的就是空串，而省略该键表示这次不动它。
+            fields["entrypoint"] = (entrypoint or "").strip() or None
         with session_scope() as session:
             # 改名也要过应用层查重（DB 已无唯一约束）：撞上**别的**活跃模板才拒绝，
             # 改成自己原来的名字不算冲突。

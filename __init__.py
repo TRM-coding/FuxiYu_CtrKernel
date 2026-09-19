@@ -95,6 +95,7 @@ def _ensure_image_template_schema() -> None:
         "created_by_user_id": "ALTER TABLE images ADD COLUMN created_by_user_id INTEGER NULL",
         "created_at": "ALTER TABLE images ADD COLUMN created_at DATETIME NULL",
         "updated_at": "ALTER TABLE images ADD COLUMN updated_at DATETIME NULL",
+        "entrypoint": "ALTER TABLE images ADD COLUMN entrypoint VARCHAR(255) NULL",
     }
     required_mysql = {
         "base_image": "ALTER TABLE images ADD COLUMN base_image VARCHAR(255) NOT NULL DEFAULT 'ubuntu:24.04'",
@@ -103,6 +104,7 @@ def _ensure_image_template_schema() -> None:
         "created_by_user_id": "ALTER TABLE images ADD COLUMN created_by_user_id INT NULL",
         "created_at": "ALTER TABLE images ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
         "updated_at": "ALTER TABLE images ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "entrypoint": "ALTER TABLE images ADD COLUMN entrypoint VARCHAR(255) NULL",
     }
     required = required_sqlite if current_engine.dialect.name == "sqlite" else required_mysql
 
@@ -509,6 +511,9 @@ def _ensure_container_image_schema() -> None:
         "last_build_at": "ALTER TABLE containers ADD COLUMN last_build_at DATETIME NULL",
         "base_image": "ALTER TABLE containers ADD COLUMN base_image VARCHAR(255) NULL",
         "dockerfile_body": "ALTER TABLE containers ADD COLUMN dockerfile_body TEXT NULL",
+        # 启动命令留痕（2026-09 决策）。可空且空即默认，因此存量行无需回填、
+        # 行为一字不变——这也是本次引入它最干净的地方。
+        "entrypoint": "ALTER TABLE containers ADD COLUMN entrypoint VARCHAR(255) NULL",
     }
     missing = [name for name in required_columns if name not in existing]
 

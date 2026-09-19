@@ -19,6 +19,12 @@ class ImageFileContent(BaseModel):
 
     base_image: str = Field(..., min_length=1, max_length=255, description="基础镜像，对应最终 Dockerfile 的 FROM。")
     dockerfile_body: str = Field(default="", description="用户业务 Dockerfile 片段，不包含平台注入片段。")
+    # 可空且**空即默认**（容器保持存活等你 SSH 进来）。空串按 None 归一，避免两种空值分叉。
+    # 平台不使用镜像自带的 ENTRYPOINT/CMD，见 utils/Container.py 的说明。
+    entrypoint: str | None = Field(
+        default=None, max_length=255,
+        description="容器启动命令。留空 = 平台默认（保持存活）。注意平台不跑镜像自带的 ENTRYPOINT/CMD。",
+    )
 
 
 #####################
@@ -46,6 +52,7 @@ class UpdateImageRequest(BaseModel):
     description: str | None = Field(default=None, max_length=500)
     base_image: str | None = Field(default=None, min_length=1, max_length=255)
     dockerfile_body: str | None = None
+    entrypoint: str | None = Field(default=None, max_length=255)
     status: ImageStatus | None = None
 
 
@@ -80,6 +87,7 @@ class ImageDetail(BaseModel):
     status: ImageStatus
     base_image: str | None = None
     dockerfile_body: str | None = None
+    entrypoint: str | None = None
     created_by_user_id: int | None = None
     created_at: str | None = None
     updated_at: str | None = None

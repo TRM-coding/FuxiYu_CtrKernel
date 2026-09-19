@@ -45,6 +45,15 @@ class Container(db.Model):
     # 两者 MUST NOT 参与身份与新鲜度的判断：归属只看 image_id，落后只看 last_build_at。
     base_image: str | None = db.Column(db.String(255), nullable=True)
     dockerfile_body: str | None = db.Column(db.Text, nullable=True)
+    # 启动命令留痕（2026-09 决策）：**这个容器实际是怎么起来的**那一份命令。
+    #
+    # 为什么要落在容器行上（而不是恢复时现读模板）：与 base_image / dockerfile_body 同一个
+    # 理由——容器行记的是"它自己那一份"。模板改了启动命令之后再去恢复一个旧容器，若读模板，
+    # 起来的就不是原来那个东西了。
+    #
+    # 与配方两项不同，它**不参与构建**（不进 tag、不进 Dockerfile），只是运行期参数。
+    # 可空且空即默认（保持存活），因此存量行无需回填、行为一字不变。
+    entrypoint: str | None = db.Column(db.String(255), nullable=True)
     # 这里曾有 runtime_image（旧版写入的镜像标签字符串）。已退役：标签是**派生值**
     #   （format_image_build_tag 由归属标识 + 版本戳算出），存一份就是本变更一路在清理的
     #   那种"第二来源"。它的读点（展示回落）本就在推导成功时永远轮不到，写点却每行都抄一份。

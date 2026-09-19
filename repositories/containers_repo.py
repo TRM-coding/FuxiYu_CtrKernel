@@ -174,6 +174,7 @@ def create_container(
     last_build_at=None,
     base_image: str | None = None,
     dockerfile_body: str | None = None,
+    entrypoint: str | None = None,
     *,
     session: Session,
 ) -> Container:
@@ -184,6 +185,7 @@ def create_container(
         last_build_at=last_build_at,
         base_image=base_image,
         dockerfile_body=dockerfile_body,
+        entrypoint=entrypoint,
         machine_id=int(machine_id),
         memory_gb=memory_gb,
         shared_gb=shared_gb,
@@ -216,6 +218,7 @@ def update_container(container_id: int, *, session: Session, **fields) -> Contai
         "deleted_reason",
         "deleted_by_user_id",
         "image_id",
+        "entrypoint",
         "machine_id",
         "container_status",
         "failed_reason",
@@ -295,6 +298,7 @@ def restore_container_record(
     last_build_at=None,
     base_image: str | None = None,
     dockerfile_body: str | None = None,
+    entrypoint: str | None = None,
 ) -> Container | None:
     container = get_by_id(container_id, session=session, include_invalid=True)
     if not container:
@@ -315,6 +319,8 @@ def restore_container_record(
     container.last_build_at = last_build_at
     container.base_image = base_image
     container.dockerfile_body = dockerfile_body
+    # 启动命令也整体覆盖（含置空）：复活写的就是本次采用的那份
+    container.entrypoint = entrypoint
     container.machine_id = int(machine_id)
     container.memory_gb = memory_gb
     container.shared_gb = shared_gb

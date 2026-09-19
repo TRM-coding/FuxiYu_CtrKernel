@@ -123,6 +123,7 @@ def create_image(
     dockerfile_body: str,
     status: ImageStatus = ImageStatus.DRAFT,
     created_by_user_id: int | None,
+    entrypoint: str | None = None,
     session: Session,
 ) -> Image:
     image = Image(
@@ -130,6 +131,7 @@ def create_image(
         description=description,
         base_image=base_image,
         dockerfile_body=dockerfile_body,
+        entrypoint=entrypoint,
         status=status,
         created_by_user_id=created_by_user_id,
     )
@@ -142,10 +144,15 @@ def update_image(image_id: int, *, session: Session, **fields) -> bool:
     image = get_by_id(image_id, session=session)
     if image is None:
         return False
-    allowed = {"name", "description", "base_image", "dockerfile_body", "status"}
+    allowed = {"name", "description", "base_image", "dockerfile_body", "entrypoint", "status"}
+    # entrypoint 的 NULL 是**有意义的取值**（= 清除，回到平台默认），所以它不能走
+    # 下面"None 即不提供"的通用跳过规则。其余字段照旧：None = 这次不动它。
+    nullable = {"entrypoint"}
     dirty = False
     for key, value in fields.items():
-        if key not in allowed or value is None:
+        if key not in allowed:
+            continue
+        if value is None and key not in nullable:
             continue
         if getattr(image, key, None) != value:
             setattr(image, key, value)

@@ -199,8 +199,11 @@ def is_version_behind(image_version_at, template_updated_at) -> bool:
 def container_dockerfile_parts(container):
     """读容器行上的配方留痕，补上当下的平台注入，凑成一份完整的渲染输入；没有留痕返回 None。
 
-    容器行上只有**模板侧的两项**（FROM 与业务片段）；平台注入不落库，这里现取当下的
-    系统设置——它不是用户的内容而是平台设施，容器该带的是现在这一版，不是当年那版。
+    容器行上只有**模板侧的三项**（FROM / 业务片段 / 启动命令）；平台注入不落库，这里现取
+    当下的系统设置——它不是用户的内容而是平台设施，容器该带的是现在这一版，不是当年那版。
+
+    `entrypoint` 是配方的一段（它渲染成 Dockerfile 的最后一行，决定镜像内容），因此也必须
+    从容器行读——回落模板会让"这份配方"拼出别的镜像。
 
     判"有没有留痕"看 `base_image`：FROM 是 Dockerfile 的结构必需项，业务片段可以合法为空
     （内置模板就是空的）——所以不能拿"整段文本非空"当判据。
@@ -218,6 +221,7 @@ def container_dockerfile_parts(container):
         base_image=base_image,
         platform_injection=settings_tasks.get_image_platform_injection_content() or "",
         dockerfile_body=getattr(container, "dockerfile_body", None),
+        entrypoint=(getattr(container, "entrypoint", None) or "").strip() or None,
     )
 
 

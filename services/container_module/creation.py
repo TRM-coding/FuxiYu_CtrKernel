@@ -167,6 +167,9 @@ def _persist_container_record(
         status=ContainerStatus.BUILDING if image_build else ContainerStatus.CREATING,
         gpu_chosen_list=list(gpu_list) if gpu_list else None,
         bind_mount_path=restore_mount_path,
+        # 启动命令是**配方的一段**（它渲染成 Dockerfile 最后一行），因此与 FROM、业务片段
+        # 同源：都从 parts 取，不从 wire 取——wire 上已经没有这个键了。
+        entrypoint=(parts.entrypoint if parts else None),
     )
     with session_scope() as session:
         if reuse_container_id is not None:

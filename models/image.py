@@ -22,6 +22,18 @@ class Image(db.Model):
     description: str | None = db.Column(db.String(500), nullable=True)
     base_image: str = db.Column(db.String(255), nullable=False)
     dockerfile_body: str = db.Column(db.Text, nullable=False, default="")
+    # 容器启动命令（2026-09 决策）：建容器时容器里跑什么。
+    #
+    # 存的是**裸命令**，不是 Dockerfile 指令——与 base_image 存 `ubuntu:24.04` 而不存
+    # `FROM ubuntu:24.04` 同一个道理。
+    #
+    # 可空且**空即默认**：留空表示"用平台默认"，即容器保持存活等你 SSH 进来
+    # （`tail -f /dev/null`）。默认值只写在 Node 一处，不冻进数据——否则将来想改默认值
+    # 就要写迁移，而且"空"的语义会糊（是用户没填，还是用户就想跑 tail？）。
+    #
+    # 它**不参与构建**：不进 tag、不进 Dockerfile、不影响"落后"判定。它是运行期参数，
+    # 所以刻意不做成 DockerfileParts 的第四个字段。
+    entrypoint: str | None = db.Column(db.String(255), nullable=True)
     status: ImageStatus = db.Column(
         db.Enum(ImageStatus, values_callable=lambda obj: [e.value for e in obj]),
         nullable=False,

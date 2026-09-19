@@ -351,6 +351,9 @@ class ContainerDetailInformation(_CompatBaseModel):
     # 完整 Dockerfile：由**该容器自己的配方留痕**现场渲染（`base_image` + `dockerfile_body`
     # + 当下的平台注入）。无留痕的存量容器回落为当前模板渲染；无归属且无留痕则为 None。
     image_dockerfile: str | None = None
+    # 该容器实际跑的启动命令（容器行留痕）。None = 平台默认（保持存活等 SSH）。
+    # 与 image_id / container_image 同一个口径：容器行记的是它自己那一份。
+    entrypoint: str | None = None
     machine_id: int | None = None
     machine_ip: str | None = None
     effective_status: str | None = None

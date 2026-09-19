@@ -110,6 +110,8 @@ def _build_container_detail(container, machine, bindings, long_term, cleanup, fr
     return {
         **_build_container_common_fields(container, machine, bindings),
         "image_dockerfile": container_image_dockerfile(container),
+        # 启动命令：NULL 与 "" 都折成 None（= 平台默认），读侧只见两态
+        "entrypoint": (getattr(container, "entrypoint", None) or "").strip() or None,
         "memory_gb": container.memory_gb,
         "shared_gb": container.shared_gb,
         "gpu_number": container.gpu_number,
