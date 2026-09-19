@@ -25,7 +25,11 @@ RUN set -eu; \
     else \
         echo "unsupported package manager for Fuxi platform image injection" >&2; exit 1; \
     fi; \
-    mkdir -p /run/sshd
+    mkdir -p /run/sshd; \
+    if ! command -v ssh-keygen >/dev/null 2>&1 || ! test -x /usr/sbin/sshd; then \
+        echo "Fuxi platform image injection FAILED: ssh-keygen or sshd missing after install (package install silently failed? check the build network / apt sources)" >&2; \
+        exit 1; \
+    fi
 EXPOSE 22"""
 
 
