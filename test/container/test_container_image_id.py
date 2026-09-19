@@ -60,11 +60,11 @@ def _recipe_of(container) -> DockerfileParts | None:
     return utils.container_dockerfile_parts(container)
 
 
-def _image_build_for(db_session, image_id: int):
-    """取真实模板的构建留痕（版本戳与 Dockerfile 都来自当下的模板行）。"""
+def _image_build_for(db_session, image_id: int, machine_id: int | None = None):
+    """取一次构建留痕；`machine_id` 决定标签**从缓存拿**还是现造。"""
     from ...services.image_tasks import resolve_image_build
 
-    return resolve_image_build(image_id)
+    return resolve_image_build(image_id, machine_id)
 
 
 def _auth(monkeypatch, *, valid=True, user_id=1):
@@ -458,23 +458,33 @@ def test_image_dockerfile_falls_back_to_snapshot_without_binding(db_session):
     )
 
 
-def test_common_fields_expose_derived_tag(db_session):
-    """container_image 是**推导**出来的标签，不是库存字段。
+def test_common_fields_expose_ownership_and_template_name(db_session):
+    """出参只有**归属标识 + 模板名**，不出标签（2026-09 决策）。
 
-    由「归属标识 + 构建版本戳」重算——标签是派生值，存一份就等于制造第二个可漂移的
-    真值来源（这正是本变更要消灭的东西）。
+    标签是 Node 侧的缓存键与 docker 制品名，不是平台的管理粒度；前端要显示的是
+    "这个容器用的是哪个模板"。名字由**服务端**解析——容器的可见性与模板的可见性是两套
+    判据，用户可能看得见容器却看不见模板，让前端拿 image_id 自己去查会变成空白或报错。
     """
-    from datetime import datetime
-
     machine = create_machine()
     container = create_container(machine=machine, image_id=1)
-    container.last_build_at = datetime(2026, 8, 25, 9, 0, 16)
     db_session.commit()
 
     fields = information._build_container_common_fields(container, machine, [])
 
-    assert fields["container_image"] == "fuxi/image-1:20260825T090016Z"
     assert fields["image_id"] == 1
+    assert fields["image_name"] == "Ubuntu 24.04 · 基础"
+    assert "container_image" not in fields, "标签不再对外"
+
+
+def test_common_fields_tolerate_missing_template(db_session):
+    """无归属（存量裸镜像容器）时两项都为空，不抛错、不编造。"""
+    machine = create_machine()
+    container = create_container(machine=machine, image_id=None)
+    db_session.commit()
+
+    fields = information._build_container_common_fields(container, machine, [])
+    assert fields["image_id"] is None
+    assert fields["image_name"] is None
 
 
 ############################################################
@@ -757,20 +767,18 @@ def test_resurrect_uses_template_only_when_explicitly_asked(db_session, monkeypa
 # 版本戳与落后判据（design D5）
 ############################################################
 
-def test_version_stamp_equals_the_stamp_encoded_in_the_tag(db_session):
-    """版本戳必须等于标签里编码的版本时间。
+def test_version_stamp_is_the_tag_stamp_not_the_template_version(db_session):
+    """版本戳是**这条标签自己的**版本戳，不是模板最后一次被改的时刻。
 
-    这条守的是"取派发时读到的模板版本，不是 now()"这条纪律——两者一旦脱钩，
-    「是否落后」的比较就退化成墙钟对版本戳，在窗口内编辑模板会造成静默误判。
+    来源见 `resolve_image_build_tag`：缓存命中时它是行里的 `created_at`，现造时是 `now()`。
+    它落在容器行上，于是容器也能回答"我跑的是哪一版"。
     """
-    from ...services.image_tasks import resolve_image_build, format_image_build_tag
+    from ...services.image_tasks import resolve_image_build
     from ...repositories import image_repo
 
     build = resolve_image_build(1)
     template = image_repo.get_by_id(1, session=db_session)
 
-    assert build.version_at == template.updated_at
-    assert build.payload["image_tag"] == format_image_build_tag(1, build.version_at)
     assert build.payload["image_tag"].endswith(
         build.version_at.strftime("%Y%m%dT%H%M%SZ")
     )
@@ -928,16 +936,13 @@ def test_machine_image_records_dispatch_and_dedupes(db_session, mock_node_send):
     assert rows[0].image_tag == build.payload["image_tag"]
 
 
-def test_machine_image_row_is_rewritten_when_tag_changes(db_session, mock_node_send):
-    """行身份是 (machine_id, image_id)：模板更新后新标签**改写同一行**，不新增行。
+def test_machine_image_row_is_never_rewritten(db_session, mock_node_send):
+    """一行一 (机器, 模板)，**重复派发不改写它**——tag 与 created_at 都不动。
 
-    这是复合键的直接后果——旧键 (machine_id, image_tag) 下模板一更新就会多出一行，
-    而复合键下插第二行会撞唯一约束，所以写点必须是改写。
+    这一行就是"这台机器上那个制品"：就地改写等于悄悄换版本，而宿主机上那个制品还挂在
+    旧标签下，成了没人记得的孤儿。要换代只有一条路：模板变更时整行删掉。
     """
-    from datetime import datetime
-
-    from ...extensions import session_scope
-    from ...repositories import image_repo, machine_image_repo, machine_permission_repo
+    from ...repositories import machine_image_repo, machine_permission_repo
 
     owner = create_user(username="owner_mi_up")
     machine = create_machine(max_shared_gb=8, max_memory_gb=64)
@@ -946,31 +951,131 @@ def test_machine_image_row_is_rewritten_when_tag_changes(db_session, mock_node_s
     mock_node_send({"success": 1})
 
     build = _image_build_for(db_session, 1)
-    container_tasks.Create_container(
-        owner_user_id=owner.id, machine_id=machine.id,
-        container=_container_info("mi_up_1"),
-        image_build=build.payload, image_id=1,
-        image_version_at=build.version_at, dockerfile_parts=build.dockerfile_parts,
-    )
-    first = machine_image_repo.list_by_machine(machine.id, session=db_session)[0]
-    assert first.image_tag == build.payload["image_tag"]
+    for i in range(2):
+        container_tasks.Create_container(
+            owner_user_id=owner.id, machine_id=machine.id,
+            container=_container_info(f"mi_up_{i}"),
+            image_build=build.payload, image_id=1,
+            image_version_at=build.version_at, dockerfile_parts=build.dockerfile_parts,
+        )
 
-    # 模板更新 → 由「归属标识 + 版本戳」推导的标签随之变化 → 再派发一次
-    with session_scope() as session:
-        image_repo.get_by_id(1, session=session).updated_at = datetime(2026, 10, 1, 0, 0, 0)
-    newer = _image_build_for(db_session, 1)
-    assert newer.payload["image_tag"] != first.image_tag, "前置：模板更新必须换标签"
-    container_tasks.Create_container(
-        owner_user_id=owner.id, machine_id=machine.id,
-        container=_container_info("mi_up_2"),
-        image_build=newer.payload, image_id=1,
-        image_version_at=newer.version_at, dockerfile_parts=newer.dockerfile_parts,
-    )
-
-    db_session.expire_all()  # 写点在自己的 session 里提交，测试 session 的 identity map 已陈旧
     rows = machine_image_repo.list_by_machine(machine.id, session=db_session)
-    assert len(rows) == 1, "同一 (机器, 模板) 只该有一行"
-    assert rows[0].image_tag == newer.payload["image_tag"], "新标签必须改写到同一行"
+    assert len(rows) == 1
+    assert rows[0].image_tag == build.payload["image_tag"]
+    assert rows[0].created_at == build.version_at, "版本戳也必须原样留着"
+
+
+def test_template_update_clears_the_cache_and_forces_a_new_tag(db_session, mock_node_send):
+    """**模板一变 → 缓存整行清掉 → 下次派发现造新标签**。这就是换代的全过程。
+
+    断言方式刻意不依赖秒边界：先往行里种一条**独特**的标签，更新模板后它必须消失、
+    派发必须现造一条别的——证明确实是"缓存没了、重新造"，而不是"恰好算出了同一个值"。
+    """
+    from ...repositories import image_repo, machine_image_repo, machine_permission_repo
+    from ...services import image_tasks
+
+    owner = create_user(username="owner_mi_inv")
+    machine = create_machine(max_shared_gb=8, max_memory_gb=64)
+    machine_permission_repo.add_permission(machine.id, owner.id, session=db_session)
+    db_session.commit()
+    mock_node_send({"success": 1})
+
+    planted = "fuxi/image-1:29990101T000000Z"
+    stamped = image_repo.get_by_id(1, session=db_session).updated_at + __import__("datetime").timedelta(seconds=5)
+    machine_image_repo.record_dispatch(machine.id, 1, planted, stamped, session=db_session)
+    db_session.commit()
+
+    assert image_tasks.Update_image(image_id=1, description="改了个描述") is True
+    db_session.expire_all()
+    assert machine_image_repo.list_by_machine(machine.id, session=db_session) == [], \
+        "模板一变，所有机器上的这一版记录都必须清掉（否则永不重建）"
+
+    after = _image_build_for(db_session, 1, machine_id=machine.id)
+    assert after.payload["image_tag"] != planted, "缓存已清，必须现造新标签（不能复用旧值）"
+    assert after.payload["image_tag"].startswith("fuxi/image-1:")
+
+
+def test_fabricated_stamp_has_second_precision_so_same_second_reuses_the_tag(db_session):
+    """**已知边角**：标签的版本戳是秒精度，所以"模板变更"与"下次派发"落在同一秒时，
+    现造出来的标签会与刚刚那一版**同名**。
+
+    后果很窄但真实：那一秒里宿主机上若已存在同名制品，会被判成命中、跑旧内容，而 Ctrl
+    显示的是新配方。要触发它必须"改模板"与"建容器"落在同一秒内。
+
+    这里把行为钉住，是为了让它**可见**——将来若要收紧，做法是让现造的戳严格大于被删掉
+    的那一版的戳，而那需要保留一点"上一版是什么时候"的记忆（当前设计刻意不留）。
+    """
+    from datetime import datetime
+
+    from ...services.image_tasks import resolve_image_build_tag
+
+    machine = create_machine()
+    fixed = datetime(2026, 9, 19, 10, 0, 0, 123456)   # 秒精度会截到 10:00:00
+    tag_a = resolve_image_build_tag.__globals__["format_image_build_tag"](1, fixed)
+    tag_b = resolve_image_build_tag.__globals__["format_image_build_tag"](
+        1, fixed.replace(microsecond=999999)
+    )
+    assert tag_a == tag_b, "同一秒内的两个时刻 → 同一个标签"
+
+
+def test_cache_hit_reuses_the_stored_tag_verbatim(db_session):
+    """**缓存命中 = 把行里的 tag 直接拿出来用**，不是拿行里的时间戳再算一遍。
+
+    这里往行里种一条**与推导结果不同**的人工标签：若返回值是它，就证明确实是"读缓存"，
+    而不是"重算恰好相等"。
+    """
+    from datetime import timedelta
+
+    from ...repositories import image_repo, machine_image_repo
+    from ...services.image_tasks import resolve_image_build_tag
+
+    machine = create_machine()
+    # 必须晚于模板的 updated_at，否则会被"陈旧行"那道闸门拦下
+    stamped = image_repo.get_by_id(1, session=db_session).updated_at + timedelta(seconds=5)
+    machine_image_repo.record_dispatch(
+        machine.id, 1, "fuxi/image-1:29990101T000000Z", stamped, session=db_session
+    )
+    db_session.commit()
+
+    tag, version_at = resolve_image_build_tag(1, machine.id)
+    assert tag == "fuxi/image-1:29990101T000000Z", "命中就是读值，不现算"
+    assert version_at == stamped
+
+
+def test_stale_cache_row_is_not_reused(db_session):
+    """行比模板旧（`created_at <= images.updated_at`）→ 判过时，改走现造。
+
+    这是"删行"之外的第二道闸：删行没成功、或有人直连改库时，没有它就会永久复用陈旧的
+    标签。判过时只会退回现造（结果恒正确），代价是一次多余的重建。
+    """
+    from datetime import datetime as _dt
+
+    from ...extensions import session_scope
+    from ...repositories import image_repo, machine_image_repo
+    from ...services.image_tasks import resolve_image_build_tag
+
+    machine = create_machine()
+    machine_image_repo.record_dispatch(
+        machine.id, 1, "fuxi/image-1:29990101T000000Z", _dt(2020, 1, 1), session=db_session
+    )
+    db_session.commit()
+
+    tag, version_at = resolve_image_build_tag(1, machine.id)
+    assert tag != "fuxi/image-1:29990101T000000Z", "过时行不得复用"
+    assert version_at > _dt(2020, 1, 1)
+
+
+def test_missing_row_and_missing_machine_fabricate_a_fresh_tag(db_session):
+    """无行 → 现造；不给 machine_id（拿不到"机器上那一版"）→ 同样现造。"""
+    from ...services.image_tasks import resolve_image_build_tag
+
+    machine = create_machine()
+    tag, version_at = resolve_image_build_tag(1, machine.id)
+    assert tag.startswith("fuxi/image-1:")
+    assert tag.endswith(version_at.strftime("%Y%m%dT%H%M%SZ"))
+
+    tag2, _ = resolve_image_build_tag(1, None)
+    assert tag2.startswith("fuxi/image-1:")
 
 
 def test_machine_image_not_written_without_build_segment(db_session, mock_node_send):
@@ -1024,107 +1129,21 @@ def test_machine_image_is_observational_only(db_session, mock_node_send):
 # 标签解析的新鲜度预检查（machine_image 提前返回）
 ############################################################
 
-def test_format_tag_pre_check_returns_dispatched_tag(db_session):
-    """该 (机器, 模板) 已派发且**严格晚于**模板最后修改 → 预检查直接返回行里的标签。
+def test_machine_image_repo_delete_is_scoped_to_template(db_session):
+    """删除入口**有且只有一个**，且按模板清（不是按标签、不是按机器）。
 
-    预检查的返回值与推导值按契约相等（同一对输入），这里用一个与推导值**不同**的
-    人工标签来证明"确实走了预检查"而不是碰巧推对了。
-
-    版本戳先拨到过去，让真实的派发时刻（created_at = 当下）必然严格晚于它——否则两者
-    落在同一秒，判据会保守地判过时（见下一个用例）。
+    它是"模板变了 → 所有机器上那份制品都不再是这一版"的落地动作。按标签删会退化成
+    "拿标签做检索"；按机器删会漏掉别的机器——两者都会留下永不重建的机器。
     """
-    from datetime import datetime
-
-    from ...extensions import session_scope
-    from ...repositories import image_repo, machine_image_repo
-    from ...services.image_tasks import format_image_build_tag
-
-    machine = create_machine(max_shared_gb=8, max_memory_gb=64)
-    with session_scope() as session:
-        image_repo.get_by_id(1, session=session).updated_at = datetime(2020, 1, 1, 0, 0, 0)
-    machine_image_repo.record_dispatch(
-        machine.id, 1, "fuxi/image-1:29990101T000000Z", session=db_session
-    )
-    db_session.commit()
-
-    got = format_image_build_tag(1, None, machine.id)
-    assert got == "fuxi/image-1:29990101T000000Z", "新鲜 → 直接取行里的标签（连推导都不需要）"
-
-
-def test_format_tag_pre_check_falls_through_when_dispatch_is_stale(db_session):
-    """行不严格晚于模板最后修改 → 判过时，回正常推导链路。
-
-    覆盖两种边界：派发落在模板修改**之前**，以及两者**同一秒**（DATETIME 在 MySQL 上
-    截断到秒，同秒无法区分先后 —— 判过时才会退回推导，结果恒正确）。
-    """
-    from datetime import datetime
-
-    from ...extensions import session_scope
-    from ...repositories import image_repo, machine_image_repo
-    from ...services.image_tasks import format_image_build_tag
-
-    machine = create_machine(max_shared_gb=8, max_memory_gb=64)
-    machine_image_repo.record_dispatch(
-        machine.id, 1, "fuxi/image-1:29990101T000000Z", session=db_session
-    )
-    db_session.commit()
-    row_created_at = machine_image_repo.get_by_machine_image(
-        machine.id, 1, session=db_session
-    ).created_at
-
-    # ① 之后才改模板 → 行过时
-    with session_scope() as session:
-        image_repo.get_by_id(1, session=session).updated_at = datetime(2026, 12, 1, 0, 0, 0)
-    build = _image_build_for(db_session, 1)
-    got = format_image_build_tag(1, build.version_at, machine.id)
-    assert got != "fuxi/image-1:29990101T000000Z", "更晚的模板修改 → 不得复用行里的标签"
-    assert got == format_image_build_tag(1, build.version_at), "过时 → 与不带 machine_id 的推导一致"
-
-    # ② 同秒（created_at == updated_at）→ 同样判过时
-    with session_scope() as session:
-        image_repo.get_by_id(1, session=session).updated_at = row_created_at
-    build = _image_build_for(db_session, 1)
-    assert format_image_build_tag(1, build.version_at, machine.id) != "fuxi/image-1:29990101T000000Z", (
-        "同秒无法区分先后 → 保守判过时"
-    )
-
-
-def test_format_tag_pre_check_skipped_without_machine_id(db_session):
-    """不给 machine_id 就不查表（纯推导），供只取配方、或无需预检查的调用方使用。"""
     from ...repositories import machine_image_repo
-    from ...services.image_tasks import format_image_build_tag
 
-    machine = create_machine(max_shared_gb=8, max_memory_gb=64)
-    build = _image_build_for(db_session, 1)
-    machine_image_repo.record_dispatch(
-        machine.id, 1, "fuxi/image-1:29990101T000000Z", session=db_session
-    )
-    db_session.commit()
+    deletes = [n for n in dir(machine_image_repo) if n.startswith("delete") or n.startswith("remove")]
+    assert deletes == ["delete_by_image"], deletes
 
-    assert format_image_build_tag(1, build.version_at) == build.payload["image_tag"]
-    assert format_image_build_tag(1, build.version_at, None) == build.payload["image_tag"]
-
-
-def test_restore_snapshot_branch_does_not_use_pre_check(db_session, mock_node_send):
-    """快照分支的配方是容器自己那份，标签必须同源——不得被机器级预检查改写。
-
-    守的是"新标签配旧内容"：那与"旧标签配新内容"同样让同一个标签指向不同内容。
-    """
     import inspect
 
-    from ...services.container_module import restore as restore_module
-
-    src = inspect.getsource(restore_module._restore_from_snapshot)
-    assert "format_image_build_tag(target.image_id, target.image_version_at)" in src, (
-        "快照分支必须只传两个参数（归属 + 该容器自己的版本戳）"
-    )
-
-
-def test_machine_image_repo_has_no_delete(db_session):
-    """没有删除入口：记录表达派发历史，删了会毁掉审计线索。"""
-    from ...repositories import machine_image_repo
-
-    assert not [n for n in dir(machine_image_repo) if "delete" in n.lower() or "remove" in n.lower()]
+    params = inspect.signature(machine_image_repo.delete_by_image).parameters
+    assert list(params)[0] == "image_id"
 
 
 ############################################################

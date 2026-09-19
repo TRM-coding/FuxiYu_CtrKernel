@@ -59,73 +59,78 @@ def _serialize(image, *, include_content: bool = False) -> dict:
     return result
 
 
-def _dispatched_tag_if_fresh(machine_id: int, image_id: int) -> str | None:
-    """该 (机器, 模板) 已派发过的制品标签——**仅当它相对模板当前版本没过时**才返回。
+def resolve_image_build_tag(image_id: int, machine_id: int | None) -> tuple[str, datetime]:
+    """这次构建该用哪条标签——**返回 `(tag, 版本戳)`，tag 是缓存的值，不现算**。
 
-    过时判据 = `machine_image.created_at <= images.updated_at`（**严格大于才算新鲜**）。
-    写点在改写时刷新 `created_at`，所以那一行记的是"最近一次派发的时刻"；它若严格晚于
-    模板的最后一次修改，就说明这个制品正是当前模板版本产出的——此时
-    `format_image_build_tag` 由同一对输入算出的值必然是它，提前返回因此**不会**造成
-    "旧标签配新内容"。
+    两个来源，正如设计：
 
-    为什么是严格大于：DATETIME 列在 MySQL 上截断到秒。若派发与模板修改落在同一秒，
-    `created_at == updated_at` 无法区分先后，判"新鲜"就可能把一个**早于**本次修改的
-    标签当成当前值——那正是要杜绝的组合。判"过时"只会退回推导链路（结果恒正确），
-    代价仅是少一次提前返回。
+    1. **`machine_image` 有行且没过时** → **直接把行里的 `image_tag` 拿出来用**。
+       这就是缓存命中：宿主机上那个制品还在，Node 的 `images.get(tag)` 会命中、不重建。
+       注意是**读**，不是拿行里的时间戳再算一遍——缓存表存的就是值本身。
+    2. **没有行，或行已过时** → **用当前时间现造**一条 `f(image_id, now())`；
+       调用方随后要把这条标签与这个时间戳一起写进表，成为下一次的权威值。
 
-    过时、无行、表不可用：一律返回 None，交给正常推导链路。失败只 warning 不阻断——
-    这条预检查是加速项，它的可用性不该影响创建容器或展示。
+    版本戳（第二个返回值）落在容器行上（`containers.last_build_at`），于是容器也能回答
+    "我跑的是哪一版"。
+
+    **过时判据** = `machine_image.created_at <= images.updated_at`（严格大于才算新鲜），
+    是"删行"之外的第二道闸：正常失效由 `Update_image` 删行承担，这条判据兜住"删行没成功、
+    或有人直连改库"的情况——没有它，一个陈旧的标签会被永久复用。判过时只会退回现造
+    （结果恒正确），代价是一次多余的重建。
+
+    `machine_id` 为空（拿不到"机器上那一版"）时按首次构建处理。
+
+    读表失败只 warning 并退回现造——那只会导致一次多余的重建，不会给出错误结果。
     """
-
     import logging
 
     from ..repositories import machine_image_repo
 
     logger = logging.getLogger(__name__)
-    try:
-        with session_scope(commit=False) as session:
-            row = machine_image_repo.get_by_machine_image(
-                int(machine_id), int(image_id), session=session
+    if machine_id is not None:
+        try:
+            with session_scope(commit=False) as session:
+                row = machine_image_repo.get_by_machine_image(
+                    int(machine_id), int(image_id), session=session
+                )
+                if row is not None and row.image_tag and row.created_at is not None:
+                    image = image_repo.get_by_id(int(image_id), session=session)
+                    if image is not None and image.updated_at is not None \
+                            and row.created_at <= image.updated_at:
+                        logger.warning(
+                            "machine_image row stale (template edited after it was cached):"
+                            " machine=%s image=%s; rebuilding a fresh tag",
+                            machine_id, image_id,
+                        )
+                    else:
+                        return row.image_tag, row.created_at
+        except Exception as e:  # pragma: no cover
+            logger.warning(
+                "resolve_image_build_tag fell back to a fresh tag: machine=%s image=%s: %s",
+                machine_id, image_id, e,
             )
-            if row is None:
-                return None
-            image = image_repo.get_by_id(int(image_id), session=session)
-            if image is None or row.created_at is None or image.updated_at is None:
-                return None
-            if row.created_at <= image.updated_at:
-                return None
-            return row.image_tag
-    except Exception as e:  # pragma: no cover
-        logger.warning("machine_image pre-check failed: machine=%s image=%s: %s", machine_id, image_id, e)
-        return None
+
+    version_at = datetime.utcnow()
+    return format_image_build_tag(image_id, version_at), version_at
 
 
 def format_image_build_tag(
     image_id: int | None,
     version_at: datetime | None,
-    machine_id: int | None = None,
 ) -> str | None:
     """由「归属标识 + 版本戳」推导 Docker tag；两者缺一就推不出来，返回 None。
 
-    这是**唯一**的标签构造实现：创建/恢复时填 Node 的 `config.image` 与 `image_build.image_tag`
-    用它，展示出口也用它。公式只有一份，两边不可能漂。
+    这是**唯一**的标签构造实现。标签是**派生值，MUST NOT 落库**：库里存的只有归属标识
+    （`containers.image_id`）与版本戳（`containers.last_build_at` ／ `machine_image.created_at`），
+    标签本身由这两个输入现算。
+
+    它同时**不是** Ctrl 对外的展示口径：平台的管理粒度是「配方 + 归属 + 版本戳」，标签是
+    Node 侧的缓存键与 docker 制品名，只在 Ctrl→Node 的线上出现（2026-09 决策）。
 
     刻意**不**用 now() 兜底：那会编出一个从未出现过的标签。标签是 Node 侧的缓存键，
-    编一个假的比返回空坏得多——展示会指着一个没跑过的制品，构建会去命中一个不存在的东西。
+    编一个假的比返回空坏得多——会去命中一个不存在的东西，也会指向一个没跑过的制品。
     推不出来就是推不出来，由调用方各自决定是拒绝还是留空。
-
-    `machine_id` 给定时先做一次**预检查**（见 `_dispatched_tag_if_fresh`）：该 (机器, 模板)
-    已派发过且没过时，就直接返回那个标签，不再推导。按契约它与推导值相等——两者的输入
-    是同一对（归属标识 + 模板当前版本戳），预检查只是省掉一次推导。
-
-    ⚠ **配方是"该容器自己那份"的调用点不要传 machine_id**：预检查返回的是机器级的当前
-    标签，与容器自己的旧配方拼在一起就成了"新标签配旧内容"，与"旧标签配新内容"同样
-    破坏 Node 的标签缓存（见 services/container_module/restore.py 的快照分支）。
     """
-    if machine_id is not None and image_id is not None:
-        fresh = _dispatched_tag_if_fresh(int(machine_id), int(image_id))
-        if fresh is not None:
-            return fresh
     if image_id is None or version_at is None:
         return None
     version_time = version_at
@@ -231,9 +236,11 @@ class ImageBuild:
 
     payload: dict
     image_id: int
-    # 本次构建所依据的**模板版本时刻**：取派发时读到的 images.updated_at，**不是 now()**。
-    # 用当前时间会让「容器落后于模板」的比较退化为墙钟对版本戳，在两者之间的窗口内
-    # 编辑模板将造成静默误判。
+    # **这条标签的版本戳**（2026-09 决策）。与标签同源同生：缓存命中时它是行里那个
+    # `created_at`，现造时是 `now()`。容器行照抄它，于是容器也能回答"我跑的是哪一版"。
+    #
+    # ⚠ 它不是"模板最后一次被改的时刻"。两者曾经的绑定是旧口径：那时标签=f(模板版本)，
+    #   模板一改标签就变、机器被迫重建。现在换代由 `Update_image` 删除缓存行触发。
     version_at: datetime
     # 本次构建实际使用的配方（三段输入，而非渲染结果），要落成容器的留痕。
     # `dockerfile_parts.render()` 就是 payload 里那份 dockerfile_text。
@@ -265,16 +272,17 @@ def resolve_image_build(image_id: int, machine_id: int | None = None) -> ImageBu
             # NULL 与 "" 都折成 None——渲染时再兜平台默认，调用方只见两态
             entrypoint=(image.entrypoint or "").strip() or None,
         )
-        image_tag = format_image_build_tag(image.id, image.updated_at, machine_id)
-        if image_tag is None:  # pragma: no cover - images.updated_at 是 NOT NULL，构造上不可达
-            raise ValueError(f"image {image.id} has no version timestamp to derive a tag from")
+        # 标签的来源见 resolve_image_build_tag：缓存里有就直接用，没有就现造
+        image_tag, version_at = resolve_image_build_tag(image.id, machine_id)
+        if image_tag is None:  # pragma: no cover - 上面恒返回非空标签
+            raise ValueError(f"image {image.id} has no usable build tag")
         return ImageBuild(
             payload={
                 "image_tag": image_tag,
                 "dockerfile_text": parts.render(),
             },
             image_id=image.id,
-            version_at=image.updated_at,
+            version_at=version_at,
             dockerfile_parts=parts,
         )
 
@@ -449,6 +457,20 @@ def Update_image(
                 if clash is not None and clash.id != int(image_id):
                     raise ValueError(f"image name already in use: {name}")
             ok = image_repo.update_image(image_id, session=session, **fields)
+            if ok:
+                # 模板变了 → 所有机器上那份制品都不再是"这一版" → 清掉版本记录。
+                # **必须同事务**：删了却没改成功（或反过来）都会留下一台机器永不重建的
+                # 静默状态。下次派发会重新插入、拿到新的 created_at、算出新的标签，
+                # 宿主机因此必然未命中并重建。
+                from ..repositories import machine_image_repo
+
+                cleared = machine_image_repo.delete_by_image(image_id, session=session)
+                if cleared:
+                    import logging
+
+                    logging.getLogger(__name__).warning(
+                        "image %s updated: cleared %s machine version record(s)", image_id, cleared
+                    )
     except Exception as exc:
         log_failure(operator_user_id=operator_user_id,
             operation=OperationType.UPDATE_IMAGE,

@@ -5,12 +5,26 @@ import math
 
 from ...constant import ROLE
 from ...repositories.containers_repo import derive_port_mappings
-from ..image_tasks import format_image_build_tag
 from . import node_comms
 from .pydantic_models import container_bref_information, _derive_effective_status
 from .utils import container_image_dockerfile, derive_allocated_limits
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_image_name(image_id) -> str | None:
+    """模板名（停用的也照常返回——历史容器该显示它当年用的那个模板）。"""
+    if not image_id:
+        return None
+    try:
+        from ...extensions import session_scope
+        from ...repositories import image_repo
+
+        with session_scope(commit=False) as session:
+            return image_repo.get_name_by_id(int(image_id), session=session)
+    except Exception as exc:  # pragma: no cover - 出参降级，不该让列表炸掉
+        logger.warning("failed to resolve image name for %s: %s", image_id, exc)
+        return None
 
 ####################################################
 # 出参组装工具族（纯拼装，不查库、不打 Node）
@@ -73,15 +87,13 @@ def _build_container_common_fields(container, machine, bindings) -> dict:
     return {
         "container_id": container.id,
         "container_name": container.name,
-        # container_image 是推导出的运行镜像标签（归属标识 + 构建版本戳），不是库存字段——
-        # 标签是派生值，存一份就等于制造第二个可漂移的真值来源。判断归属只看 image_id。
-        # 推不出来（裸镜像存量容器）时是 None，**不编造**：编一个就指着一个没跑过的制品。
-        "container_image": format_image_build_tag(
-            getattr(container, "image_id", None),
-            getattr(container, "last_build_at", None),
-            getattr(container, "machine_id", None),
-        ),
+        # 镜像归属：出参只有**归属标识 + 模板名**（2026-09 决策）。
+        # 标签（fuxi/image-…）是 Node 侧的缓存键与 docker 制品名，不是平台的管理粒度，
+        # **不再对外**——平台认的是"哪份模板 + 哪一版"，不是那串字符串。
+        # 名字由服务端解析：容器的可见性与模板的可见性不是同一套判据，用户可能看得见容器
+        # 却看不见模板，让前端拿 image_id 自己去查会变成空白或报错。
         "image_id": getattr(container, "image_id", None),
+        "image_name": _resolve_image_name(getattr(container, "image_id", None)),
         "created_at": container.created_at.isoformat() if container.created_at else None,
         "machine_id": container.machine_id,
         "machine_ip": machine.machine_ip if machine else "",

@@ -139,23 +139,27 @@ def Create_container(
         container, machine_id, image_build, restore_mount_path, reuse_container_id,
         image_id, image_version_at, dockerfile_parts,
     )
-    _record_machine_image(machine_id, image_id, image_build)
+    _record_machine_image(machine_id, image_id, image_build, image_version_at)
     _bind_owner_and_restored_accounts(container_id, owner_user_id, public_key, restore_accounts)
     _seed_initial_ssh_record(machine_id, container_id)
     _audit_create(container_id, container, machine_id, operator_user_id, reuse_container_id, image_id)
     return True
 
 
-def _record_machine_image(machine_id: int, image_id: int | None, image_build: dict | None) -> None:
-    """登记"Ctrl 请求过这台机器构建这个模板的制品"（纯观测，不在执行链上）。
+def _record_machine_image(machine_id: int, image_id: int | None, image_build: dict | None, version_at) -> None:
+    """把"这台机器上这份模板该用哪条标签"写进缓存表（机器 × 模板 一行）。
 
-    写入时机是**派发之后**——语义是"请求过"，不是"建成过"，因此构建失败也会留痕。
+    写入时机是**派发之后**，语义是"请求过"、不是"建成过"，因此构建失败也会留痕；
+    宿主机上的制品被外部 prune 掉时本表不会更正——但无害：标签没变，Node 那边
+    `images.get(tag)` 未命中会依随行的 Dockerfile 重建，自愈。
+
+    `image_build["image_tag"]` 与 `version_at` 必须来自**同一次解析**
+    （`image_tasks.resolve_image_build_tag` 的返回值），不要在这里另取 now()——它们要成为
+    下一次创建读回来复用的权威值，两个值必须一模一样。
     没有构建段的通路（直接运行）不写：那次根本没有派发构建。
-    失败只 warning 不阻断：这张表是观测层，它的可用性不该影响创建容器。
-
-    行身份是 `(machine_id, image_id)`；`image_tag` 只作为值随行落库。
+    失败只 warning 不阻断：这张表是缓存层，它的可用性不该影响创建容器。
     """
-    if not image_build or image_id is None:
+    if image_id is None or version_at is None or not image_build:
         return
     image_tag = image_build.get("image_tag")
     if not image_tag:
@@ -163,7 +167,7 @@ def _record_machine_image(machine_id: int, image_id: int | None, image_build: di
     try:
         with session_scope() as session:
             machine_image_repo.record_dispatch(
-                machine_id, int(image_id), image_tag, session=session
+                machine_id, int(image_id), image_tag, version_at, session=session
             )
     except Exception as e:  # pragma: no cover
         logger.warning(

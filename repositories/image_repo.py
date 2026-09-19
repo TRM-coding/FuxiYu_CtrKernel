@@ -25,6 +25,21 @@ def get_by_id(image_id: int, *, session: Session) -> Image | None:
     return session.get(Image, int(image_id))
 
 
+def get_name_by_id(image_id: int | None, *, session: Session) -> str | None:
+    """只取名字——容器出参要显示"这个容器用的是哪个模板"（原语，不过滤停用）。
+
+    出参里**必须**由服务端解析这个名字：容器的可见性与模板的可见性是两套判据，
+    用户完全可能看得见容器、却看不见它所属的模板。让前端拿着 image_id 去查模板详情
+    会把"看不到模板"变成"这一栏空白甚至报错"。停用同理——历史容器该照常显示它当年用的
+    模板名，停用只挡"用于新建"。
+    """
+    if image_id is None:
+        return None
+    return session.scalars(
+        select(Image.name).where(Image.id == int(image_id))
+    ).first()
+
+
 def get_by_name(name: str, *, session: Session) -> Image | None:
     """按名取行——**原语，不过滤停用**。seed 收敛需要看见被停用的系统行。"""
     return session.scalars(select(Image).where(Image.name == name)).first()

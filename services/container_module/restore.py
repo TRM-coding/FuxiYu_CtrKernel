@@ -383,10 +383,10 @@ def _resolve_restore_image(
         return _restore_from_snapshot(target)
 
     build = resolve_image_build(int(target.image_id), target.machine_id)
-    template = _load_template_status(int(target.image_id))
+    template = _load_template_row(int(target.image_id))
 
     # ── 分支①续：模板不存在或非 READY ──
-    if build is None or template is None or template != ImageStatus.READY:
+    if build is None or template is None or template.status != ImageStatus.READY:
         return _restore_from_snapshot(target)
 
     # ── 分支③：模板 READY 但容器落后 —— **这里存在真正的二选一** ──
@@ -396,7 +396,9 @@ def _resolve_restore_image(
     #
     # 内容本身**默认取留痕**（容器实际跑过的那份）；要应用最新模板必须显式指定
     # `template`。"按新"永远不是默认，那等于替用户换掉他容器里的内容。
-    if _is_behind(target.image_version_at, build.version_at):
+    # 比的是**模板的当前版本**（不是 build.version_at——那是这次的制品版本戳，
+    # 现造时等于 now()，拿它比会把每个容器都判成落后）
+    if _is_behind(target.image_version_at, template.updated_at):
         resolved = (
             _restore_from_template(build)
             if content_source == CONTENT_SOURCE_TEMPLATE
@@ -467,17 +469,20 @@ def _diff_dockerfile_sections(
     return sections
 
 
-def _load_template_status(image_id: int):
-    """取模板的当前状态；模板不存在返回 None。
+def _load_template_row(image_id: int):
+    """取模板行；模板不存在返回 None。
 
     刻意走 `get_by_id` 原语（不过滤停用）：过滤了就分辨不出"不存在"与"已停用"，
     而这两种情形在本判定里都要落到快照分支，诊断信息却不同。
+
+    返回**整行**而不只是状态：落后判定要比容器那一版与模板的**当前版本**
+    （`images.updated_at`），而新口径下 `build.version_at` 是**制品自己的版本戳**，
+    两者已经不是同一个东西了（2026-09 决策）。
     """
     from ...repositories import image_repo
 
     with session_scope(commit=False) as session:
-        image = image_repo.get_by_id(int(image_id), session=session)
-        return None if image is None else image.status
+        return image_repo.get_by_id(int(image_id), session=session)
 
 
 def _build_restore_container(target: _RestoreTarget, image_tag: str) -> tuple[Container_info, bool]:

@@ -123,7 +123,7 @@ def test_common_fields_carry_identity_accounts_and_effective_status(db_session):
     assert fields["container_name"] == container.name
     # 裸镜像容器（无归属、无版本戳）推不出标签 → None。**不编造**：编一个就等于指着
     # 一个从未存在过的制品。见 test_image_tag_is_never_fabricated。
-    assert fields["container_image"] is None
+    assert fields["image_name"] is None
     assert fields["image_id"] == container.image_id
     assert fields["machine_id"] == machine.id
     assert fields["machine_ip"] == machine.machine_ip

@@ -13,8 +13,24 @@ from ...repositories import (
     usercontainer_repo,
 )
 from ...repositories.containers_repo import derive_port_mappings
-from ..image_tasks import format_image_build_tag
 from .exceptions import NodeServiceError
+
+
+def _resolve_image_name(image_id) -> str | None:
+    """模板名（停用的也照常返回——已删容器该显示它当年用的那个模板）。
+
+    名字必须由**服务端**解析：容器的可见性与模板的可见性是两套判据，用户完全可能看得见
+    容器却看不见它所属的模板。让前端拿 image_id 去查模板详情会把"看不到模板"变成空白。
+    """
+    if not image_id:
+        return None
+    try:
+        from ...repositories import image_repo
+
+        with session_scope(commit=False) as session:
+            return image_repo.get_name_by_id(int(image_id), session=session)
+    except Exception:  # pragma: no cover - 出参降级，不该让列表炸掉
+        return None
 
 
 def resolve_mount_cleanup_request(
@@ -331,19 +347,13 @@ def serialize_deleted_container_record(row, cleanup, *, context: dict | None = N
         "deleted_id": row.id,
         "original_container_id": row.original_container_id,
         "container_name": context.get("container_name") or row.container_name,
-        # 镜像标签由**容器行**推导（归属标识 + 构建版本戳），与容器列表用的是同一个口径。
-        # 曾从快照 JSON 的 "image" 键取——那是把派生值又抄了一份进 JSON 再读出来，
-        # 既会与容器行失真，也让前端养成"消费 JSON 内嵌副本"的习惯。
-        "container_image": (
-            format_image_build_tag(
-                getattr(context["container"], "image_id", None),
-                getattr(context["container"], "last_build_at", None),
-                getattr(context["container"], "machine_id", None),
-            )
-            if context.get("container")
-            else None
-        ),
+        # 镜像归属：与容器列表同一个口径——**归属标识 + 模板名**，不出标签（2026-09 决策）。
+        # 曾从快照 JSON 的 "image" 键取标签，那是把派生值抄一份进 JSON 再读出来。
         "image_id": (
+            getattr(context.get("container"), "image_id", None)
+            or (row.snapshot or {}).get("image_id")
+        ),
+        "image_name": _resolve_image_name(
             getattr(context.get("container"), "image_id", None)
             or (row.snapshot or {}).get("image_id")
         ),

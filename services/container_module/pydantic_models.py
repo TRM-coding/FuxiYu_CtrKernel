@@ -8,9 +8,10 @@ from ..machine_tasks import get_machine_reachable, is_machine_in_maintenance, is
 class container_bref_information(BaseModel):
     container_id: int # 加入这个 只是为了方便调取详细信息
     container_name:str
-    container_image: str | None = None
-    # 镜像模板归属（逻辑真源）；container_image 只是本次实跑制品的展示快照
+    # 镜像模板归属（逻辑真源）。出参只给归属 + 模板名，**不出标签**（2026-09 决策）：
+    # 标签是 Node 侧的缓存键与 docker 制品名，不是平台的管理粒度。
     image_id: int | None = None
+    image_name: str | None = None
     created_at: str | None = None
     machine_id:int
     machine_ip:str
@@ -48,9 +49,8 @@ class container_bref_information(BaseModel):
 class container_detail_information(BaseModel):
     container_id: int # 与上方结构对称
     container_name:str
-    container_image:str
-    # 镜像模板归属（逻辑真源）；container_image 只是本次实跑制品的展示快照
     image_id: int | None = None
+    image_name: str | None = None
     created_at: str | None = None
     machine_id:int
     machine_ip:str

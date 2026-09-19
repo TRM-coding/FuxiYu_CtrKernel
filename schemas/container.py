@@ -108,11 +108,9 @@ class DeletedContainerRecord(_CompatBaseModel):
     deleted_id: int | str
     original_container_id: int | None = None
     container_name: str | None = None
-    # 镜像标签由容器行推导（归属标识 + 构建版本戳），与容器列表同一口径。
-    # 字段名与容器列表的出参保持一致，避免前端出现"这里叫 image、那里叫 container_image"
-    # 的双口径——也杜绝了"从快照 JSON 里读内嵌副本"的消费方式。
-    container_image: str | None = None
+    # 镜像归属：与容器列表同一个口径——归属标识 + 模板名，不出标签（2026-09 决策）。
     image_id: int | None = None
+    image_name: str | None = None
     machine_id: int | None = None
     machine_name: str | None = None
     machine_ip: str | None = None
@@ -300,9 +298,11 @@ class ContainerAccountEntry(_CompatBaseModel):
 class ContainerBriefInformation(_CompatBaseModel):
     container_id: int | None = None
     container_name: str | None = None
-    container_image: str | None = None
-    # 镜像模板归属（逻辑真源）；container_image 只是本次实跑制品的展示快照
+    # 镜像归属：出参只有归属标识 + 模板名（2026-09 决策）。标签不再对外——
+    # 它是 Node 侧的缓存键与 docker 制品名，不是平台的管理粒度。
+    # 名字由**服务端**解析（容器的可见性与模板的可见性不是同一套判据）。
     image_id: int | None = None
+    image_name: str | None = None
     # 容器创建时间（2026-09）：id 在 SQLite 删除后可复用，created_at 作新旧区分锚
     created_at: str | None = None
     machine_id: int | None = None
@@ -343,16 +343,18 @@ class ContainerBriefInformation(_CompatBaseModel):
 class ContainerDetailInformation(_CompatBaseModel):
     container_id: int | None = None
     container_name: str | None = None
-    container_image: str | None = None
-    # 镜像模板归属（逻辑真源）；container_image 只是本次实跑制品的展示快照
+    # 镜像归属：出参只有归属标识 + 模板名（2026-09 决策）。标签不再对外——
+    # 它是 Node 侧的缓存键与 docker 制品名，不是平台的管理粒度。
+    # 名字由**服务端**解析（容器的可见性与模板的可见性不是同一套判据）。
     image_id: int | None = None
+    image_name: str | None = None
     # 容器创建时间（2026-09）：id 在 SQLite 删除后可复用，created_at 作新旧区分锚
     created_at: str | None = None
     # 完整 Dockerfile：由**该容器自己的配方留痕**现场渲染（`base_image` + `dockerfile_body`
     # + 当下的平台注入）。无留痕的存量容器回落为当前模板渲染；无归属且无留痕则为 None。
     image_dockerfile: str | None = None
     # 该容器实际跑的启动命令（容器行留痕）。None = 平台默认（保持存活等 SSH）。
-    # 与 image_id / container_image 同一个口径：容器行记的是它自己那一份。
+    # 与 image_id 同一个口径：容器行记的是它自己那一份。
     entrypoint: str | None = None
     machine_id: int | None = None
     machine_ip: str | None = None

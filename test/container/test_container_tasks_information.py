@@ -353,7 +353,9 @@ def test_list_container_bref_disk_limit_derives_from_machine_max(monkeypatch, db
     assert item.disk_usage_percent == 50.0
     # 卡片镜像名：bref 直接携带（前端 Home 卡片只消费 bref，无 detail 兜底）。
     # 它是**推导**出来的（归属 + 版本戳），行上不存。
-    assert item.container_image is not None and item.container_image.startswith("fuxi/image-1:")
+    # 镜像那一栏现在是**归属 + 模板名**（标签不再对外，2026-09 决策）
+    assert item.image_id == 1
+    assert item.image_name == "Ubuntu 24.04 · 基础"
 
 
 def test_list_container_bref_derives_ssh_port_mapping_from_port(monkeypatch, db_session):
