@@ -96,6 +96,91 @@ def test_update_machine_sets_maintenance_switch(db_session):
     assert refreshed.machine_description == "new"
 
 
+def _update_machine_log_count(db_session, machine_id: int) -> int:
+    return db_session.query(OperationLog).filter_by(
+        operation="update_machine", target_id=machine_id
+    ).count()
+
+
+def test_update_machine_no_op_writes_no_audit_row(db_session):
+    """**值没变就不落任何痕迹**（2026-09 决策）。
+
+    链路在断线期间每 30s 重试一次拨号，每次都报同一个 OFFLINE。这些"什么都没发生"的记录
+    曾把 op-log 灌满（实测一次断网几百行），把真正的审计事件埋在下面。调用方要的是
+    "确保它是这个状态"，满足了就无须写库、无须记账。
+    """
+    machine = create_machine(machine_status=MachineStatus.OFFLINE)
+    db_session.commit()
+    baseline = _update_machine_log_count(db_session, machine.id)
+
+    for _ in range(3):
+        assert machine_tasks.Update_machine(
+            machine.id, machine_status=MachineStatus.OFFLINE
+        ) is True
+
+    db_session.expire_all()
+    assert _update_machine_log_count(db_session, machine.id) == baseline, \
+        "无变化的状态上报不该产生 op-log 行"
+    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.OFFLINE
+
+
+def test_update_machine_real_change_still_logs(db_session):
+    """真变化照记——去重去的是"什么都没发生"，不是审计本身。"""
+    machine = create_machine(machine_status=MachineStatus.OFFLINE)
+    db_session.commit()
+    baseline = _update_machine_log_count(db_session, machine.id)
+
+    assert machine_tasks.Update_machine(machine.id, machine_status=MachineStatus.ONLINE) is True
+
+    db_session.expire_all()
+    assert _update_machine_log_count(db_session, machine.id) == baseline + 1
+    assert db_session.get(Machine, machine.id).machine_status == MachineStatus.ONLINE
+
+
+def test_update_machine_no_op_still_reconciles_the_unavailable_window(db_session):
+    """无变化的调用**只是不记账**；写库与窗口对账一件不少。
+
+    去重的作用域**只有那条审计**——把一个"看起来什么都没发生"的上报整个早退，
+    等于把出窗结算一起省掉。
+
+    这两件事必须分开：窗口的开关与状态字段的值是两回事——**播种**会在状态早已是 ONLINE 的
+    情况下开出一个窗口（Ctrl 停机期间进窗的兜底），那个窗口只能靠下一次上报来闭合。
+    把无变化调用整个早退，窗口就永远合不上、顺延不计、清理提前触发。
+
+    这条守的正是那个坑：一个"看起来什么都没发生"的上报，实际承担着出窗结算。
+    """
+    from datetime import datetime, timedelta
+
+    from ...models.container_ssh_login import ContainerSSHLogin
+    from ...repositories import container_ssh_login_repo
+    from ..factories import create_container_graph
+
+    _root, machine, container = create_container_graph()
+    db_session.add(ContainerSSHLogin(
+        machine_id=machine.id, container_id=container.id,
+        last_ssh_login_time="2026-01-01T00:00:00", deferral_seconds=0,
+    ))
+    db_session.commit()
+
+    # 机器当前就是 ONLINE，但窗口是开着的（模拟播种开的窗）
+    opened_at = datetime.utcnow() - timedelta(hours=5)
+    with session_scope() as session:
+        session.get(Machine, machine.id).unavailable_since = opened_at
+        session.get(Machine, machine.id).machine_status = MachineStatus.ONLINE
+    db_session.commit()
+    baseline = _update_machine_log_count(db_session, machine.id)
+
+    assert machine_tasks.Update_machine(machine.id, machine_status=MachineStatus.ONLINE) is True
+
+    db_session.expire_all()
+    # ① 不记账
+    assert _update_machine_log_count(db_session, machine.id) == baseline
+    # ② 但窗口必须被闭合、顺延必须结算（约 5 小时）
+    assert db_session.get(Machine, machine.id).unavailable_since is None
+    rec = container_ssh_login_repo.get_by_machine_container(machine.id, container.id, session=db_session)
+    assert abs((rec.deferral_seconds or 0) - 5 * 3600) <= 5
+
+
 def test_update_machine_rejects_maintenance_as_machine_status(db_session):
     machine = create_machine(machine_status=MachineStatus.ONLINE)
 

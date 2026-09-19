@@ -14,7 +14,7 @@ from ...repositories import (
     usercontainer_repo,
 )
 from .. import settings_tasks
-from .utils import build_cleanup_info
+from .utils import build_cleanup_info, effective_grace_until
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,12 @@ def _get_container_freeze_state(container_id: int, *, ignore_errors: bool = Fals
         return {
             "is_frozen": True,
             "first_frozen_at": state.first_frozen_at.isoformat() if state.first_frozen_at else None,
-            "grace_until": state.grace_until.isoformat() if state.grace_until else None,
+            # 出参给的是**有效**到期时刻（含顺延）——与动作侧的判定口径一致，
+            # 否则界面显示的时间到了而系统不动，又是一条要解释的差异。
+            "grace_until": (
+                _effective.isoformat()
+                if (_effective := effective_grace_until(state)) else None
+            ),
             "days_frozen": (datetime.utcnow() - state.first_frozen_at).days if state.first_frozen_at else 0,
             "escalation_days": settings_tasks.get_container_disk_freeze_escalation_days(),
         }

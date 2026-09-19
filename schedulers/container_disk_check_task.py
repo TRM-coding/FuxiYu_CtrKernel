@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from ..extensions import session_scope
 from ..repositories import containers_repo
 from ..services import container_tasks, settings_tasks
+from ..services.container_module.utils import effective_grace_until
 from ..utils.mail import send as send_mail
 from ..services.machine_tasks import machine_in_scope
 
@@ -323,9 +324,12 @@ def _handle_hard_limit_with_escalation(container, usage: dict, cache: dict[str, 
         freeze_state = freeze_state_repo.upsert_first_frozen(container.id, session=session)
 
     # ── 宽限期检查 ──
-    if freeze_state.grace_until and datetime.utcnow() < freeze_state.grace_until:
+    # 到期时刻按"业务正常时间"计（宕机/维护那段不计入用户责任）——见 effective_grace_until。
+    # 不折算的话，宕机期间宽限照走、恢复后第一次检测就放行动作，而用户那段时间根本登不上去。
+    grace_until = effective_grace_until(freeze_state)
+    if grace_until and datetime.utcnow() < grace_until:
         logger.info("[disk-check] in grace period until %s, skip action for container %s (%s)",
-                    freeze_state.grace_until, container.id, getattr(container, 'name', '?'))
+                    grace_until, container.id, getattr(container, 'name', '?'))
         return
 
     # 宽限期已过期，清除
@@ -355,8 +359,9 @@ def _log_freeze_state_if_exists(container) -> None:
 
     days_frozen = _days_frozen(existing)
     grace_info = ""
-    if existing.grace_until:
-        if datetime.utcnow() < existing.grace_until:
+    existing_grace = effective_grace_until(existing)
+    if existing_grace:
+        if datetime.utcnow() < existing_grace:
             grace_info = ", grace active"
         else:
             grace_info = ", grace expired"

@@ -621,8 +621,22 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
     if 'is_maintenance' in fields:
         fields['is_maintenance'] = bool(fields['is_maintenance'])
 
+    # 比较前先归一：库里读回来是枚举（`MachineStatus.OFFLINE`），而管理 API 传进来的可能是
+    # 小写字符串（`"online"`）。**两边都要过同一个函数**——一边 str(枚举)、一边取 .value
+    # 的话永远不相等，去重就整个失效了（2026-09 实测踩过）。
+    def _field_value(value):
+        return value.value if hasattr(value, "value") else (None if value is None else str(value))
+
+    # 审计口径保持原样（`str(...)`，历史记录里一直是这个形状）；比较另用一份归一后的。
     before = {k: str(getattr(machine, k, None)) for k in fields.keys()}
-    # 状态类字段变化 → 同一事务内刷新不可用窗口（离线/维护进窗，恢复出窗顺延清理计时）
+    before_cmp = {k: _field_value(getattr(machine, k, None)) for k in fields.keys()}
+    changed = {k: v for k, v in fields.items() if before_cmp.get(k) != _field_value(v)}
+
+    # 状态类字段变化 → 同一事务内刷新不可用窗口（离线/维护进窗，恢复出窗顺延清理计时）。
+    # ⚠ 这里是**按"传没传这个字段"判断的，不能改成按"值变没变"**：窗口的开关与状态字段的
+    # 值是两回事——播种会在状态早已是 ONLINE 的情况下开出一个窗口（Ctrl 停机期间进窗的兜底），
+    # 那个窗口只能靠下一次上报来闭合。2026-09 实测：把无变化调用整个早退，窗口永远合不上、
+    # 顺延不计、清理提前触发，直接打破了 test_cleanup_deferral_window 那条端到端。
     state_changed = ("machine_status" in fields) or ("is_maintenance" in fields)
     try:
         with session_scope() as session:
@@ -634,6 +648,14 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
                      detail=_machine_log_detail(machine, before=before, after={k: str(v) for k, v in fields.items()}),
                      error_reason=getattr(e, 'error_reason', None) or str(e))
         raise
+    # **值没变就不写审计**（2026-09 决策）。链路在断线期间每 30s 重试一次拨号、每次都报同一个
+    # OFFLINE——这些"什么都没发生"的记录曾把 op-log 灌满（实测一次断网几百行，把真正的审计
+    # 事件埋在下面）。需要"证明它一直在报"的场景是 `last_seen_at` 的职责，不是 op-log。
+    #
+    # 去重**只作用于这条审计**：写库与窗口对账在上面照常跑完（它们各自有幂等语义，
+    # 该做的事一件不少）。曾经把整个函数在这里早退，代价是窗口再也合不上。
+    if not changed:
+        return True
     log_success(operator_user_id=operator_user_id, operation=OperationType.UPDATE_MACHINE, target_type="machine", target_id=machine_id,
                  detail=_machine_log_detail(machine, before=before, after={k: str(v) for k, v in fields.items()}))
     return True

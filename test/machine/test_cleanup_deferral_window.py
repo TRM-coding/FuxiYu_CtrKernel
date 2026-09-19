@@ -588,6 +588,40 @@ class TestDeferralAppliesToOtherDeadlines:
             _FreezeState(first_frozen_at=now - timedelta(days=5), deferral_seconds=None),
         ) == 5
 
+    def test_grace_deadline_is_shifted_by_deferral(self):
+        """**宽限到期时刻也要顺延**——它是第四条共用这把尺子的期限。
+
+        宽限存的是**绝对时刻**，不加顺延的话宕机期间照走；恢复后第一次磁盘检测就看到它
+        已过期，直接进动作分支，而用户在被宽恕的那段时间里根本登不上去处理磁盘。
+        """
+        from ...services.container_module.utils import effective_grace_until
+
+        frozen_at = datetime.utcnow() - timedelta(days=5)
+        state = _FreezeState(first_frozen_at=frozen_at, deferral_seconds=5 * 86400)
+        state.grace_until = frozen_at + timedelta(days=3)      # 宽限 3 天
+
+        effective = effective_grace_until(state)
+        assert effective == state.grace_until + timedelta(days=5)
+        # 场景：宕机 5 天，宽限 3 天 → 恢复那一刻**仍在宽限内**（旧的墙钟比法会判已过期）
+        assert datetime.utcnow() < effective
+
+    def test_grace_deadline_without_deferral_is_unchanged(self):
+        from ...services.container_module.utils import effective_grace_until
+
+        now = datetime.utcnow()
+        for deferral in (0, None):
+            state = _FreezeState(first_frozen_at=now, deferral_seconds=deferral)
+            state.grace_until = now + timedelta(days=3)
+            assert effective_grace_until(state) == state.grace_until
+
+    def test_grace_deadline_absent_reads_as_none(self):
+        from ...services.container_module.utils import effective_grace_until
+
+        now = datetime.utcnow()
+        state = _FreezeState(first_frozen_at=now, deferral_seconds=86400)
+        state.grace_until = None
+        assert effective_grace_until(state) is None
+
     def test_mount_cleanup_skips_deferred_snapshot(self, app, db_session):
         """保留期按业务正常时间计：自然日 20 天、其中顺延 15 天 → 未到期。"""
         _root, machine, container = create_container_graph()

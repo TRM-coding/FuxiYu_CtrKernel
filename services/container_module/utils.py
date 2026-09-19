@@ -196,6 +196,28 @@ def is_version_behind(image_version_at, template_updated_at) -> bool:
     return image_version_at < template_updated_at
 
 
+def effective_grace_until(freeze_state):
+    """磁盘冻结的**有效宽限到期时刻**：把已结算的不可用顺延平移进来。
+
+    宽限与另外三条期限（ssh 到期清理 / 挂载保留期 / 冻结升级）共用同一把尺子——
+    **宕机与维护那段不计入用户责任**。`_days_frozen` 平移的是"已经过了多久"，这里平移的
+    是"到什么时候为止"，两者等价。
+
+    没有这一步会怎样（2026-09 实测的缺口）：宽限是个**绝对时刻**，宕机期间照走；恢复后
+    第一次磁盘检测就看到它已过期，直接进动作分支——而用户在被宽恕的那段时间里根本登不上去
+    处理磁盘。另外三条都原谅了那段时间，只有它不原谅。
+
+    只折算**已结算**的累加器，不折算"正在进行的窗口"：动作只在机器可达且非维护时消费
+    （`machine_in_scope`），窗口开着时它压根轮不到，理由同 `_days_frozen`。
+    """
+    grace_until = getattr(freeze_state, "grace_until", None)
+    if grace_until is None:
+        return None
+    return grace_until + timedelta(
+        seconds=int(getattr(freeze_state, "deferral_seconds", 0) or 0)
+    )
+
+
 def container_dockerfile_parts(container):
     """读容器行上的配方留痕，补上当下的平台注入，凑成一份完整的渲染输入；没有留痕返回 None。
 
