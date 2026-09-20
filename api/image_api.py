@@ -62,6 +62,10 @@ def create_image_api(
             description=data.get("description"),
             base_image=data["base_image"],
             dockerfile_body=data.get("dockerfile_body") or "",
+            # entrypoint 是配方的第四段（渲染成最终 Dockerfile 的最后一行）。
+            # 此前这里漏了它：schema 收、service 存，但 create 这条路从不转发，
+            # 前端填了也被静默丢掉（2026-09 补）。
+            entrypoint=data.get("entrypoint"),
             status=data.get("status") or None,
             operator_user_id=operator_user_id,
         )

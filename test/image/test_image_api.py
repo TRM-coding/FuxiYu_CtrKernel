@@ -131,6 +131,55 @@ def test_update_and_delete_image(client, monkeypatch):
     assert delete_resp.status_code == 200
 
 
+def test_create_image_persists_entrypoint(client, monkeypatch):
+    """create 必须把 entrypoint 转发到 service。
+
+    回归锁：schema 收、service 存，但 create 端点一度漏了转发这一根线——
+    前端填了 entrypoint 会被**静默丢掉**，详情读回来还是空的（2026-09 实测）。
+    """
+    _auth(monkeypatch, user_id=7)
+
+    created = client.post(
+        "/api/images/create_image",
+        json={
+            "name": "jenkins",
+            "base_image": "jenkins/jenkins:2.516.2",
+            "dockerfile_body": "RUN echo hi\n",
+            "entrypoint": "jenkins.sh",
+        },
+    ).json()
+    detail = client.get(f"/api/images/get_image_detail_information?image_id={created['image_id']}").json()
+
+    assert detail["image"]["entrypoint"] == "jenkins.sh"
+
+
+def test_entrypoint_empty_string_clears_null_keeps(client, monkeypatch):
+    """空串 = 清除（回到平台默认）；null 到不了 service（update 走 exclude_none），值不变。
+
+    这是前端依赖的线上契约：清空功能只能靠发空串实现，发 null 等于什么都不改。
+    """
+    _auth(monkeypatch, user_id=7)
+    image_id = client.post(
+        "/api/images/create_image",
+        json={
+            "name": "entry-contract",
+            "base_image": "ubuntu:24.04",
+            "dockerfile_body": "",
+            "entrypoint": "my-entrypoint",
+        },
+    ).json()["image_id"]
+
+    def read_entrypoint():
+        resp = client.get(f"/api/images/get_image_detail_information?image_id={image_id}")
+        return resp.json()["image"]["entrypoint"]
+
+    client.post("/api/images/update_image", json={"image_id": image_id, "entrypoint": None})
+    assert read_entrypoint() == "my-entrypoint"
+
+    client.post("/api/images/update_image", json={"image_id": image_id, "entrypoint": ""})
+    assert read_entrypoint() is None
+
+
 def test_seed_image_defaults_idempotent(client, monkeypatch):
     """内置镜像 seed 幂等：重复调用不产生重复行，内容直存 DB 可读。"""
     _auth(monkeypatch, user_id=7)
