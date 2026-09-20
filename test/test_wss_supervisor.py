@@ -175,3 +175,53 @@ class _FakeLibc:
         if self.calls is not None:
             self.calls.append(args)
         return 0
+
+
+def test_pump_child_output_copies_lines_verbatim():
+    """链路子进程的输出**原样**进主日志：不改写、不筛选，stdout/stderr 保持行序。
+
+    回归锁：这里曾经是"两个进程各持一个 TimedRotatingFileHandler 写同一个 ctrl.log"——
+    谁先轮转就把公共文件改名，另一个进程的 fd 跟着 inode 走，于是访问日志从 ctrl.log
+    消失、文件名与内容还错位一天。输出必须只走这一条路（主进程唯一的 handler）。
+
+    子进程用 `flush=True`：走管道时 Python 的 stdout 是**块缓冲**，不刷就看不到（真实
+    链路进程的日志全在 stderr 上，行缓冲，不存在这个问题）。
+    """
+    import logging
+
+    from FuxiYu_CtrKernel.utils.logging_config import pump_child_output
+
+    captured = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            captured.append(record.getMessage())
+
+    logger = logging.getLogger("FuxiYu_CtrKernel.run.wss")
+    handler = _Capture()
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False  # 不惊动其它测试挂在 root 上的 handler
+    try:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import sys;"
+                "print('out-1', flush=True);"
+                "print('err-1', file=sys.stderr, flush=True);"
+                "print('out-2', flush=True)",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        pump_child_output(process)  # 读到 EOF 自然返回
+    finally:
+        logger.removeHandler(handler)
+        logger.propagate = True
+
+    assert captured == ["out-1", "err-1", "out-2"]

@@ -13,6 +13,7 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 from FuxiYu_CtrKernel.config import AppConfig
+from FuxiYu_CtrKernel.utils.logging_config import pump_child_output
 
 package_name = os.path.basename(pkg_dir)
 create_app = import_module(package_name).create_app
@@ -41,11 +42,28 @@ def _start_wss_receiver() -> subprocess.Popen | None:
     # （见 run_node_links._arm_parent_death_signal），手工启动不受影响。
     env["FUXI_CTRL_SUPERVISED"] = "1"
 
-    return subprocess.Popen(
+    process = subprocess.Popen(
         [sys.executable, "-m", "FuxiYu_CtrKernel.run_node_links"],
         cwd=pkg_dir,
         env=env,
+        # 子进程不再自己开文件日志：它发 `级别 + 消息`，输出逐行搬进本进程的 logger、由本进程
+        # 唯一的 handler 补上时间戳与模块名落地（见 pump_child_output）。stderr 并进同一条
+        # 管道，行序不乱。
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
     )
+    # 守护线程：必须一直读到 EOF——管道写满会把子进程卡在写日志上
+    threading.Thread(
+        target=pump_child_output,
+        kwargs={"process": process},
+        name="wss-log-pump",
+        daemon=True,
+    ).start()
+    return process
 
 
 def _stop_process(process: subprocess.Popen | None) -> None:
