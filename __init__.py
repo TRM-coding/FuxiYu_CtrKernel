@@ -69,6 +69,16 @@ def _init_database() -> None:
         import logging
 
         logging.getLogger(__name__).warning("system settings seed skipped: %s", e)
+    # 公告发送跑在进程内的后台线程里：进程重启会让那条线程凭空消失，公告永远停在
+    # SENDING，而 announcement_still_sending 守卫会让它永久无法重发。启动时收尾成 FAILED。
+    try:
+        from .services.announcement_tasks import settle_stuck_sending_announcements
+
+        settle_stuck_sending_announcements()
+    except Exception as e:
+        import logging
+
+        logging.getLogger(__name__).warning("announcement settle skipped: %s", e)
 
 
 def _ensure_image_template_schema() -> None:

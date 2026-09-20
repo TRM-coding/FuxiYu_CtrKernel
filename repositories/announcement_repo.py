@@ -75,6 +75,22 @@ def list_announcements(
     return rows, total
 
 
+def list_announcements_by_ids(announcement_ids: list[int], *, session: Session) -> list[Announcement]:
+    """按 id 取公告（批量发送的进度轮询用：只认自己那一批，不扫列表）。"""
+
+    if not announcement_ids:
+        return []
+    return list(
+        session.scalars(select(Announcement).where(Announcement.id.in_(announcement_ids))).all()
+    )
+
+
+def list_announcements_by_status(status: AnnouncementStatus, *, session: Session) -> list[Announcement]:
+    """按状态取全部公告（启动期收尾遗留的 SENDING 用）。"""
+
+    return list(session.scalars(select(Announcement).where(Announcement.status == status)).all())
+
+
 def count_announcements_by_status(status: AnnouncementStatus, *, session: Session) -> int:
     return int(
         session.scalar(

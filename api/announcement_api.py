@@ -253,6 +253,43 @@ def list_announcements_api(
     }
 
 
+def _announcement_progress_view(announcement) -> dict[str, Any]:
+    """进度轮询专用的**轻量**出参：不带正文/目标快照。
+
+    每 3 秒拉一次的东西别把公告正文也带上——那是几十 KB 的无用负载。
+    """
+    return {
+        "id": announcement.id,
+        "status": announcement.status.value if hasattr(announcement.status, "value") else announcement.status,
+        "success_count": announcement.success_count,
+        "fail_count": announcement.fail_count,
+        "recipient_count": announcement.recipient_count,
+        "source_draft_id": announcement.source_draft_id,
+    }
+
+
+@router.get("/status")
+def announcements_status_api(
+    request: Request,
+    ids: str = Query(default="", description="逗号分隔的公告 id"),
+    _: int = Depends(require_operator),
+):
+    """按 id 查公告进度（批量发送/重发的前端轮询用）。
+
+    比拉列表稳：只认自己那一批，不受分页/别人新发的公告影响，也不会顺带把正文拖下来。
+    """
+
+    try:
+        announcement_ids = [int(x) for x in ids.split(",") if x.strip()]
+    except ValueError:
+        return _error(400, "invalid ids", "invalid_ids")
+
+    with session_scope(commit=False) as session:
+        rows = announcement_repo.list_announcements_by_ids(announcement_ids, session=session)
+
+    return {"success": 1, "announcements": [_announcement_progress_view(row) for row in rows]}
+
+
 @router.get("/{announcement_id:int}")
 def get_announcement_api(
     request: Request,
@@ -276,16 +313,20 @@ def resend_announcement_api(
     announcement_id: int,
     operator_user_id: int = Depends(require_operator),
 ):
-    """重新发送公告。"""
+    """重新发送公告（异步：受理即返回，前端轮询该公告的状态看进度）。"""
 
     try:
-        result = announcement_tasks.resend_announcement_service(announcement_id, operator_user_id=operator_user_id)
+        # 异步的理由同批量发送：一次重发也是一批邮件（逐封 0.8s），而且还要排同一个
+        # 发送槽位——同步跑的话等待冷却会直接压在请求上，前端照样超时（2026-09）。
+        announcement_id_out = announcement_tasks.start_resend_service(
+            announcement_id, operator_user_id=operator_user_id
+        )
     except ValueError as e:
         reason = str(e)
         if reason == "announcement_still_sending":
             return _error(409, reason, reason)
         return _error(404, reason, reason)
-    return {"success": 1, **_model_data(result)}
+    return {"success": 1, "announcement_id": announcement_id_out}
 
 
 @router.post("/{announcement_id:int}/copy-as-draft")
@@ -456,13 +497,20 @@ async def batch_send_drafts_api(
     targets = [announcement_tasks.TargetEntry(**target) for target in raw_targets]
 
     try:
-        result = announcement_tasks.batch_send_drafts_service(draft_ids, targets, operator_user_id=operator_user_id)
+        # 异步：只做校验与"建 SENDING 公告"，发信在后台线程顺序跑（分钟级）。
+        # 前端拿 announcement_ids 去轮询公告状态看进度（2026-09 决策）。
+        result = announcement_tasks.start_batch_send_service(
+            draft_ids, targets, operator_user_id=operator_user_id
+        )
     except ValueError as e:
+        # 注意：冷却**不在这里拒绝**——发送槽位是投递层排队的（见 announcement_tasks._send_gate），
+        # 请求永远立刻受理，排队发生在后台线程里（2026-09 用户澄清）。
         reason = str(e)
         status_map = {
             "empty_targets": 400,
             "too_many_recipients": 400,
             "batch_too_large": 400,
+            "draft_not_found": 404,
         }
         return _error(status_map.get(reason, 400), reason, reason)
 

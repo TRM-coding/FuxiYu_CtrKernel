@@ -23,6 +23,41 @@ from ..mocks import mock_operator_token
 
 # ── 辅助函数 ──────────────────────────────────────────────────────────
 
+def _patch_thread_inline(monkeypatch):
+    """把批量发送的后台线程换成"start() 就地执行"。
+
+    异步之后 POST 返回时信还没发（2026-09），要断言审计与终态就得让线程同步跑完。
+    **测试库是 StaticPool 的单条 SQLite 连接**，真起线程会和测试会话抢同一条连接；
+    就地执行同时也避开了这个。
+    """
+    import FuxiYu_CtrKernel.services.announcement_tasks as task_module
+
+    class _InlineThread:
+        def __init__(self, target=None, args=(), kwargs=None, **ignored):
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self):
+            self._target(*self._args, **self._kwargs)
+
+    monkeypatch.setattr(task_module.threading, "Thread", _InlineThread)
+
+
+def _patch_thread_noop(monkeypatch):
+    """把后台线程换成"什么都不做"：用来锁"发起即返回"的受理语义。"""
+    import FuxiYu_CtrKernel.services.announcement_tasks as task_module
+
+    class _NoopThread:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(task_module.threading, "Thread", _NoopThread)
+
+
 def _operator_headers():
     return {"token": "test-operator-token"}
 
@@ -242,6 +277,30 @@ def test_a16_list_announcements_filtered(client, monkeypatch):
     assert payload["total"] == 2
 
 
+def test_a16b_announcements_status_by_ids(client, monkeypatch):
+    """A-16b: 按 id 查进度 —— 只回自己那一批，且**不带正文**。
+
+    批量发送/重发改成异步之后，前端每 3 秒轮询一次看进度。按 id 定位才稳：不受分页
+    影响、不怕别人新发的公告挤进列表；出参也必须轻量（别每 3 秒把公告正文拖一遍）。
+    """
+    mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
+    user = _make_operator()
+    mine = _make_announcement(user, status=AnnouncementStatus.SENDING, content="很长的正文" * 50)
+    other = _make_announcement(user, status=AnnouncementStatus.SENT)
+
+    resp = client.get(
+        f"/api/announcements/status?ids={mine.id}", headers=_operator_headers()
+    )
+    payload = assert_json_success(resp)
+
+    ids = [a["id"] for a in payload["announcements"]]
+    assert ids == [mine.id], "只回请求里那一批，别人的公告不该混进来"
+    row = payload["announcements"][0]
+    assert row["status"] == "sending"
+    assert row["source_draft_id"] == mine.source_draft_id, "前端靠它对回草稿"
+    assert "content" not in row and "target_snapshot" not in row, "轮询出参要轻"
+
+
 def test_a17_get_announcement_detail(client, monkeypatch):
     """A-17: 详情 → 200。"""
     mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
@@ -404,7 +463,12 @@ def test_a29_delete_draft_not_found(client, monkeypatch):
 
 
 def test_a30_batch_send(client, monkeypatch, db_session):
-    """A-30: draft_ids + targets → 200 + N results。"""
+    """A-30: draft_ids + targets → 受理回执（total + announcement_ids），发信在后台线程。
+
+    异步语义（2026-09）：POST 回来时**还没发信**。这里把线程换成就地执行，
+    以便断言审计与终态；"发起即返回"的形状由 a30b 单独锁。
+    """
+    _patch_thread_inline(monkeypatch)
     mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
     user = _make_operator()
     d1 = _make_draft(user, title="d1")
@@ -420,11 +484,40 @@ def test_a30_batch_send(client, monkeypatch, db_session):
     )
     payload = assert_json_success(resp)
     assert payload["total"] == 2
-    assert len(payload["results"]) == 2
+    assert len(payload["announcement_ids"]) == 2
     logs = db_session.scalars(select(OperationLog).where(OperationLog.operation == "send_mail")).all()
     assert len(logs) == 2
     assert all(log.operator_user_id == 1 for log in logs)
     assert {log.detail["name"] for log in logs} == {"d1", "d2"}
+
+
+def test_a30b_batch_send_returns_accepted_without_waiting(client, monkeypatch, db_session):
+    """A-30b: 发起即返回 —— 返回时公告还是 SENDING，信还没发。
+
+    这条锁的是异步本身：此前批量发送是同步跑完（分钟级），任何前端超时都会先松手，
+    用户看到"失败"而信其实发出去了（2026-09 用户反馈）。
+    """
+    _patch_thread_noop(monkeypatch)
+    mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
+    user = _make_operator()
+    draft = _make_draft(user, title="d1")
+
+    resp = client.post(
+        "/api/announcements/drafts/batch-send",
+        headers=_operator_headers(),
+        json={"draft_ids": [draft.id], "targets": [{"type": "user", "id": user.id}]},
+    )
+    payload = assert_json_success(resp)
+
+    assert payload["total"] == 1
+    assert len(payload["announcement_ids"]) == 1
+    announcement = announcement_repo.get_announcement_by_id(
+        payload["announcement_ids"][0], session=db_session
+    )
+    assert announcement.status == AnnouncementStatus.SENDING, "线程还没跑，公告应当停在 SENDING"
+    assert announcement.source_draft_id == draft.id, "前端靠它把结果对回草稿"
+    logs = db_session.scalars(select(OperationLog).where(OperationLog.operation == "send_mail")).all()
+    assert logs == [], "返回时不该已经发过信"
 
 
 def test_a31_batch_send_empty_targets(client, monkeypatch):
@@ -454,7 +547,12 @@ def test_a32_batch_send_too_many_recipients(client, monkeypatch):
 
 
 def test_a33_batch_send_nonexistent_draft(client, monkeypatch):
-    """A-33: draft_ids 含不存在 id → 200, 该条 error。"""
+    """A-33: draft_ids 含不存在 id → 404（**改**：不再"200 + 该条 error"）。
+
+    异步之后校验必须在同步段做完：坏草稿不能先建一堆 SENDING 公告、再丢进线程里
+    悄无声息地失败——那样前端只会看到一堆永远"发送中"的空公告。
+    """
+    _patch_thread_noop(monkeypatch)
     mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
     user = _make_operator()
     d1 = _make_draft(user)
@@ -467,11 +565,14 @@ def test_a33_batch_send_nonexistent_draft(client, monkeypatch):
             "targets": [{"type": "user", "id": user.id}],
         },
     )
-    payload = assert_json_success(resp)
-    assert payload["total"] == 2
-    statuses = [r["status"] for r in payload["results"]]
-    assert "sent" in statuses
-    assert "error" in statuses
+    assert_json_error(resp, 404, "draft_not_found")
+
+    # 好草稿也不能被"半途建出来"：校验先于任何写库
+    with session_scope(commit=False) as session:
+        stuck = announcement_repo.list_announcements_by_status(
+            AnnouncementStatus.SENDING, session=session
+        )
+    assert stuck == [], "校验失败时不该留下 SENDING 公告"
 
 
 def test_a34_batch_send_too_large(client, monkeypatch):

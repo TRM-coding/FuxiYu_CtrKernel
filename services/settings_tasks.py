@@ -204,12 +204,15 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         min_value=1,
     ),
     SettingDefinition(
-        key="announcement.send_cooldown_seconds",
-        label="发送冷却时间",
+        key="announcement.mail_interval_seconds",
+        label="逐封发送间隔",
         group="公告",
         value_type="integer",
-        default=60,
-        description="公告重复发送之间的冷却时间。",
+        default=2,
+        description=(
+            "同一批邮件里，两封之间的间隔。这是给邮件服务商风控看的节流，"
+            "调低要谨慎（QQ 等会限速甚至封禁）。"
+        ),
         unit="秒",
         min_value=0,
     ),
@@ -240,6 +243,9 @@ DEPRECATED_SETTING_KEYS = (
     "node.parallel_enabled_machines",
     "node.parallel_enabled_containers",
     "node.parallel_enabled_ssh_refresh",
+    # 公告之间的冷却已取消（2026-09 决策）：真正有意义的是**逐封**间隔（服务商风控），
+    # 而"公告之间"只是让人白等——所以它被 announcement.mail_interval_seconds 取代。
+    "announcement.send_cooldown_seconds",
 )
 
 
@@ -578,8 +584,10 @@ def get_announcement_max_recipients() -> int:
     return get_int_setting("announcement.max_recipients", 200)
 
 
-def get_announcement_send_cooldown_seconds() -> int:
-    return get_int_setting("announcement.send_cooldown_seconds", 60)
+def get_announcement_mail_interval_seconds() -> int:
+    """逐封发送间隔（秒）。发信闸门之外唯一该有的节流——公告之间不再有冷却（2026-09 决策）。"""
+
+    return get_int_setting("announcement.mail_interval_seconds", 2)
 
 
 def get_announcement_batch_send_max() -> int:

@@ -265,10 +265,16 @@ def _send_smtp(
         return {"ok": False, "error": str(exc), "to": recipients, "error_detail": detail}
 
 
+# 逐封间隔的默认值（秒）。调用方一般按业务设置传进来；这里兜底是为了别让旧调用方
+# 变成"全速发"——服务商限速踩一次就够难受的。
+DEFAULT_BATCH_INTERVAL_SECONDS = 2.0
+
+
 def _send_batch_smtp(
     messages: list[dict],
     *,
     config: MailConfig | None = None,
+    interval_seconds: float = DEFAULT_BATCH_INTERVAL_SECONDS,
 ) -> list[dict]:
     """批量发送邮件，复用单个 SMTP 连接。
 
@@ -340,8 +346,10 @@ def _send_batch_smtp(
                 continue
 
             try:
-                if i > 0:
-                    time.sleep(0.8)  # 同一连接内间隔，避免被服务商限速
+                # 逐封间隔（服务商风控真正在意的东西）：调用方按业务传，默认 2s。
+                # 这条**不能**因为"改成异步了"就放松——异步只是让等待不占请求线程。
+                if i > 0 and interval_seconds > 0:
+                    time.sleep(interval_seconds)
                 smtp.send_message(msg, from_addr=cfg.sender, to_addrs=all_recips)
                 logger.info("[mail] %s → ok", recips)
                 results[i] = {"ok": True, "to": recips}
@@ -468,13 +476,20 @@ def send_batch(
     operator_user_id: int | None = None,
     detail: dict | None = None,
     config=None,
+    interval_seconds: float | None = None,
 ) -> list[dict]:
     """Reuse the connection; audit nonempty success/failure groups separately.
 
     Per-message results are returned unchanged for the caller's business counts.
+
+    interval_seconds：同一连接内**逐封**之间的间隔（秒）。None 用默认值；业务层应当
+    从设置里读出来传进来（见 services/announcement_tasks）。
     """
     try:
-        results = _send_batch_smtp(messages, config=config)
+        kwargs = {"config": config}
+        if interval_seconds is not None:
+            kwargs["interval_seconds"] = interval_seconds
+        results = _send_batch_smtp(messages, **kwargs)
     except Exception as exc:
         results = [_failed_result(exc, message.get("to")) for message in messages]
     _audit_batch_results(messages, results, operation=operation, target_type=target_type,
