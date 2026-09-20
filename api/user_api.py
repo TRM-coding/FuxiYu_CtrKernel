@@ -189,10 +189,24 @@ def my_permissions_api(
     request: Request,
     user_id: int = Depends(require_current_user),
 ):
-    """当前用户持有的全部权限点（前端导航/按钮按 manage 过滤）。"""
+    """当前用户的**身份 + 权限点**（前端唯一的一次"我是谁/我能看什么"）。
+
+    身份（user_id/username）必须由这里一起给出：cookie 是 HttpOnly，前端读不到它，
+    所以"我是谁"只能从响应体来。此前前端把这两个值存在 localStorage 里当登录标记，
+    于是和服务端的真相各说各话——这正是 401 处理要"清本地 + 硬重载"、登录页又会
+    凭本地标记把人推进去的根源（2026-09 修）。
+    """
 
     from ..services.rbac_service import list_user_entities
-    return {"success": 1, "entities": list_user_entities(user_id)}
+
+    with session_scope(commit=False) as session:
+        user = user_repo.get_by_id(int(user_id), session=session)
+    return {
+        "success": 1,
+        "entities": list_user_entities(user_id),
+        "user_id": int(user_id),
+        "username": (user.username if user is not None else "") or "",
+    }
 
 
 @router.get("/users/list_all_user_bref_information", response_model=ListUserBriefResponse)

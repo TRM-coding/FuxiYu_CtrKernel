@@ -232,6 +232,24 @@ def test_my_permissions_returns_user_group_entities(client, monkeypatch):
     assert "bypass_auth_entity" not in entities
 
 
+def test_my_permissions_also_carries_identity(client, monkeypatch):
+    """响应必须同时给出身份（user_id / username）。
+
+    cookie 是 HttpOnly，前端读不到它——"我是谁"只能从响应体来。此前前端把身份存在
+    localStorage 里当登录标记，于是和服务端各说各话：401 时要清本地（清不掉 cookie）
+    再硬重载，登录页又凭本地标记把人推进去（2026-09 修）。这条锁住"一次请求交付
+    认证信号 + 授权数据 + 身份"这条正统路径。
+    """
+    _valid_token(monkeypatch)
+
+    resp = client.get("/api/users/me/permissions")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["user_id"] == 1
+    assert body["username"] == "auth_user_1"
+
+
 def test_my_permissions_operator_returns_all(client, monkeypatch):
     """me/permissions:operator 组用户返回全部权限点(通配)。"""
     _valid_token(monkeypatch)
