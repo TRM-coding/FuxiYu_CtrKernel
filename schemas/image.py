@@ -9,6 +9,10 @@ from .common import SuccessMessageResponse
 
 ImageStatus = Literal["draft", "ready", "disabled"]
 
+# 可见范围三态。**唯一**决定可见性的东西（见 constant.ImageValidRange）：
+# private = 只有创建者；everyone = 所有用户；custom = user_images 授权名单里的人。
+ImageValidRange = Literal["private", "everyone", "custom"]
+
 
 #####################
 # 镜像文件
@@ -73,6 +77,29 @@ class DeleteImageResponse(SuccessMessageResponse):
 
 
 #####################
+# 可见范围
+
+
+class SetImageValidRangeRequest(BaseModel):
+    image_id: int = Field(..., ge=1)
+    valid_range: ImageValidRange
+
+
+class SetImageValidRangeResponse(SuccessMessageResponse):
+    pass
+
+
+class SetImageVisibleUsersRequest(BaseModel):
+    image_id: int = Field(..., ge=1)
+    # 整组替换（set 语义）：传 [] 即清空名单。仅在 valid_range=custom 时可调用。
+    user_ids: list[int] = Field(default_factory=list)
+
+
+class SetImageVisibleUsersResponse(SuccessMessageResponse):
+    user_ids: list[int] = Field(default_factory=list)
+
+
+#####################
 # 查询镜像
 
 
@@ -85,12 +112,15 @@ class ImageDetail(BaseModel):
     name: str
     description: str | None = None
     status: ImageStatus
+    valid_range: ImageValidRange
     base_image: str | None = None
     dockerfile_body: str | None = None
     entrypoint: str | None = None
     created_by_user_id: int | None = None
     created_at: str | None = None
     updated_at: str | None = None
+    # 仅 custom 态返回（其它态名单存着但不生效，回显会画出与现实不符的勾选）
+    visible_user_ids: list[int] | None = None
 
 
 class ImageDetailResponse(BaseModel):
@@ -104,6 +134,7 @@ class ImageBriefItem(BaseModel):
     description: str | None = None
     base_image: str | None = None
     status: ImageStatus
+    valid_range: ImageValidRange
     created_by_user_id: int | None = None
     updated_at: str | None = None
 

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from ..constant import ImageStatus
+from ..constant import ImageStatus, ImageValidRange
 from ..extensions import db
 
 
@@ -34,6 +34,18 @@ class Image(db.Model):
     # 它**不参与构建**：不进 tag、不进 Dockerfile、不影响"落后"判定。它是运行期参数，
     # 所以刻意不做成 DockerfileParts 的第四个字段。
     entrypoint: str | None = db.Column(db.String(255), nullable=True)
+    # 可见范围：**唯一**决定可见性的字段（2026-09 决策）。此前"全员可见"是由
+    # created_by_user_id IS NULL 派生的隐式规则，已退役——判定规则与 SQL 谓词都只有一处
+    # （repositories/image_repo.py 的 image_is_visible_to / image_visibility_condition）。
+    #
+    # 默认 CUSTOM 而不是 PRIVATE：旧库里用户建的模板就是"创建者自带一行授权、别人看不见"，
+    # CUSTOM 让新建模板与存量模板语义逐字一致；且非 CUSTOM 态下名单接口是拒绝的，
+    # 默认 PRIVATE 会把"创建后加授权"变成两个动作。
+    valid_range: ImageValidRange = db.Column(
+        db.Enum(ImageValidRange, values_callable=lambda obj: [e.value for e in obj]),
+        nullable=False,
+        default=ImageValidRange.CUSTOM,
+    )
     status: ImageStatus = db.Column(
         db.Enum(ImageStatus, values_callable=lambda obj: [e.value for e in obj]),
         nullable=False,

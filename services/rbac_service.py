@@ -319,11 +319,13 @@ def _has_resource_manage_direct(user_id: int, resource_type: str) -> bool:
 def user_has_resource(user_id: int, resource_type: str, resource_id: int) -> bool:
     """用户对指定资源是否有访问权（含 operator 过渡兼容）。
 
-    *resource_type*: machine / container / container:<role> / image / user
+    *resource_type*: machine / container / container:<role> / image / image:owner / user
     - container              → 任意绑定（可见性）
     - container:root         → 角色 ≥ ROOT（仅 ROOT）
     - container:admin        → 角色 ≥ ADMIN（ROOT/ADMIN）
     - container:collaborator → 角色 ≥ COLLABORATOR（任意绑定者）
+    - image                  → 可见集（三态枚举，与镜像列表同一口径）
+    - image:owner            → 仅**自己建的**（编辑与两个可见性入口走这条）
     （角色层级 ROOT > ADMIN > COLLABORATOR，高角色满足低角色要求；operator 特权由 deps 显式表达）
     """
     try:
@@ -355,9 +357,23 @@ def user_has_resource(user_id: int, resource_type: str, resource_id: int) -> boo
             # 角色层级：ROOT > ADMIN > COLLABORATOR，高角色满足低角色要求（向上兼容）
             rank = {"ROOT": 3, "ADMIN": 2, "COLLABORATOR": 1}
             return rank.get(role_val, 0) >= rank.get(role_filter, 0)
-        if resource_type == "image":
+        if resource_type == "image" or resource_type == "image:owner":
+            # image        → **可见集**（三态枚举，与列表谓词同一条规则）：详情用
+            # image:owner  → **仅自己建的**：编辑与两个可见性入口用
+            # 两条口径的来源都是 created_by_user_id + valid_range + user_images，规则本体在
+            # image_repo.image_is_visible_to —— 这里不重写一遍，免得又出现第二个判据点。
+            from ..repositories import image_repo
+
             with session_scope(commit=False) as session:
-                return auth_repo.user_has_image(user_id, resource_id, session=session)
+                image = image_repo.get_by_id(resource_id, session=session)
+                if image is None:
+                    return False
+                if resource_type == "image:owner":
+                    return user_id is not None and image.created_by_user_id == user_id
+                granted = auth_repo.user_has_image(user_id, resource_id, session=session)
+                return image_repo.image_is_visible_to(
+                    image, viewer_user_id=user_id, granted=granted
+                )
         if resource_type == "user":
             # 用户资源：自己是天然 owner，或被授权管理（教师/助教 → 学生）
             if user_id == resource_id:

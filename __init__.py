@@ -106,6 +106,9 @@ def _ensure_image_template_schema() -> None:
         "created_at": "ALTER TABLE images ADD COLUMN created_at DATETIME NULL",
         "updated_at": "ALTER TABLE images ADD COLUMN updated_at DATETIME NULL",
         "entrypoint": "ALTER TABLE images ADD COLUMN entrypoint VARCHAR(255) NULL",
+        "valid_range": (
+            "ALTER TABLE images ADD COLUMN valid_range VARCHAR(16) NOT NULL DEFAULT 'custom'"
+        ),
     }
     required_mysql = {
         "base_image": "ALTER TABLE images ADD COLUMN base_image VARCHAR(255) NOT NULL DEFAULT 'ubuntu:24.04'",
@@ -115,6 +118,10 @@ def _ensure_image_template_schema() -> None:
         "created_at": "ALTER TABLE images ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
         "updated_at": "ALTER TABLE images ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
         "entrypoint": "ALTER TABLE images ADD COLUMN entrypoint VARCHAR(255) NULL",
+        "valid_range": (
+            "ALTER TABLE images ADD COLUMN valid_range "
+            "ENUM('private', 'everyone', 'custom') NOT NULL DEFAULT 'custom'"
+        ),
     }
     required = required_sqlite if current_engine.dialect.name == "sqlite" else required_mysql
 
@@ -147,6 +154,16 @@ def _ensure_image_template_schema() -> None:
     with current_engine.begin() as conn:
         for name in missing:
             conn.execute(text(required[name]))
+        # 列**刚建出来**这一刻做一次存量回填（可一不可再）：旧语义里"全员可见"是由
+        # created_by_user_id IS NULL 派生的，新语义只看 valid_range——不补这一步，系统内置
+        # 模板会从所有人眼前消失。
+        #
+        # ★ 以"列刚被加出来"为闸门，天然只生效一次：脱离这个条件，它会在每次启动把管理员
+        #   **故意**设成 custom 的系统模板翻回 everyone。
+        if "valid_range" in missing:
+            conn.execute(text(
+                "UPDATE images SET valid_range = 'everyone' WHERE created_by_user_id IS NULL"
+            ))
     logging.getLogger(__name__).warning("image schema upgraded: added columns %s", ", ".join(missing))
 
 

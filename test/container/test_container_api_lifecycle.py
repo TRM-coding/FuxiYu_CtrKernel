@@ -1,7 +1,7 @@
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timezone
 
-from ...constant import ImageStatus, MachineStatus
+from ...constant import ImageStatus, ImageValidRange, MachineStatus
 from ...extensions import SessionRegistry
 from ...api import container_api, deps
 from ...models.image import Image
@@ -227,6 +227,8 @@ def test_create_container_with_system_image_does_not_require_user_image_binding(
         dockerfile_body="",
         status=ImageStatus.READY,
         created_by_user_id=None,
+        # 全员可见现在**只看这一列**：created_by IS NULL 自 2026-09 起不再派生"公开"
+        valid_range=ImageValidRange.EVERYONE,
     )
     SessionRegistry.add(image)
     SessionRegistry.commit()

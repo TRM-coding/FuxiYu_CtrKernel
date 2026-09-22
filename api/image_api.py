@@ -13,6 +13,10 @@ from ..schemas.image import (
     DeleteImageResponse,
     ImageDetailResponse,
     ListImageBriefResponse,
+    SetImageValidRangeRequest,
+    SetImageValidRangeResponse,
+    SetImageVisibleUsersRequest,
+    SetImageVisibleUsersResponse,
     UpdateImageRequest,
     UpdateImageResponse,
 )
@@ -86,7 +90,9 @@ def create_image_api(
 def update_image_api(
     message: UpdateImageRequest,
     operator_user_id: int = Depends(require_permission("image:edit")),
-    _: int = Depends(require_resource("image", "image_id")),
+    # **归属闸**：编辑（含改 Dockerfile）只能动自己建的模板。资源通配者（image:manage）
+    # 照旧放行——通配判定在 user_has_resource 的第 0 步，不看这里用的是哪条口径。
+    _: int = Depends(require_resource("image:owner", "image_id")),
 ):
     """更新镜像模板。"""
 
@@ -126,13 +132,70 @@ def delete_image_api(
 
 
 #####################
+# 可见范围（两个入口：三态开关 + CUSTOM 名单）
+
+
+@router.post("/set_image_valid_range", response_model=SetImageValidRangeResponse)
+def set_image_valid_range_api(
+    message: SetImageValidRangeRequest,
+    operator_user_id: int = Depends(require_permission("image:edit")),
+    _: int = Depends(require_resource("image:owner", "image_id")),
+):
+    """设置可见范围三态：private（只有自己）/ everyone（所有人）/ custom（名单）。"""
+
+    try:
+        ok = image_service.Set_image_valid_range(
+            image_id=message.image_id,
+            valid_range=message.valid_range,
+            operator_user_id=operator_user_id,
+        )
+    except Exception as exc:
+        reason = getattr(exc, "error_reason", None)
+        return _error(400 if reason else 500, str(exc), reason or "set_valid_range_failed")
+    if not ok:
+        return _error(404, "image not found", "image_not_found")
+    return {"success": 1, "message": "Image valid range updated"}
+
+
+@router.post("/set_image_visible_users", response_model=SetImageVisibleUsersResponse)
+def set_image_visible_users_api(
+    message: SetImageVisibleUsersRequest,
+    operator_user_id: int = Depends(require_permission("image:edit")),
+    _: int = Depends(require_resource("image:owner", "image_id")),
+):
+    """整组替换 CUSTOM 名单（set 语义，传 [] 即清空）。
+
+    ★ 仅在 valid_range=custom 时可调用：非 custom 态一律 400（not_custom_range）。
+      名单生不生效由 valid_range 决定，允许在别的态下改名单，等于让人改一个看不到效果的
+      东西——用户会以为"我加了人怎么还是所有人可见"。前端在非 custom 态不提供这个能力，
+      这里是 API 直调的兜底。
+    """
+
+    try:
+        settled = image_service.Set_image_visible_users(
+            image_id=message.image_id,
+            user_ids=message.user_ids,
+            operator_user_id=operator_user_id,
+        )
+    except Exception as exc:
+        reason = getattr(exc, "error_reason", None)
+        return _error(400 if reason else 500, str(exc), reason or "set_visible_users_failed")
+    if settled is None:
+        return _error(404, "image not found", "image_not_found")
+    return {"success": 1, "message": "Image visible users updated", "user_ids": settled}
+
+
+#####################
 # 查询镜像
 
 
 @router.get("/get_image_detail_information", response_model=ImageDetailResponse)
 def get_image_detail_information_api(
     image_id: int = Query(..., ge=1),
-    _: int = Depends(require_permission("image:view")),
+    # ★ 详情要 **image:edit** 而不是 image:view（2026-09 决策）：这一层是"读完整 Dockerfile"
+    #   的能力闸，而 image:edit 默认只在运维组里——反批量抓取 Dockerfile 的防线就落在这里，
+    #   不在资源层（资源层管的是"哪些模板"，见 require_resource 那条）。
+    _: int = Depends(require_permission("image:edit")),
     __: int = Depends(require_resource("image", "image_id")),
 ):
     """查询镜像模板详情，包含基础镜像与业务 Dockerfile 片段。"""

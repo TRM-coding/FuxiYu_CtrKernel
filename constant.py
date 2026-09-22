@@ -38,6 +38,22 @@ class ImageStatus(Enum):
     DISABLED = "disabled"
 
 
+class ImageValidRange(Enum):
+    """镜像模板的可见范围——**唯一**决定"谁能看见这个模板"的东西（2026-09 决策）。
+
+    ★ `created_by_user_id IS NULL` 曾**派生**出"全员可见"（系统内置镜像）。那条隐式规则
+      已退役：可见性只看本列，其它字段一律不再参与。存量行由迁移按旧语义回填——
+      系统内置 → EVERYONE，用户建的 → CUSTOM（保住当时的授权名单）。
+
+    - PRIVATE  ：只有创建者
+    - EVERYONE ：所有用户
+    - CUSTOM   ：user_images 授权名单里的人（创建者另算，见 image_repo.image_is_visible_to）
+    """
+    PRIVATE = "private"
+    EVERYONE = "everyone"
+    CUSTOM = "custom"
+
+
 
 class ROLE(Enum):
     ADMIN="ADMIN"
@@ -96,6 +112,10 @@ class OperationType(str, Enum):
     UPDATE_RBAC_GROUP_ENTITIES = "update_group_entities"
     UPDATE_USER_GROUPS = "update_user_groups"
     # 镜像
+    # 可见性变更与"共用同一个编辑动作"的其它改动分开记：它是**分享事件**（谁把什么给了谁），
+    # 出事时要能一眼捞出来，不能混在 update_image 的字段变更里。
+    SET_IMAGE_VALID_RANGE = "set_image_valid_range"
+    SET_IMAGE_VISIBLE_USERS = "set_image_visible_users"
     CREATE_IMAGE = "create_image"
     UPDATE_IMAGE = "update_image"
     DELETE_IMAGE = "delete_image"

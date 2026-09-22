@@ -11,13 +11,65 @@ repo 只接收显式 session，负责 query/write/flush；事务由 service 统�
 - `update_image` / `disable_image` 是**管理写**，不过滤（否则停用行再也操作不了）。
 """
 
-from typing import Sequence
+from typing import NamedTuple, Sequence
 
-from sqlalchemy import String, cast, func, or_, select
+from sqlalchemy import String, and_, cast, false, func, or_, select
 from sqlalchemy.orm import Session
 
-from ..constant import ImageStatus
+from ..constant import ImageStatus, ImageValidRange
 from ..models.image import Image
+from ..models.userimage import UserImage
+
+
+class ImageScope(NamedTuple):
+    """镜像列表的可见性口径（由 services.image_tasks._visible_scope 造出）。
+
+    - `unrestricted`：资源通配者（image:manage / bypass_resource）→ 不过滤，看全部
+    - `mine_only`   ：编辑页"只看我的" → 只认 user_images 授权行，**不走三态**
+    - 其余          ：走三态可见性（见 image_visibility_condition）
+    """
+    unrestricted: bool
+    viewer_user_id: int | None
+    granted_ids: frozenset[int]
+    mine_only: bool = False
+
+
+#####################
+# 可见性：**一条规则，两个消费者**（SQL 谓词 + 点判定）
+#
+# ★ 两处必须逐字同构：列表/总数走 SQL 谓词，Can_use_image_for_container 与资源门
+#   user_has_resource 走点判定。任何一处单独改都会造出"列表看得见、用不了"或反过来的
+#   裂缝，而这类裂缝在页面上表现为随机 403——所以测试里锁了"两者对同一组样本结论一致"。
+
+
+def image_visibility_condition(scope: ImageScope):
+    """列表可见性的 SQL 谓词。unrestricted → None（调用方不加过滤）。"""
+    if scope.unrestricted:
+        return None
+    if scope.mine_only:
+        return Image.id.in_(sorted(scope.granted_ids)) if scope.granted_ids else false()
+    conds = [Image.valid_range == ImageValidRange.EVERYONE]
+    if scope.viewer_user_id is not None:
+        # 自己建的一律看得见（PRIVATE 靠这一条，CUSTOM 下也成立——名单把人删掉也不该
+        # 让人看不见自己建的东西）
+        conds.append(Image.created_by_user_id == scope.viewer_user_id)
+    if scope.granted_ids:
+        conds.append(and_(
+            Image.valid_range == ImageValidRange.CUSTOM,
+            Image.id.in_(sorted(scope.granted_ids)),
+        ))
+    return or_(*conds)
+
+
+def image_is_visible_to(image: Image | None, *, viewer_user_id: int | None, granted: bool) -> bool:
+    """点判定——与 image_visibility_condition 是同一条规则（改一处必须改另一处）。"""
+    if image is None:
+        return False
+    if image.valid_range == ImageValidRange.EVERYONE:
+        return True
+    if viewer_user_id is not None and image.created_by_user_id == viewer_user_id:
+        return True
+    return image.valid_range == ImageValidRange.CUSTOM and granted
 
 
 def get_by_id(image_id: int, *, session: Session) -> Image | None:
@@ -74,15 +126,10 @@ def list_images(
     limit: int = 20,
     offset: int = 0,
     image_search: str | None = None,
-    visible_image_ids: set[int] | None = None,
-    include_public: bool = False,
+    scope: ImageScope,
     session: Session,
 ) -> Sequence[Image]:
-    """查询镜像概要（业务读，不含已停用）。
-
-    - visible_image_ids=None 且 include_public=False：不过滤（资源通配者看全部）
-    - 否则：可见 = 已授权 user_images 并集 + 系统内置镜像（created_by IS NULL）
-    """
+    """查询镜像概要（业务读，不含已停用）。可见性口径见 ImageScope。"""
     stmt = (
         select(Image)
         .where(Image.status != ImageStatus.DISABLED)
@@ -93,40 +140,30 @@ def list_images(
     search_filter = _search_filter(image_search)
     if search_filter is not None:
         stmt = stmt.where(search_filter)
-    if visible_image_ids is not None or include_public:
-        conds = []
-        if visible_image_ids:
-            conds.append(Image.id.in_(visible_image_ids))
-        if include_public:
-            conds.append(Image.created_by_user_id.is_(None))
-        if not conds:
-            return []
-        stmt = stmt.where(or_(*conds))
+    visibility = image_visibility_condition(scope)
+    if visibility is not None:
+        stmt = stmt.where(visibility)
     return list(session.scalars(stmt).all())
 
 
 def count_images(
     *,
     image_search: str | None = None,
-    visible_image_ids: set[int] | None = None,
-    include_public: bool = False,
+    scope: ImageScope,
     session: Session,
 ) -> int:
     """统计镜像总数（业务读，不含已停用）——口径必须与 list_images 一致，
-    否则会出现"总数 5、列表只有 3 条"的分页错乱。"""
+    否则会出现"总数 5、列表只有 3 条"的分页错乱。
+
+    两条查询共用 image_visibility_condition：口径一致由构造保证，不靠人记得同步。
+    """
     stmt = select(func.count()).select_from(Image).where(Image.status != ImageStatus.DISABLED)
     search_filter = _search_filter(image_search)
     if search_filter is not None:
         stmt = stmt.where(search_filter)
-    if visible_image_ids is not None or include_public:
-        conds = []
-        if visible_image_ids:
-            conds.append(Image.id.in_(visible_image_ids))
-        if include_public:
-            conds.append(Image.created_by_user_id.is_(None))
-        if not conds:
-            return 0
-        stmt = stmt.where(or_(*conds))
+    visibility = image_visibility_condition(scope)
+    if visibility is not None:
+        stmt = stmt.where(visibility)
     return int(session.scalar(stmt) or 0)
 
 
@@ -139,6 +176,7 @@ def create_image(
     status: ImageStatus = ImageStatus.DRAFT,
     created_by_user_id: int | None,
     entrypoint: str | None = None,
+    valid_range: ImageValidRange = ImageValidRange.CUSTOM,
     session: Session,
 ) -> Image:
     image = Image(
@@ -149,6 +187,7 @@ def create_image(
         entrypoint=entrypoint,
         status=status,
         created_by_user_id=created_by_user_id,
+        valid_range=valid_range,
     )
     session.add(image)
     session.flush()
@@ -175,6 +214,45 @@ def update_image(image_id: int, *, session: Session, **fields) -> bool:
     if dirty:
         session.flush()
     return True
+
+
+def set_valid_range(image_id: int, valid_range: ImageValidRange, *, session: Session) -> bool:
+    """设置可见范围（**管理写**）。
+
+    **不动 user_images**：切到 EVERYONE/PRIVATE 时名单原样留着，切回 CUSTOM 时它还在。
+    删掉是破坏性的，而"曾经授权给谁"在切回来的那一刻就是用户期待看到的东西。
+    """
+    image = get_by_id(image_id, session=session)
+    if image is None:
+        return False
+    if image.valid_range != valid_range:
+        image.valid_range = valid_range
+        session.flush()
+    return True
+
+
+def replace_image_visible_users(image_id: int, user_ids: list[int], *, session: Session) -> list[int]:
+    """整组替换模板的授权名单（**set 语义**，与 auth_repo.replace_user_groups 同形）。
+
+    返回落定的 user_id 列表（去重升序）。仅动 user_images 行，不碰 valid_range——
+    "名单是什么"与"名单生不生效"是两件事，后者由 valid_range 决定。
+    """
+    wanted = sorted({int(uid) for uid in (user_ids or [])})
+    existing = set(session.scalars(
+        select(UserImage.user_id).where(UserImage.image_id == int(image_id))
+    ).all())
+    for user_id in wanted:
+        if user_id not in existing:
+            session.add(UserImage(user_id=user_id, image_id=int(image_id)))
+    for user_id in existing - set(wanted):
+        session.delete(session.scalars(
+            select(UserImage).where(
+                UserImage.image_id == int(image_id),
+                UserImage.user_id == user_id,
+            )
+        ).first())
+    session.flush()
+    return wanted
 
 
 def disable_image(image_id: int, *, session: Session) -> Image | None:

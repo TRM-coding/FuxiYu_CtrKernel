@@ -13,9 +13,9 @@ from enum import Enum
 
 from sqlalchemy.exc import IntegrityError
 
-from ..constant import ImageStatus, OperationType
+from ..constant import ImageStatus, ImageValidRange, OperationType
 from ..extensions import session_scope
-from ..repositories import image_repo, userimage_repo
+from ..repositories import image_repo, user_repo, userimage_repo
 from . import settings_tasks
 from .operation_log_tasks import log_failure, log_success
 
@@ -50,6 +50,7 @@ def _serialize(image, *, include_content: bool = False) -> dict:
         # 归一后再出参：NULL 与 "" 在库里都可能存在，读侧一律折成 None（= 平台默认）
         "entrypoint": (image.entrypoint or "").strip() or None,
         "status": _status_value(image.status),
+        "valid_range": _status_value(image.valid_range),
         "created_by_user_id": image.created_by_user_id,
         "created_at": image.created_at.isoformat() if image.created_at else None,
         "updated_at": image.updated_at.isoformat() if image.updated_at else None,
@@ -311,7 +312,7 @@ def Can_use_image_for_container(user_id: int | None, image_id: int) -> ImageUsab
     DISABLED 的差别，只能笼统报"不存在"。
     """
 
-    visible_ids, include_public = _visible_scope(user_id)
+    scope = _visible_scope(user_id)
     with session_scope(commit=False) as session:
         image = image_repo.get_by_id(image_id, session=session)
         if image is None:
@@ -319,38 +320,52 @@ def Can_use_image_for_container(user_id: int | None, image_id: int) -> ImageUsab
         if image.status != ImageStatus.READY:
             # 草稿与停用一律不可用于新建容器：草稿是尚未定稿的模板。
             return ImageUsability.DISABLED
-        if visible_ids is None and not include_public:
+        if scope.unrestricted:
             return ImageUsability.OK
-        if visible_ids and image.id in visible_ids:
-            return ImageUsability.OK
-        if include_public and image.created_by_user_id is None:
+        # 点判定与列表谓词是同一条规则（image_repo），这里只补"是否被授权"
+        granted = image.id in scope.granted_ids
+        if image_repo.image_is_visible_to(
+            image, viewer_user_id=scope.viewer_user_id, granted=granted
+        ):
             return ImageUsability.OK
         return ImageUsability.DENIED
 
 
-def _visible_scope(viewer_user_id: int | None) -> tuple[set[int] | None, bool]:
-    """返回 (visible_image_ids, include_public)。
+def _visible_scope(viewer_user_id: int | None) -> image_repo.ImageScope:
+    """镜像可见性口径（列表谓词与点判定共用同一规则，见 image_repo）。
 
-    - 资源通配者：不过滤（None, False）
-    - 普通用户：已授权 user_images 集合 + 系统内置镜像全员可见（created_by IS NULL）
+    - 资源通配者（image:manage / bypass_resource）：不过滤，看全部
+    - 其余：走三态枚举——EVERYONE / 自己建的 / CUSTOM ∧ 在授权名单里
     """
     if viewer_user_id is None:
-        return set(), False
+        return image_repo.ImageScope(unrestricted=False, viewer_user_id=None, granted_ids=frozenset())
     from .rbac_service import _has_resource_manage_direct
 
     if _has_resource_manage_direct(viewer_user_id, "image"):
-        return None, False
+        return image_repo.ImageScope(
+            unrestricted=True, viewer_user_id=viewer_user_id, granted_ids=frozenset()
+        )
     with session_scope(commit=False) as session:
-        return set(userimage_repo.list_image_ids_by_user(viewer_user_id, session=session)), True
+        granted = userimage_repo.list_image_ids_by_user(viewer_user_id, session=session)
+    return image_repo.ImageScope(
+        unrestricted=False, viewer_user_id=viewer_user_id, granted_ids=frozenset(granted)
+    )
 
 
-def _resource_scope(viewer_user_id: int | None) -> tuple[set[int], bool]:
-    """只返回当前用户持有 user_images 资源绑定的镜像集合。"""
+def _resource_scope(viewer_user_id: int | None) -> image_repo.ImageScope:
+    """编辑页"只看我的"：只认 user_images 资源绑定，**不走三态可见性**（未授权即不可见，
+    哪怕它是 EVERYONE）。"""
 
     if viewer_user_id is None:
-        return set(), False
+        return image_repo.ImageScope(
+            unrestricted=False, viewer_user_id=None, granted_ids=frozenset(), mine_only=True
+        )
     with session_scope(commit=False) as session:
-        return set(userimage_repo.list_image_ids_by_user(viewer_user_id, session=session)), False
+        granted = userimage_repo.list_image_ids_by_user(viewer_user_id, session=session)
+    return image_repo.ImageScope(
+        unrestricted=False, viewer_user_id=viewer_user_id,
+        granted_ids=frozenset(granted), mine_only=True,
+    )
 
 
 def Create_image(
@@ -552,12 +567,140 @@ def Delete_image(*, image_id: int, operator_user_id: int | None = None) -> bool:
     return True
 
 
+def _coerce_valid_range(value: str | ImageValidRange | None) -> ImageValidRange:
+    if isinstance(value, ImageValidRange):
+        return value
+    try:
+        return ImageValidRange(str(value))
+    except ValueError as exc:
+        err = ValueError(f"invalid image valid_range: {value}")
+        setattr(err, "error_reason", "invalid_valid_range")
+        raise err from exc
+
+
+def Set_image_valid_range(
+    *,
+    image_id: int,
+    valid_range: str | ImageValidRange,
+    operator_user_id: int | None = None,
+) -> bool:
+    """设置模板的可见范围（三态之一）。**不动 user_images 名单**——见 image_repo。
+
+    两个"可见性入口"之一（另一个是 Set_image_visible_users）。它们与 Update_image 分开，
+    是因为这是**分享事件**而非内容变更：审计要能单独捞出来。
+    """
+    target = _coerce_valid_range(valid_range)
+    image_name = None
+    try:
+        with session_scope() as session:
+            image = image_repo.get_by_id(image_id, session=session)
+            if image is None:
+                log_failure(operator_user_id=operator_user_id,
+                    operation=OperationType.SET_IMAGE_VALID_RANGE,
+                    target_type="image",
+                    target_id=image_id,
+                    detail={"valid_range": _status_value(target)},
+                    error_reason="image_not_found",
+                )
+                return False
+            image_name = image.name
+            ok = image_repo.set_valid_range(image_id, target, session=session)
+    except Exception as exc:
+        log_failure(operator_user_id=operator_user_id,
+            operation=OperationType.SET_IMAGE_VALID_RANGE,
+            target_type="image",
+            target_id=image_id,
+            detail={"name": image_name, "valid_range": _status_value(target)},
+            error_reason=getattr(exc, "error_reason", None) or str(exc),
+        )
+        raise
+
+    if not ok:
+        log_failure(operator_user_id=operator_user_id,
+            operation=OperationType.SET_IMAGE_VALID_RANGE,
+            target_type="image",
+            target_id=image_id,
+            detail={"name": image_name},
+            error_reason="update_failed",
+        )
+        return False
+
+    log_success(operator_user_id=operator_user_id,
+        operation=OperationType.SET_IMAGE_VALID_RANGE,
+        target_type="image",
+        target_id=image_id,
+        detail={"name": image_name, "valid_range": _status_value(target)},
+    )
+    return True
+
+
+def Set_image_visible_users(
+    *,
+    image_id: int,
+    user_ids: list[int],
+    operator_user_id: int | None = None,
+) -> list[int] | None:
+    """整组替换 CUSTOM 名单（set 语义）。模板不存在返回 None。
+
+    ★ **非 CUSTOM 态一律拒绝**（即使带合法名单）：名单生不生效由 valid_range 决定，允许在
+      EVERYONE/PRIVATE 态下改名单，等于让人改一个看不到效果的东西——用户会以为"我加了人
+      怎么还是所有人可见"。前端在非 CUSTOM 态不提供这个能力，这里是 API 直调的兜底。
+    """
+    try:
+        with session_scope(commit=False) as session:
+            image = image_repo.get_by_id(image_id, session=session)
+            if image is None:
+                return None
+            if image.valid_range != ImageValidRange.CUSTOM:
+                err = ValueError(
+                    f"image {image_id} valid_range is "
+                    f"{_status_value(image.valid_range)}, not custom"
+                )
+                setattr(err, "error_reason", "not_custom_range")
+                raise err
+            image_name = image.name
+            wanted = sorted({int(uid) for uid in (user_ids or [])})
+            unknown = [uid for uid in wanted if user_repo.get_by_id(uid, session=session) is None]
+            if unknown:
+                err = ValueError(f"unknown_user:{','.join(map(str, unknown))}")
+                setattr(err, "error_reason", "unknown_user")
+                raise err
+
+        with session_scope() as session:
+            settled = image_repo.replace_image_visible_users(image_id, wanted, session=session)
+    except Exception as exc:
+        log_failure(operator_user_id=operator_user_id,
+            operation=OperationType.SET_IMAGE_VISIBLE_USERS,
+            target_type="image",
+            target_id=image_id,
+            detail={"user_ids": sorted({int(uid) for uid in (user_ids or [])})},
+            error_reason=getattr(exc, "error_reason", None) or str(exc),
+        )
+        raise
+
+    log_success(operator_user_id=operator_user_id,
+        operation=OperationType.SET_IMAGE_VISIBLE_USERS,
+        target_type="image",
+        target_id=image_id,
+        detail={"name": image_name, "user_ids": settled},
+    )
+    return settled
+
+
 def Get_image_detail(image_id: int) -> dict | None:
+    """模板详情。custom 态附带 `visible_user_ids`，供编辑页回显名单勾选。"""
     with session_scope(commit=False) as session:
         image = image_repo.get_by_id(image_id, session=session)
         if image is None:
             return None
-        return _serialize(image, include_content=True)
+        detail = _serialize(image, include_content=True)
+        # 名单只在 custom 态回显：别的态下它"存着但不生效"，回显出来会诱导前端画出一个
+        # 与现实不符的勾选状态（详情这一层只有 image:edit 拿得到，也就是能改它的人）。
+        if image.valid_range == ImageValidRange.CUSTOM:
+            detail["visible_user_ids"] = userimage_repo.list_user_ids_by_image(
+                image_id, session=session
+            )
+        return detail
 
 
 def List_image_bref_information(
@@ -570,20 +713,18 @@ def List_image_bref_information(
 ) -> dict:
     page_number = max(1, int(page_number or 1))
     page_size = max(1, int(page_size or 20))
-    visible_ids, include_public = _resource_scope(viewer_user_id) if mine_only else _visible_scope(viewer_user_id)
+    scope = _resource_scope(viewer_user_id) if mine_only else _visible_scope(viewer_user_id)
     with session_scope(commit=False) as session:
         total = image_repo.count_images(
             image_search=image_search,
-            visible_image_ids=visible_ids,
-            include_public=include_public,
+            scope=scope,
             session=session,
         )
         images = image_repo.list_images(
             limit=page_size,
             offset=(page_number - 1) * page_size,
             image_search=image_search,
-            visible_image_ids=visible_ids,
-            include_public=include_public,
+            scope=scope,
             session=session,
         )
         return {
@@ -626,7 +767,9 @@ def _find_legacy_seed_image(item: dict, *, session):
 def seed_image_defaults() -> None:
     """幂等 seed：写入内置镜像模板。
 
-    - created_by_user_id 置空 → 系统镜像，全员可见（_visible_scope 的 include_public）
+    - created_by_user_id 置空 + valid_range=everyone → 系统镜像，全员可见
+      （**两个条件都要**：可见性自 2026-09 起只看 valid_range，created_by IS NULL 已不再是
+      "公开"的意思）
     - 同名已存在时跳过，不覆盖人工修改
     - 旧名收敛：内置模板改过名时，先按 legacy_names 找那条系统行就地改名 + 同步 FROM，
       找不到才插入新行。否则每改一次名就多出一个内置模板，用户可见可选的列表里会并排
@@ -670,5 +813,7 @@ def seed_image_defaults() -> None:
                 dockerfile_body=item["dockerfile_body"],
                 status=item["status"],
                 created_by_user_id=None,
+                # 内置模板的全员可见现在靠这一列，不再靠 created_by IS NULL 派生
+                valid_range=ImageValidRange.EVERYONE,
                 session=session,
             )

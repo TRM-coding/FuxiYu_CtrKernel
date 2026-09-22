@@ -42,3 +42,15 @@ def list_image_ids_by_user(user_id: int, *, session: Session) -> list[int]:
         select(UserImage.image_id).where(UserImage.user_id == int(user_id)).order_by(UserImage.image_id)
     ).all()
     return [int(v) for v in rows]
+
+
+def list_user_ids_by_image(image_id: int, *, session: Session) -> list[int]:
+    """某个模板的 CUSTOM 名单（供编辑页回显勾选状态）。
+
+    注意它**不代表策略**：名单存着但此刻生不生效由 images.valid_range 决定——非 custom 态下
+    名单是"存着不生效"，不是"非法状态"，所以这里照常读得出来。
+    """
+    rows = session.scalars(
+        select(UserImage.user_id).where(UserImage.image_id == int(image_id)).order_by(UserImage.user_id)
+    ).all()
+    return [int(v) for v in rows]

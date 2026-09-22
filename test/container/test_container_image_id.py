@@ -394,9 +394,12 @@ def test_disabled_template_hidden_from_business_reads(db_session):
 
     assert image_tasks.Delete_image(image_id=1) is True
 
-    listed = image_repo.list_images(session=db_session)
+    # scope 是必填的（不是默认"看全部"）：可见性参数必须由调用方显式表态，
+    # 给个宽松默认值等于把"忘了传"变成"看得见一切"。
+    scope = image_repo.ImageScope(unrestricted=True, viewer_user_id=None, granted_ids=frozenset())
+    listed = image_repo.list_images(session=db_session, scope=scope)
     assert 1 not in {img.id for img in listed}
-    assert image_repo.count_images(session=db_session) == len(listed)
+    assert image_repo.count_images(session=db_session, scope=scope) == len(listed)
     assert (
         image_tasks.Can_use_image_for_container(None, 1)
         is image_tasks.ImageUsability.DISABLED
