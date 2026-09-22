@@ -1,5 +1,7 @@
 # Plan: 容器磁盘用量检测与管控
 
+> 2026-09 ??????????? `CONTAINER_*` / `ANNOUNCEMENT_*` env ??????????????????? `system_settings`??????? `settings_tasks.SETTING_DEFINITIONS` ????????? `settings_tasks.get_*` getter ???`.env.example` ?????? settings ????
+
 ## 方针
 
 ```
@@ -56,7 +58,7 @@ def get_disk_usage(container_name: str) -> dict
 
 ### 1.2 NodeKernel — 端点
 
-**文件**: `/home/wyw/FuxiYu_NodeKernel/blueprints/__init__.py`
+**文件**: `/home/wyw/FuxiYu_NodeKernel/network/api.py`
 
 ```
 POST /api/check_disk_usage
@@ -80,7 +82,7 @@ def get_container_disk_usage(container_id: int, timeout: float = 10.0) -> dict |
 
 **新文件**: `/home/wyw/FuxiYu_CtrKernel/schemas/container_disk_check_task.py`
 
-参照 `container_ssh_refresh_task.py`：分页遍历 DB 容器、`parallel_node_calls` 并发、记录日志。
+参考当前 scheduler 模式：分页读取 DB 容器记录，消费 WSS 已落库的磁盘快照字段，不再并发请求 Node。
 
 | 配置项 | 默认值 |
 |---|---|
@@ -233,7 +235,7 @@ detect():
 
 ### 3.2 新增端点
 
-**文件**: `/home/wyw/FuxiYu_NodeKernel/blueprints/__init__.py`
+**文件**: `/home/wyw/FuxiYu_NodeKernel/network/api.py`
 
 ```
 POST /api/pause_container
@@ -279,3 +281,4 @@ POST /api/pause_container
 2. **Phase 2**：新建容器 → 加合作者 → ssh 登录 → `ls -la /home/` 确认符号链接 → 验证宿主机 `.collaborators/` 目录有数据
 3. **Phase 3**：手动 `docker pause` 测试容器 → 验证无法 ssh/操作 → `docker unpause` 恢复 → 模拟写满触发自动 pause
 4. **Phase 4**：前端确认磁盘用量展示正确
+

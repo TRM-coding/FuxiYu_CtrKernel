@@ -1,5 +1,7 @@
 # Plan: 磁盘超限冻结升级机制（Freeze Escalation）
 
+> 2026-09 ??????????? `CONTAINER_*` / `ANNOUNCEMENT_*` env ??????????????????? `system_settings`??????? `settings_tasks.SETTING_DEFINITIONS` ????????? `settings_tasks.get_*` getter ???`.env.example` ?????? settings ????
+
 ## 方针
 
 ```
@@ -236,7 +238,7 @@ def _evaluate_limits(container, usage):
 from ..repositories import container_disk_freeze_state_repo
 freeze_state = container_disk_freeze_state_repo.get(container_id)
 if freeze_state:
-    grace_days = current_app.config.get("CONTAINER_DISK_FREEZE_GRACE_DAYS", 3)
+    grace_days = AppConfig.get("CONTAINER_DISK_FREEZE_GRACE_DAYS", 3)
     container_disk_freeze_state_repo.set_grace(container_id, grace_days)
     print(f"[disk-check] grace period set for container {container_id} "
           f"until {freeze_state.grace_until} ({grace_days} days)")
@@ -370,3 +372,4 @@ unpause_container:
 4. **宽限不阻断升级**：mock `first_frozen_at` 为 7 天前 + 处于宽限期内 → 宽限到期后检测 → 直接升级删除
 5. **重置**：mock `first_frozen_at` + 磁盘清理到 95% 以下 → 确认记录被删除
 6. **短期不重置**：冻结后切换为短期容器 → 确认记录仍在；磁盘清理到 95% 以下 → 确认记录被清除
+

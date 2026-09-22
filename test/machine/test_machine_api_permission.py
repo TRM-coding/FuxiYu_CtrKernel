@@ -1,9 +1,10 @@
-from ...blueprints import machine_api
+from ...api import machine_api, deps
 
 
 def _auth(monkeypatch, *, valid=True, operator=True):
-    monkeypatch.setattr(machine_api.authentications_repo, "is_token_valid", lambda token: valid)
-    monkeypatch.setattr(machine_api.user_repo, "check_permission", lambda token, required_permission: operator)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: valid)
+    from ...services import rbac_service
+    monkeypatch.setattr(rbac_service, "_has_entity_direct", lambda uid, entity: operator)
 
 
 def test_add_machine_permission_requires_token(client, monkeypatch):
@@ -28,7 +29,7 @@ def test_add_machine_permission_missing_fields(client, monkeypatch):
     resp = client.post("/api/machines/add_machine_permission", json={"machine_id": 1} )
 
     assert resp.status_code == 400
-    assert resp.get_json()["error_reason"] == "missing_fields"
+    assert resp.json()["error_reason"] == "missing_fields"
 
 
 def test_add_machine_permission_machine_not_found(client, monkeypatch):
@@ -38,7 +39,7 @@ def test_add_machine_permission_machine_not_found(client, monkeypatch):
     resp = client.post("/api/machines/add_machine_permission", json={"machine_id": 1, "user_id": 2} )
 
     assert resp.status_code == 404
-    assert resp.get_json()["error_reason"] == "machine_not_found"
+    assert resp.json()["error_reason"] == "machine_not_found"
 
 
 def test_add_machine_permission_user_not_found(client, monkeypatch):
@@ -48,7 +49,7 @@ def test_add_machine_permission_user_not_found(client, monkeypatch):
     resp = client.post("/api/machines/add_machine_permission", json={"machine_id": 1, "user_id": 2} )
 
     assert resp.status_code == 404
-    assert resp.get_json()["error_reason"] == "user_not_found"
+    assert resp.json()["error_reason"] == "user_not_found"
 
 
 def test_add_machine_permission_success(client, monkeypatch):
@@ -60,8 +61,54 @@ def test_add_machine_permission_success(client, monkeypatch):
     assert resp.status_code == 200
 
 
+def test_remove_machine_permission_requires_token(client, monkeypatch):
+    _auth(monkeypatch, valid=False)
+
+    resp = client.post("/api/machines/remove_machine_permission", json={"machine_id": 1, "user_id": 2})
+
+    assert resp.status_code == 401
+
+
+def test_remove_machine_permission_requires_operator(client, monkeypatch):
+    _auth(monkeypatch, operator=False)
+
+    resp = client.post("/api/machines/remove_machine_permission", json={"machine_id": 1, "user_id": 2})
+
+    assert resp.status_code == 403
+
+
+def test_remove_machine_permission_missing_fields(client, monkeypatch):
+    _auth(monkeypatch)
+
+    resp = client.post("/api/machines/remove_machine_permission", json={"machine_id": 1})
+
+    assert resp.status_code == 400
+    assert resp.json()["error_reason"] == "missing_fields"
+
+
+def test_remove_machine_permission_not_granted_404(client, monkeypatch):
+    """目标没有该机器权限（或机器不存在）→ 404，不假装成功。"""
+    _auth(monkeypatch)
+    monkeypatch.setattr(machine_api.machine_service, "Remove_machine_permission", lambda machine_id, user_id, operator_user_id=None: False)
+
+    resp = client.post("/api/machines/remove_machine_permission", json={"machine_id": 1, "user_id": 2})
+
+    assert resp.status_code == 404
+    assert resp.json()["error_reason"] == "permission_not_found"
+
+
+def test_remove_machine_permission_success(client, monkeypatch):
+    _auth(monkeypatch)
+    monkeypatch.setattr(machine_api.machine_service, "Remove_machine_permission", lambda machine_id, user_id, operator_user_id=None: True)
+
+    resp = client.post("/api/machines/remove_machine_permission", json={"machine_id": 1, "user_id": 2})
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] == 1
+
+
 def test_list_machine_permissions_requires_token(client, monkeypatch):
-    monkeypatch.setattr(machine_api.authentications_repo, "is_token_valid", lambda token: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: False)
 
     resp = client.get("/api/machines/list_machine_permissions?machine_id=1")
 
@@ -69,7 +116,8 @@ def test_list_machine_permissions_requires_token(client, monkeypatch):
 
 
 def test_list_machine_permissions_missing_machine_id(client, monkeypatch):
-    monkeypatch.setattr(machine_api.authentications_repo, "is_token_valid", lambda token: True)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: True)
 
     resp = client.get("/api/machines/list_machine_permissions" )
 
@@ -77,10 +125,11 @@ def test_list_machine_permissions_missing_machine_id(client, monkeypatch):
 
 
 def test_list_machine_permissions_success(client, monkeypatch):
-    monkeypatch.setattr(machine_api.authentications_repo, "is_token_valid", lambda token: True)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: True)
     monkeypatch.setattr(machine_api.machine_service, "List_machine_permissions", lambda machine_id: [2, 3])
 
     resp = client.get("/api/machines/list_machine_permissions?machine_id=1" )
 
     assert resp.status_code == 200
-    assert resp.get_json()["user_ids"] == [2, 3]
+    assert resp.json()["user_ids"] == [2, 3]
