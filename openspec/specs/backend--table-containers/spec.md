@@ -28,6 +28,58 @@
 - **WHEN** 创建请求包含 CPU、内存、共享内存、GPU 数量
 - **THEN** 依机器允许上限校验；共享内存不得超过此次请求内存，失败返回 invalid_config 和具体资源数值
 
+### Requirement: containers 镜像归属与平台解析
+
+系统 SHALL 以 `image_id` 作为容器镜像归属的唯一身份来源（外键指向 `images.id`，可空），MUST NOT 从镜像标签字符串反解归属。
+
+运行镜像 SHALL 一律由平台按模板解析，请求体携带的镜像名（含旧通路的 `image` / `IMAGE`）MUST NOT 被采信。
+
+#### Scenario: 运行镜像由平台解析
+
+- **WHEN** 创建或恢复的请求体里带了镜像名
+- **THEN** 下发的运行镜像一律是平台按归属与版本戳解析出的目标，请求体中的值被忽略
+
+### Requirement: containers 构建版本戳与运行标签
+
+系统 SHALL 以 `last_build_at` 记录本次运行标签的版本戳：缓存命中时取该机器上 `machine_image.created_at`，现造时取派发时刻；它与标签同源同生，容器行照抄。运行镜像标签 SHALL 由 `image_id` 与 `last_build_at` 推导并 MUST NOT 落库；两者缺一时 SHALL 返回空值，MUST NOT 用当前时间等替代值拼出标签。容器是否落后于模板 SHALL 由 `last_build_at` 早于模板当前版本（`images.updated_at`）判定，MUST NOT 用容器 `created_at` 参与该判定。
+
+#### Scenario: 落后判据只看版本戳
+
+- **WHEN** 容器的 `last_build_at` 早于其模板的当前版本
+- **THEN** 判定为落后；`created_at` 不参与判定，按最新模板恢复过的容器不因创建时间早被误判
+
+#### Scenario: 标签推导不出时不编造
+
+- **WHEN** 容器的 `image_id` 或 `last_build_at` 缺失
+- **THEN** 运行镜像标签推导为空值；不落库，也不用当前时间顶替缺失的输入拼出一个从未存在过的标签
+
+### Requirement: containers 构建配方留痕与运行基底展示
+
+本次构建的配方 SHALL 以输入留痕在容器行上：`base_image`（FROM 段）与 `dockerfile_body`（业务片段）；渲染后的完整文本与平台注入 MUST NOT 落库，平台注入 SHALL 在每次渲染时取自当下的系统设置。判「有无留痕」SHALL 以 `base_image` 是否为空为准。运行基底的展示 SHALL 一律取该容器留痕渲染，MUST NOT 依据新鲜度改取当前模板。
+
+#### Scenario: 运行基底展示不随模板编辑失真
+
+- **WHEN** 模板被编辑后查询一个依据旧版本构建的容器的运行基底
+- **THEN** 返回由该容器 `base_image`、`dockerfile_body` 与当下平台注入渲染出的内容；仅无留痕的存量容器回落当前模板，既无留痕又无归属时返回空值
+
+### Requirement: containers 恢复内容来源选择
+
+恢复软删容器 SHALL 以容器留痕为前提；内容来源按归属与模板状态判定：归属为空或模板非 READY 时取容器留痕；模板 READY 且容器不落后时取当前模板；模板 READY 但容器落后且未指定内容来源时 SHALL 返回选择响应而不执行恢复；指定容器留痕时取留痕，显式指定 `content_source=template` 时取当前模板。恢复 SHALL 刷新 `last_build_at` 与配方留痕，使其反映本次实际采用的内容。
+
+#### Scenario: 内容会变时先交回两份
+
+- **WHEN** 容器落后于模板且调用方未指定内容来源
+- **THEN** 不执行恢复，响应带 `requires_choice=true`、两份内容与按配方分段（不含平台注入段）的差异，且 `container_id` 为空
+
+### Requirement: containers 恢复挂载与数据位置
+
+恢复的挂载行为 SHALL 与内容来源无关：两种来源取同一挂载路径与同一数据位置；容器改名 MUST NOT 改变数据位置。
+
+#### Scenario: 恢复来源与改名不迁移数据
+
+- **WHEN** 调用方选择任一内容来源恢复容器，并调整容器名称
+- **THEN** 恢复使用同一挂载路径和数据位置，容器改名不改变数据位置
+
 ## Data model appendix
 
 ### containers 持久化结构
