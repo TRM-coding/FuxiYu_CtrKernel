@@ -562,39 +562,76 @@ def Update_machine(machine_id: int, operator_user_id: int | None = None, **field
         )
         return False
 
-    # validate shared_size when provided: must be integer and <= 8 GB
-    if 'shared_size' in fields or 'shared_gb' in fields or 'max_shared_gb' in fields:
-        # prefer explicit max_shared_gb field when present
+    # 共享内存上限（max_shared_gb）是**机器可配置限额**：不设全局固定上限。
+    # 2026-10 决策：移除旧实现里硬编码的 8GB 上限（它把合法的更大配置一并拒掉，
+    # 与「逐机器配置」的语义矛盾）；输入契约与「共享不超过内存」的组合不变量保留：
+    # 移除硬码不等于允许负值、非整小数或共享内存超过内存。
+    shared_keys = ('max_shared_gb', 'shared_size', 'shared_gb')
+    if any(key in fields for key in shared_keys) or 'max_memory_gb' in fields:
+        # 1) 本次携带的共享值：须为可解析的整数、非负、无小数部分。
+        #    ⚠ 显式 null 不写入任何值（仓库层除 port 外一律跳过 None），因此它**等于沿用
+        #    当前记录**，绝不是「本次不约束」——按后者理解会绕过下面的组合不变量：
+        #    现存 shared16/mem32 传 {max_shared_gb: null, max_memory_gb: 8} 实际落库仍是
+        #    shared16/mem8，必须照样拒绝（2026-10 二轮主审）。
         ss_val = None
         if 'max_shared_gb' in fields:
             ss_val = fields.get('max_shared_gb')
-        else:
-            ss_val = fields.get('shared_size') if 'shared_size' in fields else fields.get('shared_gb')
+        elif 'shared_size' in fields:
+            ss_val = fields.get('shared_size')
+        elif 'shared_gb' in fields:
+            ss_val = fields.get('shared_gb')
+        ss = None
+        if ss_val is not None:
+            try:
+                ss = int(ss_val)
+            except Exception:
+                e = ValueError(f"shared_size must be an integer: {ss_val}")
+                setattr(e, 'error_reason', 'update_failed')
+                raise e
+            # int(3.5) 会静默截断成 3 —— 非整小数必须显式拒绝：不能悄悄改用户的值。
+            # 整数字符串（"16"）与整数值（16.0）仍兼容，不据此扩张其它字段策略。
+            if not isinstance(ss_val, (str, bool)) and ss_val != ss:
+                e = ValueError(f"shared_size must be an integer (no fractional part): {ss_val}")
+                setattr(e, 'error_reason', 'update_failed')
+                raise e
+            if ss < 0:
+                e = ValueError(f"shared_size must be >= 0: {ss}")
+                setattr(e, 'error_reason', 'update_failed')
+                raise e
+            # 归一化只作用于可写键 max_shared_gb：字符串/整值浮点在写库前统一成整数，
+            # 不触碰其它机器字段的既有策略。
+            if 'max_shared_gb' in fields:
+                fields['max_shared_gb'] = ss
+
+        # 2) 组合后的有效值 MUST 以**实际落库后的状态**为准：本次携带非 null 值才取本次值，
+        #    未携带或显式传 null 都沿用当前记录（与仓库层「这两个字段的 None 不覆盖」一致）。
+        effective_shared = ss if ss is not None else getattr(machine, 'max_shared_gb', None)
+        mem_val = fields.get('max_memory_gb') if 'max_memory_gb' in fields else None
         try:
-            ss = int(ss_val) if ss_val is not None else None
+            if mem_val is not None:
+                effective_memory = int(mem_val)
+            else:
+                current_memory = getattr(machine, 'max_memory_gb', None)
+                effective_memory = int(current_memory) if current_memory is not None else None
         except Exception:
-            e = ValueError(f"shared_size must be an integer: {ss_val}")
-            setattr(e, 'error_reason', 'update_failed')
-            raise e
-        if ss is not None and (ss < 0 or ss > 8):
-            e = ValueError(f"shared_size out of range (0-8 GB): {ss}")
+            e = ValueError(f"max_memory_gb must be an integer when validating max_shared_gb")
             setattr(e, 'error_reason', 'update_failed')
             raise e
 
-        # if max_shared_gb provided, ensure it does not exceed updated or current max_memory_gb
-        if 'max_shared_gb' in fields:
+        # 3) 组合不变量：只要本次动了共享或内存任一字段，组合后的 shared <= mem 就必须成立。
+        #    **不能只看「本次是否携带共享键」，也不能把显式 null 当作不约束**：只下调
+        #    max_memory_gb、或传 null 夹带另一侧改动，同样可能把既有共享上限顶到内存之上。
+        #    校验先于任何写库与审计，失败时机器记录与本次请求的其它字段一概不落。
+        #    当前记录该字段本身为 NULL（旧记录）→ 视为未知：跳过比较，也不发明全局默认上限。
+        if effective_shared is not None and effective_memory is not None:
             try:
-                target_max_mem = None
-                if 'max_memory_gb' in fields:
-                    target_max_mem = int(fields.get('max_memory_gb')) if fields.get('max_memory_gb') is not None else None
-                else:
-                    target_max_mem = int(getattr(machine, 'max_memory_gb', None)) if getattr(machine, 'max_memory_gb', None) is not None else None
+                effective_shared = int(effective_shared)
             except Exception:
-                e = ValueError(f"max_memory_gb must be an integer when validating max_shared_gb")
+                e = ValueError(f"max_shared_gb must be an integer: {effective_shared}")
                 setattr(e, 'error_reason', 'update_failed')
                 raise e
-            if target_max_mem is not None and ss is not None and ss > target_max_mem:
-                e = ValueError(f"max_shared_gb ({ss}) cannot be greater than max_memory_gb ({target_max_mem})")
+            if effective_shared > effective_memory:
+                e = ValueError(f"max_shared_gb ({effective_shared}) cannot be greater than max_memory_gb ({effective_memory})")
                 setattr(e, 'error_reason', 'update_failed')
                 raise e
 

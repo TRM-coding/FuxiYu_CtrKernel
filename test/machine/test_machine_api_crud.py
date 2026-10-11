@@ -2,9 +2,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from ...models.machine import Machine
 from ...services.container_module.exceptions import NodeServiceError
 
 from ...api import machine_api, deps
+from ..factories import create_machine
 
 
 def _auth(monkeypatch, *, valid=True, operator=True):
@@ -218,6 +220,167 @@ def test_update_machine_validation_error_returns_422(client, monkeypatch):
     resp = client.post("/api/machines/update_machine", json={"machine_id": 1, "fields": {"max_shared_gb": 99}} )
 
     assert resp.status_code == 422
+
+
+def test_update_machine_api_saves_shared_above_8_within_memory(client, monkeypatch, db_session):
+    """真实服务路径（不替换 Update_machine）：32GB 内存的机器可存下 16GB 共享上限。
+
+    旧实现固定按 8GB 拒绝，这条会 422；移除硬码后必须真的落库。
+    """
+    _auth(monkeypatch)
+    machine = create_machine(max_memory_gb=32, max_shared_gb=8)
+
+    resp = client.post(
+        "/api/machines/update_machine",
+        json={"machine_id": machine.id, "fields": {"max_shared_gb": 16}},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] == 1
+    db_session.expire_all()
+    assert db_session.get(Machine, machine.id).max_shared_gb == 16
+
+
+def test_update_machine_api_rejects_shared_above_memory(client, monkeypatch, db_session):
+    """真实服务路径：共享上限超过目标内存上限 → 422 update_failed，且记录不变。"""
+    _auth(monkeypatch)
+    machine = create_machine(max_memory_gb=8, max_shared_gb=4)
+
+    resp = client.post(
+        "/api/machines/update_machine",
+        json={"machine_id": machine.id, "fields": {"max_shared_gb": 16}},
+    )
+
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["error_reason"] == "update_failed"
+    assert "cannot be greater" in body["message"]
+    db_session.expire_all()
+    assert db_session.get(Machine, machine.id).max_shared_gb == 4
+
+
+def test_update_machine_api_accepts_memory_lowered_to_shared(client, monkeypatch, db_session):
+    """真实服务路径：只降内存上限但仍 >= 既有共享上限 → 200 且两字段落库。"""
+    _auth(monkeypatch)
+    machine = create_machine(max_memory_gb=32, max_shared_gb=16)
+
+    resp = client.post(
+        "/api/machines/update_machine",
+        json={"machine_id": machine.id, "fields": {"max_memory_gb": 16}},
+    )
+
+    assert resp.status_code == 200
+    db_session.expire_all()
+    refreshed = db_session.get(Machine, machine.id)
+    assert refreshed.max_memory_gb == 16
+    assert refreshed.max_shared_gb == 16
+
+
+def test_update_machine_api_accepts_equal_shared_and_memory(client, monkeypatch, db_session):
+    """真实服务路径：同请求 mem=8/shared=8 → 200。"""
+    _auth(monkeypatch)
+    machine = create_machine(max_memory_gb=32, max_shared_gb=4)
+
+    resp = client.post(
+        "/api/machines/update_machine",
+        json={"machine_id": machine.id, "fields": {"max_shared_gb": 8, "max_memory_gb": 8}},
+    )
+
+    assert resp.status_code == 200
+    db_session.expire_all()
+    refreshed = db_session.get(Machine, machine.id)
+    assert refreshed.max_shared_gb == 8
+    assert refreshed.max_memory_gb == 8
+
+
+def test_update_machine_api_rejects_memory_lowered_below_existing_shared(client, monkeypatch, db_session):
+    """真实服务路径：既有 shared16/mem32，只请求降 mem=8 → 422，且两个字段与改名都不落。"""
+    _auth(monkeypatch)
+    machine = create_machine(max_memory_gb=32, max_shared_gb=16, machine_name="api_before_reject")
+
+    resp = client.post(
+        "/api/machines/update_machine",
+        json={
+            "machine_id": machine.id,
+            "fields": {"max_memory_gb": 8, "machine_name": "api_renamed"},
+        },
+    )
+
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["error_reason"] == "update_failed"
+    assert "cannot be greater" in body["message"]
+    db_session.expire_all()
+    refreshed = db_session.get(Machine, machine.id)
+    assert refreshed.max_shared_gb == 16
+    assert refreshed.max_memory_gb == 32
+    assert refreshed.machine_name == "api_before_reject"
+
+
+def test_update_machine_api_rejects_null_shared_with_memory_lowered(client, monkeypatch, db_session):
+    """真实 API：{max_shared_gb: null, max_memory_gb: 8} 不能绕过。
+
+    `exclude_unset` 会把显式 null 送进服务层，但仓库层对这两个字段跳过 None、不执行清空，
+    所以落库后共享仍是 16，与 mem=8 组合照样越界；同请求改名也不落。
+    """
+    _auth(monkeypatch)
+    machine = create_machine(max_memory_gb=32, max_shared_gb=16, machine_name="api_null_shared_before")
+
+    resp = client.post(
+        "/api/machines/update_machine",
+        json={
+            "machine_id": machine.id,
+            "fields": {
+                "max_shared_gb": None,
+                "max_memory_gb": 8,
+                "machine_name": "api_null_shared_after",
+            },
+        },
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["error_reason"] == "update_failed"
+    db_session.expire_all()
+    refreshed = db_session.get(Machine, machine.id)
+    assert refreshed.max_shared_gb == 16
+    assert refreshed.max_memory_gb == 32
+    assert refreshed.machine_name == "api_null_shared_before"
+
+
+def test_update_machine_api_rejects_null_memory_with_shared_raised(client, monkeypatch, db_session):
+    """真实 API：{max_memory_gb: null, max_shared_gb: 40} 不能绕过——落库后内存仍是 32。"""
+    _auth(monkeypatch)
+    machine = create_machine(max_memory_gb=32, max_shared_gb=16)
+
+    resp = client.post(
+        "/api/machines/update_machine",
+        json={"machine_id": machine.id, "fields": {"max_memory_gb": None, "max_shared_gb": 40}},
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["error_reason"] == "update_failed"
+    db_session.expire_all()
+    refreshed = db_session.get(Machine, machine.id)
+    assert refreshed.max_shared_gb == 16
+    assert refreshed.max_memory_gb == 32
+
+
+@pytest.mark.parametrize("bad_shared", [-1, "bad", 3.5])
+def test_update_machine_api_rejects_invalid_shared_input(client, monkeypatch, bad_shared):
+    """负数/非整数/非整小数在请求模型层被挡下：400 + 既有 invalid_payload（不改错误映射契约）。
+
+    服务层的 `update_failed`（422）只覆盖通过请求模型的合法整数输入；两者是不同边界。
+    """
+    _auth(monkeypatch)
+    machine = create_machine(max_memory_gb=32)
+
+    resp = client.post(
+        "/api/machines/update_machine",
+        json={"machine_id": machine.id, "fields": {"max_shared_gb": bad_shared}},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error_reason"] == "invalid_payload"
 
 
 def test_set_maintenance_requires_token(client, monkeypatch):

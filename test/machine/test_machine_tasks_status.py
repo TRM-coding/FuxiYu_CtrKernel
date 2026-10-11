@@ -66,9 +66,10 @@ def test_update_machine_regular_update_calls_repo(db_session):
     assert db_session.get(Machine, machine.id).machine_name == "updated_machine"
 
 
-@pytest.mark.parametrize("value", ["bad", 9, -1])
-def test_update_machine_rejects_invalid_shared_size(db_session, value):
-    machine = create_machine(max_memory_gb=8)
+@pytest.mark.parametrize("value", ["bad", -1])
+def test_update_machine_rejects_non_integer_or_negative_shared_size(db_session, value):
+    """移除 8GB 硬码不等于放开输入：非整数与负数仍拒绝（error_reason 不变）。"""
+    machine = create_machine(max_memory_gb=32)
 
     with pytest.raises(ValueError) as excinfo:
         machine_tasks.Update_machine(machine.id, max_shared_gb=value)
@@ -76,11 +77,152 @@ def test_update_machine_rejects_invalid_shared_size(db_session, value):
     assert getattr(excinfo.value, "error_reason") == "update_failed"
 
 
+def test_update_machine_accepts_shared_above_8_within_memory(db_session):
+    """shared 是机器可配置限额：32GB 内存下共享 16GB 可保存。
+
+    旧实现固定以「> 8GB」拒绝，把这类合法配置一并挡掉（2026-10 决策移除）。
+    """
+    machine = create_machine(max_memory_gb=32, max_shared_gb=8)
+
+    assert machine_tasks.Update_machine(machine.id, max_shared_gb=16) is True
+
+    db_session.expire_all()
+    assert db_session.get(Machine, machine.id).max_shared_gb == 16
+
+
 def test_update_machine_rejects_max_shared_greater_than_target_memory(db_session):
+    """超过 8GB 且超过**本次请求**的内存上限 → 仍拒绝。"""
     machine = create_machine(max_memory_gb=8)
 
-    with pytest.raises(ValueError, match="cannot be greater"):
-        machine_tasks.Update_machine(machine.id, max_shared_gb=6, max_memory_gb=4)
+    with pytest.raises(ValueError, match="cannot be greater") as excinfo:
+        machine_tasks.Update_machine(machine.id, max_shared_gb=16, max_memory_gb=8)
+
+    assert getattr(excinfo.value, "error_reason") == "update_failed"
+
+
+def test_update_machine_rejects_shared_above_current_memory(db_session):
+    """超过 8GB 且超过**当前记录**的内存上限 → 仍拒绝，且不落库。"""
+    machine = create_machine(max_memory_gb=8, max_shared_gb=4)
+
+    with pytest.raises(ValueError, match="cannot be greater") as excinfo:
+        machine_tasks.Update_machine(machine.id, max_shared_gb=16)
+
+    assert getattr(excinfo.value, "error_reason") == "update_failed"
+    db_session.expire_all()
+    assert db_session.get(Machine, machine.id).max_shared_gb == 4
+
+
+def test_update_machine_rejects_fractional_shared_size(db_session):
+    """非整小数（3.5）必须显式拒绝，MUST NOT 被 int() 静默截断成 3。"""
+    machine = create_machine(max_memory_gb=32, max_shared_gb=4)
+
+    with pytest.raises(ValueError, match="no fractional part") as excinfo:
+        machine_tasks.Update_machine(machine.id, max_shared_gb=3.5)
+
+    assert getattr(excinfo.value, "error_reason") == "update_failed"
+    assert "3.5" in str(excinfo.value)
+    db_session.expire_all()
+    assert db_session.get(Machine, machine.id).max_shared_gb == 4
+
+
+def test_update_machine_accepts_integral_string_and_float_shared_size(db_session):
+    """能解析的整数字符串与整数值浮点仍兼容（不扩张其它字段策略）。"""
+    machine = create_machine(max_memory_gb=32, max_shared_gb=4)
+
+    assert machine_tasks.Update_machine(machine.id, max_shared_gb="16") is True
+    db_session.expire_all()
+    assert db_session.get(Machine, machine.id).max_shared_gb == 16
+
+    assert machine_tasks.Update_machine(machine.id, max_shared_gb=12.0) is True
+    db_session.expire_all()
+    assert db_session.get(Machine, machine.id).max_shared_gb == 12
+
+
+def test_update_machine_rejects_memory_lowered_below_existing_shared(db_session):
+    """只改内存上限也必须满足 shared<=mem：既不动用户的值，也不落同请求的其它字段。"""
+    machine = create_machine(max_memory_gb=32, max_shared_gb=16, machine_name="before_reject")
+
+    with pytest.raises(ValueError, match="cannot be greater") as excinfo:
+        machine_tasks.Update_machine(machine.id, max_memory_gb=8, machine_name="renamed")
+
+    assert getattr(excinfo.value, "error_reason") == "update_failed"
+    db_session.expire_all()
+    refreshed = db_session.get(Machine, machine.id)
+    assert refreshed.max_shared_gb == 16
+    assert refreshed.max_memory_gb == 32
+    assert refreshed.machine_name == "before_reject"
+
+
+def test_update_machine_accepts_memory_lowered_to_existing_shared(db_session):
+    """内存下调到仍 >= 既有共享上限 → 放行。"""
+    machine = create_machine(max_memory_gb=32, max_shared_gb=16)
+
+    assert machine_tasks.Update_machine(machine.id, max_memory_gb=16) is True
+
+    db_session.expire_all()
+    refreshed = db_session.get(Machine, machine.id)
+    assert refreshed.max_memory_gb == 16
+    assert refreshed.max_shared_gb == 16
+
+
+def test_update_machine_accepts_equal_shared_and_memory_in_one_request(db_session):
+    """同请求把共享与内存都设为 8 → 相等即合法。"""
+    machine = create_machine(max_memory_gb=32, max_shared_gb=4)
+
+    assert machine_tasks.Update_machine(machine.id, max_shared_gb=8, max_memory_gb=8) is True
+
+    db_session.expire_all()
+    refreshed = db_session.get(Machine, machine.id)
+    assert refreshed.max_shared_gb == 8
+    assert refreshed.max_memory_gb == 8
+
+
+def test_update_machine_skips_comparison_when_memory_limit_is_null(db_session):
+    """旧记录没有内存上限（NULL）→ 保持空值语义：跳过比较，也不发明全局默认上限。
+
+    显式传 null 也不写入（仓库层跳过 None）：记录仍是 NULL → 仍视为未知、不拒绝。
+    """
+    machine = create_machine(max_memory_gb=None, max_shared_gb=None)
+
+    assert machine_tasks.Update_machine(machine.id, max_shared_gb=16) is True
+    db_session.expire_all()
+    assert db_session.get(Machine, machine.id).max_shared_gb == 16
+
+    # 显式传 null 内存上限：仓库层不覆盖（仍 NULL）→ 未知语义保留、不拒绝。
+    assert machine_tasks.Update_machine(machine.id, max_memory_gb=None) is True
+    db_session.expire_all()
+    assert db_session.get(Machine, machine.id).max_memory_gb is None
+
+
+def test_update_machine_rejects_null_shared_with_memory_lowered(db_session):
+    """显式 null 共享 ≠ 本次不约束：它不写入，落库后仍是 16，与 mem=8 组合即越界。"""
+    machine = create_machine(max_memory_gb=32, max_shared_gb=16, machine_name="null_shared_before")
+
+    with pytest.raises(ValueError, match="cannot be greater") as excinfo:
+        machine_tasks.Update_machine(
+            machine.id, max_shared_gb=None, max_memory_gb=8, machine_name="null_shared_after"
+        )
+
+    assert getattr(excinfo.value, "error_reason") == "update_failed"
+    db_session.expire_all()
+    refreshed = db_session.get(Machine, machine.id)
+    assert refreshed.max_shared_gb == 16
+    assert refreshed.max_memory_gb == 32
+    assert refreshed.machine_name == "null_shared_before"
+
+
+def test_update_machine_rejects_null_memory_with_shared_raised(db_session):
+    """显式 null 内存 ≠ 本次不约束：它不写入，落库后仍是 32，与 shared=40 组合即越界。"""
+    machine = create_machine(max_memory_gb=32, max_shared_gb=16)
+
+    with pytest.raises(ValueError, match="cannot be greater") as excinfo:
+        machine_tasks.Update_machine(machine.id, max_memory_gb=None, max_shared_gb=40)
+
+    assert getattr(excinfo.value, "error_reason") == "update_failed"
+    db_session.expire_all()
+    refreshed = db_session.get(Machine, machine.id)
+    assert refreshed.max_shared_gb == 16
+    assert refreshed.max_memory_gb == 32
 
 
 def test_update_machine_sets_maintenance_switch(db_session):
