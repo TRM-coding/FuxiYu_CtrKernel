@@ -272,10 +272,14 @@ def Delete_user(user_id: int, operator_user_id: int | None = None) -> bool:
             ):
                 return _role_step_failed(f"remove_user_binding_failed:container:{cid}")
 
-        # 最终删除用户
+        # 最终删除用户：认证 Token 与用户行在同一事务内删除。
+        # authentications 只外键关联 users（不关联容器）。若先删用户，外键约束会让整个
+        # 事务回滚，API 层再把这个异常说成「野容器阻止删除」——归因完全错。放在同一
+        # session_scope 里，两者要么都删掉，要么都保留（token 删除失败则整体回滚，用户仍在）。
         with session_scope() as session:
             user = get_by_id(user_id, session=session)
             username = getattr(user, "username", username)
+            authentications_repo.delete_tokens_by_user_id(user_id, session=session)
             ok = delete_user(user_id=user_id, session=session)
         if ok:
             log_success(operator_user_id=operator_user_id,

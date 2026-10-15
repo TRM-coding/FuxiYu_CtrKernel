@@ -76,6 +76,7 @@ from .container_module.restore import (      # 恢复族（复活软删容器）
     build_restore_choice,
     _build_restore_container,
     _get_restored_container_id,
+    _ensure_restore_long_term_capacity,
     _restore_long_term_state,
     _delete_restore_artifacts,
     _audit_restore_success,
@@ -244,6 +245,10 @@ def resurrect_container(
         # 不带内容来源 + 确实有二选一 → 交回两份内容让调用方选，**不恢复**。
         if content_source is None and resolved.needs_choice:
             return {"requires_choice": True, **build_restore_choice(target)}
+
+        # 长期配额预检：必须在 Create_container 之前——超限时 Node 未调用、容器未复活、
+        # 快照未消费，可干净拒绝；放到恢复完成后查只会造成半恢复或静默丢标记。
+        _ensure_restore_long_term_capacity(target.snapshot, root_account)
 
         container, renamed = _build_restore_container(target, resolved.image_tag)
         Create_container(

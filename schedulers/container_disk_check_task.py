@@ -1,12 +1,12 @@
 import time
 import threading
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from ..extensions import session_scope
 from ..repositories import containers_repo
 from ..services import container_tasks, settings_tasks
-from ..services.container_module.utils import effective_grace_until
+from ..services.container_module.utils import effective_days_frozen, effective_grace_until
 from ..utils.mail import send as send_mail
 from ..services.machine_tasks import machine_in_scope
 
@@ -194,11 +194,18 @@ def _days_frozen(freeze_state) -> int:
     与之配套的另外两条期限（ssh 到期清理、挂载保留期）同样按"业务正常时间"计，
     三处共用同一把尺子，只是实时性要求不同：ssh 倒计时要在窗口期就读，故读侧
     还要折算正在进行的窗口；冻结升级只在窗口关闭后被动作消费，靠累加器即可。
+
+    计算委托 `container_module.utils.effective_days_frozen`（查询展示侧读同一份）；
+    本函数保留原签名/边界，仅作入口转发。
     """
 
-    elapsed = datetime.utcnow() - freeze_state.first_frozen_at
-    elapsed -= timedelta(seconds=int(getattr(freeze_state, "deferral_seconds", 0) or 0))
-    return max(0, elapsed.days)
+    return effective_days_frozen(
+        getattr(freeze_state, "first_frozen_at", None),
+        getattr(freeze_state, "deferral_seconds", 0),
+        # 显式传本模块的 datetime：测试以重绑定本模块 datetime 注入可控时钟，
+        # 让"现在"仍由调度侧供给，公共纯函数只负责算术。
+        now=datetime.utcnow(),
+    )
 
 
 def _fmt_bytes(b: int) -> str:

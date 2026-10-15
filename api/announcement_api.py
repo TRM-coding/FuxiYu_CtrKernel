@@ -70,6 +70,8 @@ def _announcement_view(announcement) -> dict[str, Any]:
 
 
 def _draft_view(draft) -> dict[str, Any]:
+    # 草稿不再有 template_id（Q06/Q07）：模板选择只是编辑器侧复制初值，
+    # 草稿落库的是独立内容快照，没有可回指的关联字段。
     return {
         "id": draft.id,
         "title": draft.title,
@@ -77,7 +79,6 @@ def _draft_view(draft) -> dict[str, Any]:
         "raw_content": draft.raw_content,
         "created_by": draft.created_by,
         "targets": draft.targets,
-        "template_id": draft.template_id,
         "created_at": draft.created_at.isoformat() if draft.created_at else None,
         "updated_at": draft.updated_at.isoformat() if draft.updated_at else None,
     }
@@ -443,7 +444,8 @@ async def save_draft_api(
                 draft_id=payload.get("draft_id"),
                 raw_content=payload.get("raw_content"),
                 targets=payload.get("targets"),
-                template_id=payload.get("template_id"),
+                # 旧客户端的 template_id 输入被**兼容忽略**（Q06/Q07）：保存草稿不再
+                # 保留模板关联，传了也不落库，更不会影响已有草稿的关联状态。
                 session=session,
             )
             draft_id = draft.id
@@ -456,12 +458,14 @@ async def save_draft_api(
 def get_draft_api(
     request: Request,
     draft_id: int,
-    _: int = Depends(require_operator),
+    operator_user_id: int = Depends(require_operator),
 ):
-    """查看草稿。"""
+    """查看草稿（只允许查看自己的，Q08）。"""
 
     with session_scope(commit=False) as session:
-        draft = announcement_repo.get_draft_by_id(draft_id, session=session)
+        draft = announcement_repo.get_draft_by_id(
+            draft_id, session=session, created_by=operator_user_id
+        )
         if draft is not None:
             draft_data = _draft_view(draft)
     if draft is None:
@@ -473,12 +477,14 @@ def get_draft_api(
 def delete_draft_api(
     request: Request,
     draft_id: int,
-    _: int = Depends(require_operator),
+    operator_user_id: int = Depends(require_operator),
 ):
-    """删除草稿。"""
+    """删除草稿（只允许删除自己的，Q08）。"""
 
     with session_scope() as session:
-        ok = announcement_repo.delete_draft(draft_id, session=session)
+        ok = announcement_repo.delete_draft(
+            draft_id, session=session, created_by=operator_user_id
+        )
     if not ok:
         return _error(404, "draft not found", "not_found")
     return {"success": 1, "message": "draft deleted"}

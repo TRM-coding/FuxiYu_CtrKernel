@@ -45,6 +45,7 @@ def _init_database() -> None:
     _ensure_machine_endpoint_schema()
     _ensure_freeze_state_schema()
     _ensure_machine_image_schema()
+    _ensure_announcement_schema()
     try:
         from .services.rbac_service import seed_rbac_defaults
 
@@ -944,6 +945,89 @@ def _ensure_machine_image_schema() -> None:
             "machine_image composite key migrated: backfilled=%s removed=%s row(s)",
             patched, unresolvable,
         )
+
+
+def _ensure_announcement_schema() -> None:
+    """公告草稿/模板关联退役（2026-10 决策，Q06/Q07）。
+
+    `create_all` 只创建缺失表、不改旧表。旧 SQLite / MySQL 库的
+    `announcement_drafts.template_id` 仍带外键，只要还有行指向某个模板，删除该模板
+    就会被外键挡住（API 500）。新模型已不再声明这一列，所以旧库必须在这里收敛：
+
+    1. 先把残留引用清空（安全解除；任何方言、任何 SQLite 版本都能做）；
+    2. 再尝试删掉这一列（SQLite >= 3.35 可直接删；MySQL 需先摘外键）。
+       删不掉也不要紧：列已全为 NULL，不再参与任何读写，也不会再挡住模板删除。
+
+    另外清掉 `announcements.template_id` 的悬挂引用（只有外键未启用或历史遗留时才会
+    存在）。指向仍存在模板的追溯 id 保留不动。全程幂等，可重复执行。
+    """
+
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    logger = logging.getLogger(__name__)
+    current_engine = extensions.engine
+    inspector = inspect(current_engine)
+    is_sqlite = current_engine.dialect.name == "sqlite"
+
+    if inspector.has_table("announcement_drafts"):
+        columns = {column["name"] for column in inspector.get_columns("announcement_drafts")}
+        if "template_id" in columns:
+            with current_engine.begin() as conn:
+                cleared = int(
+                    conn.execute(
+                        text(
+                            "UPDATE announcement_drafts SET template_id = NULL"
+                            " WHERE template_id IS NOT NULL"
+                        )
+                    ).rowcount
+                    or 0
+                )
+            if not is_sqlite:
+                # MySQL 里被外键引用的列不能直接删：先摘掉约束再删列。
+                for fk in inspector.get_foreign_keys("announcement_drafts"):
+                    if "template_id" not in (fk.get("constrained_columns") or []):
+                        continue
+                    name = fk.get("name")
+                    if not name:
+                        continue
+                    try:
+                        with current_engine.begin() as conn:
+                            conn.execute(
+                                text(f"ALTER TABLE announcement_drafts DROP FOREIGN KEY {name}")
+                            )
+                    except Exception as e:  # pragma: no cover
+                        logger.warning("announcement draft foreign key %s drop failed: %s", name, e)
+            try:
+                with current_engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE announcement_drafts DROP COLUMN template_id"))
+                logger.warning(
+                    "announcement draft template_id retired: detached=%s, column dropped", cleared
+                )
+            except Exception as e:
+                logger.warning(
+                    "announcement draft template_id detached=%s but column kept: %s", cleared, e
+                )
+
+    if inspector.has_table("announcements") and inspector.has_table("announcement_templates"):
+        announcement_columns = {column["name"] for column in inspector.get_columns("announcements")}
+        if "template_id" in announcement_columns:
+            try:
+                with current_engine.begin() as conn:
+                    dangling = conn.execute(
+                        text(
+                            "UPDATE announcements SET template_id = NULL"
+                            " WHERE template_id IS NOT NULL"
+                            "   AND template_id NOT IN (SELECT id FROM announcement_templates)"
+                        )
+                    ).rowcount
+                if dangling:
+                    logger.warning(
+                        "announcements dangling template_id cleared: %s row(s)", dangling
+                    )
+            except Exception as e:  # pragma: no cover
+                logger.warning("announcements dangling template_id cleanup failed: %s", e)
 
 
 def _should_start_background_tasks() -> bool:

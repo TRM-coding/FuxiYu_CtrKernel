@@ -1122,10 +1122,11 @@ def test_handle_container_deleted_scoped_to_sending_machine(db_session):
     assert _retained(ca.id).is_valid is False
 
 
-def test_internal_runtime_api_requires_shared_token(client, monkeypatch):
+@pytest.mark.parametrize("endpoint", ["containers", "machines"])
+def test_internal_runtime_api_requires_shared_token(client, monkeypatch, endpoint):
     """内部 buffer 端点双重校验：loopback + 共享 token（2026-09 修复）。
 
-    testclient 豁免仅限 TESTING；模拟本地来源后无/错 token → 403，正确 token → 200。
+    testclient 豁免仅限 TESTING；本地来源无/错 token → 401，正确 token → 200；非本地来源 → 403。
     """
     from ...api import internal_runtime_api
 
@@ -1135,18 +1136,25 @@ def test_internal_runtime_api_requires_shared_token(client, monkeypatch):
     # 模拟"本地进程"来源 + 关闭 TESTING 豁免（验证 token 本身，而非 testclient 白名单）
     monkeypatch.setattr(internal_runtime_api, "_is_loopback", lambda request: True)
     monkeypatch.setattr(internal_runtime_api.AppConfig, "TESTING", False)
+    url = f"/api/internal/runtime/{endpoint}"
 
-    # 无 token → 403
-    resp = client.post("/api/internal/runtime/containers", json=payload)
-    assert resp.status_code == 403
+    # 无 token → 401
+    resp = client.post(url, json=payload)
+    assert resp.status_code == 401
+    assert resp.json()["error_reason"] == "invalid_token"
 
-    # 错误 token → 403
-    resp = client.post("/api/internal/runtime/containers", json=payload, headers={"X-Internal-Token": "wrong-token"})
-    assert resp.status_code == 403
+    # 错误 token → 401
+    resp = client.post(url, json=payload, headers={"X-Internal-Token": "wrong-token"})
+    assert resp.status_code == 401
 
     # 正确 token → 200
     token = node_comms._read_internal_token()
     assert token
-    resp = client.post("/api/internal/runtime/containers", json=payload, headers={"X-Internal-Token": token})
+    resp = client.post(url, json=payload, headers={"X-Internal-Token": token})
     assert resp.status_code == 200
     assert resp.json()["updated"] == 1
+
+    monkeypatch.setattr(internal_runtime_api, "_is_loopback", lambda request: False)
+    resp = client.post(url, json=payload, headers={"X-Internal-Token": token})
+    assert resp.status_code == 403
+    assert resp.json()["error_reason"] == "forbidden"

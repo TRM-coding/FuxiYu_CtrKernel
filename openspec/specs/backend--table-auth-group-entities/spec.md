@@ -2,7 +2,7 @@
 
 ## Purpose
 
-权限组与稳定权限 code 的映射。本文件是 d6d0d0e26fb6（chester-next）在 2026-10-11 的代码逆向基线，以表结构为单位记录已实现的契约。字段声明、外键、唯一约束以模型和服务为依据；已知缺陷及迁移风险统一登记在 [Global QUESTIONS](../../../../FuxiYu_Global/QUESTIONS.md)，不代表修复已完成。
+权限组与稳定权限 code 的映射。本规格按表结构记录当前持久化与生命周期契约，字段声明以模型与服务为依据。未完成问题见 [Global QUESTIONS](../../../../FuxiYu_Global/QUESTIONS.md)。
 
 ## Requirements
 
@@ -10,9 +10,7 @@
 
 系统 SHALL 使用数据附录的字段声明持久化 `AuthGroupEntity`，遵守模型声明的主键、非空、唯一键、外键及默认值；Python 默认值与数据库 server_default 必须分别理解。
 
-
 字段与成员见文末同名数据附录。
-
 
 #### Scenario: 读取有效记录
 
@@ -28,6 +26,14 @@
 - **WHEN** 请求只含目录中有效 code
 - **THEN** 映射集合被整体替换并按稳定目录顺序返回，不把矩阵序号当实体 id
 
+### Requirement: 自定义权限组允许清空实体
+
+拥有组编辑权限的用户 SHALL 能将自定义组的实体集合替换为空，即使该组是其唯一管理能力来源。变更后 SHALL 按新的有效权限鉴权；内置 operator 组的既有锁定权限规则 SHALL 保留。
+
+#### Scenario: 清空自身唯一管理组
+- **WHEN** 用户将提供其唯一 rbac:manage 权限的自定义组清空
+- **THEN** 更新成功，该用户随后失去该组提供的管理能力，后续受保护操作按新权限拒绝
+
 ## Data model appendix
 
 ### auth_group_entities 持久化结构
@@ -41,5 +47,4 @@
 
 - [models/auth_group.py](../../../models/auth_group.py)：AuthGroupEntity，第 21 行。
 - 数据库初始化：[`__init__.py`](../../../__init__.py)、[`extensions.py`](../../../extensions.py)；`create_all` 只创建缺失表，不推定已替旧表完成列迁移。
-- 回归验证：[`test/`](../../../test/) 中该单元对应的仓储、服务、API 用例；本次默认安全套件 992 passed、6 deselected。
-
+- 回归验证：[test/user/test_rbac_api.py](../../../test/user/test_rbac_api.py)；运行结果以当前隔离安全套件为准。

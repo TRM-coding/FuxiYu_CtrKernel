@@ -69,18 +69,19 @@ class AnnouncementTemplate(db.Model):
 class AnnouncementDraft(db.Model):
     __tablename__ = "announcement_drafts"
 
+    # 2026-10 决策（Q06/Q07）：草稿与模板之间**没有**持久关联。选择模板只是把
+    # subject/body 复制成编辑器初值，草稿保存的是独立内容快照——模板此后改名、编辑或
+    # 删除都不再需要（也不可能）回头改写草稿。因此这里刻意没有 template_id 列。
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(200), nullable=False)
     content = db.Column(db.Text, nullable=False)
     raw_content = db.Column(db.Text, nullable=True)
     created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     targets = db.Column(db.Text, nullable=True)
-    template_id = db.Column(db.Integer, db.ForeignKey("announcement_templates.id"), nullable=True)
     created_at = db.Column(db.DateTime, default=dt.datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow)
 
     creator = db.relationship("User")
-    template = db.relationship("AnnouncementTemplate", foreign_keys=[template_id])
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<AnnouncementDraft {self.id} title={self.title!r}>"

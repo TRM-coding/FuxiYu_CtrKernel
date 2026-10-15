@@ -147,7 +147,53 @@ def test_delete_user_wild_containers(client, monkeypatch):
     resp = client.post("/api/users/delete_user", json={"user_id": 1} )
 
     assert resp.status_code == 400
+    assert resp.json()["error_reason"] == "wild_container"
     assert resp.json()["wild_containers"] == [144]
+
+
+def test_delete_user_non_wild_failure_is_not_reported_as_wild_container(client, monkeypatch):
+    """Q05：非野容器原因（如关联行删除失败）不得被说成 wild_container。"""
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
+
+    _valid_token(monkeypatch)
+
+    def _raise(user_id, **kwargs):
+        raise RuntimeError("delete_tokens_by_user_id exploded")
+
+    monkeypatch.setattr(user_api.user_tasks, "Delete_user", _raise)
+
+    resp = client.post("/api/users/delete_user", json={"user_id": 1} )
+
+    body = resp.json()
+    assert resp.status_code == 500
+    assert body["error_reason"] == "delete_user_failed"
+    assert "wild_containers" not in body
+    assert body["error_reason"] != "wild_container"
+
+
+def test_delete_user_with_token_actually_deletes_user_and_token(client, monkeypatch, db_session):
+    """Q05 修复后的端到端复现：有 authentications 行不再阻止删除，也不再误报野容器。"""
+    from sqlalchemy import select
+
+    from ...models.authentications import Authentication
+    from ...models.user import User
+    from ..factories import create_auth
+
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
+    _valid_token(monkeypatch, user_id=1)
+
+    target = db_session.get(User, 7)
+    assert target is not None
+    create_auth(target, token="api-delete-token")
+    assert len(db_session.scalars(select(Authentication).where(Authentication.user_id == 7)).all()) == 1
+
+    resp = client.post("/api/users/delete_user", json={"user_id": 7})
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] == 1
+    db_session.expire_all()
+    assert db_session.get(User, 7) is None
+    assert db_session.scalars(select(Authentication).where(Authentication.user_id == 7)).all() == []
 
 
 def test_update_user_success(client, monkeypatch):

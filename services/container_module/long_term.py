@@ -39,17 +39,26 @@ def _load_long_term_target(container_id: int):
     return container, bindings, existing
 
 
-def _ensure_long_term_capacity(bindings) -> None:
-    """配额校验：逐个 root 用户比对全局上限，超限抛 long_term_limit_reached（api 层回 409）。"""
+def _ensure_long_term_capacity_for_users(user_ids) -> None:
+    """配额校验：逐个 root 用户比对全局上限，超限抛 long_term_limit_reached（api 层回 409）。
+
+    失败原因带上实际用量与上限（`used/limit`）——门户 set_long_term 与恢复入口共用这一份，
+    用户看得见"已经用了几个、上限几个"，而不是只能说"超限了"。
+    """
     limit = settings_tasks.get_long_term_container_limit()
-    for user_id in _root_user_ids_from_bindings(bindings):
+    for user_id in user_ids:
         with session_scope(commit=False) as session:
-            count = long_term_container_repo.count_by_user(user_id, session=session)
+            count = long_term_container_repo.count_by_user(int(user_id), session=session)
         if count >= limit:
             raise NodeServiceError(
-                f"User {user_id} has reached long-term container limit",
+                f"User {user_id} has reached long-term container limit ({count}/{limit})",
                 reason="long_term_limit_reached",
             )
+
+
+def _ensure_long_term_capacity(bindings) -> None:
+    """配额校验（bindings 形态）：取容器的各 root 用户后委托 _ensure_long_term_capacity_for_users。"""
+    _ensure_long_term_capacity_for_users(_root_user_ids_from_bindings(bindings))
 
 
 def _persist_long_term_state(container_id, is_long_term, existing, operator_user_id) -> None:

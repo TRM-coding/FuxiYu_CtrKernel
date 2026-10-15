@@ -2,7 +2,7 @@
 
 ## Purpose
 
-平台用户身份、登录凭据哈希和毕业年份。本文件是 d6d0d0e26fb6（chester-next）在 2026-10-11 的代码逆向基线，以表结构为单位记录已实现的契约。字段声明、外键、唯一约束以模型和服务为依据；已知缺陷及迁移风险统一登记在 [Global QUESTIONS](../../../../FuxiYu_Global/QUESTIONS.md)，不代表修复已完成。
+平台用户身份、登录凭据哈希和毕业年份。本规格按表结构记录当前持久化与生命周期契约，字段声明以模型与服务为依据。未完成问题见 [Global QUESTIONS](../../../../FuxiYu_Global/QUESTIONS.md)。
 
 ## Requirements
 
@@ -10,9 +10,7 @@
 
 系统 SHALL 使用数据附录的字段声明持久化 `User`，遵守模型声明的主键、非空、唯一键、外键及默认值；Python 默认值与数据库 server_default 必须分别理解。
 
-
 字段与成员见文末同名数据附录。
-
 
 #### Scenario: 读取有效记录
 
@@ -27,6 +25,22 @@
 
 - **WHEN** 用户名和邮箱未占用且注册校验通过
 - **THEN** 保存 password_hash 和用户信息，不在返回数据中暴露口令哈希
+
+### Requirement: 用户删除与认证记录同事务清理
+
+删除用户 SHALL 在最终删除事务中清理该用户所有 Token，MUST NOT 删除其他用户的 Token。存在不允许遗弃的容器时 SHALL 拒绝删除并返回 wild_container；认证记录不属于容器关联，MUST NOT 被解释为野容器。
+
+#### Scenario: 有 Token 但无阻塞容器
+- **WHEN** 删除仅有多个 Token 关联、没有其他业务记录阻止删除的用户
+- **THEN** 用户及其全部 Token 被删除，其他用户及其 Token 保留
+
+#### Scenario: 容器阻止删除
+- **WHEN** 删除将产生不允许的野容器
+- **THEN** 返回 wild_container，用户与 Token 均保留
+
+#### Scenario: 删除事务失败
+- **WHEN** 最终删除用户的数据库事务失败
+- **THEN** 同事务 Token 清理回滚，不将非容器异常统一归因为 wild_container
 
 ## Data model appendix
 
@@ -45,5 +59,4 @@
 
 - [models/user.py](../../../models/user.py)：User，第 7 行。
 - 数据库初始化：[`__init__.py`](../../../__init__.py)、[`extensions.py`](../../../extensions.py)；`create_all` 只创建缺失表，不推定已替旧表完成列迁移。
-- 回归验证：[`test/`](../../../test/) 中该单元对应的仓储、服务、API 用例；本次默认安全套件 992 passed、6 deselected。
-
+- 回归验证：[test/user/test_user_tasks_profile.py](../../../test/user/test_user_tasks_profile.py)；运行结果以当前隔离安全套件为准。

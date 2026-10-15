@@ -44,6 +44,17 @@ def delete_auth(token: str, *, session: Session) -> bool:
     return True
 
 
+def delete_tokens_by_user_id(user_id: int, *, session: Session) -> int:
+    """删除某用户持有的全部认证记录，返回删除行数。
+
+    供用户删除事务复用：authentications 只外键关联 users，删除 users 行前必须先清掉
+    这些 token，否则外键约束会让整个删除事务回滚（调用方再把它误归因为野容器）。
+    """
+    result = session.execute(delete(Authentication).where(Authentication.user_id == int(user_id)))
+    session.flush()
+    return int(result.rowcount or 0)
+
+
 def is_token_valid(token: str, *, session: Session) -> bool:
     """检查 token 是否存在且未过期。"""
     auth = get_by_token(token, session=session)

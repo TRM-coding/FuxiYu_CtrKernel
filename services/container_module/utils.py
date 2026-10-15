@@ -196,6 +196,25 @@ def is_version_behind(image_version_at, template_updated_at) -> bool:
     return image_version_at < template_updated_at
 
 
+def effective_days_frozen(
+    first_frozen_at, deferral_seconds: int = 0, *, now: datetime | None = None,
+) -> int:
+    """有效冻结天数 = 自然日 − 机器不可用顺延（只计已结算的累加器）。
+
+    冻结升级判定与查询展示的唯一口径：`container_disk_check_task._days_frozen` 与
+    `queries._get_container_freeze_state` 都调它，避免两侧各算各的。
+
+    - 只扣**已结算**的 `deferral_seconds`，不折算进行中的窗口（动作只在机器可达且非维护时
+      消费，窗口开着时轮不到它，同 `effective_grace_until`）。
+    - `deferral_seconds` 为 NULL/None 按 0 处理；结果整日向下取整并夹到 0。
+    """
+    if first_frozen_at is None:
+        return 0
+    reference = now if now is not None else datetime.utcnow()
+    elapsed = reference - first_frozen_at - timedelta(seconds=int(deferral_seconds or 0))
+    return max(0, elapsed.days)
+
+
 def effective_grace_until(freeze_state):
     """磁盘冻结的**有效宽限到期时刻**：把已结算的不可用顺延平移进来。
 

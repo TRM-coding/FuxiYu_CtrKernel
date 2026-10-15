@@ -328,8 +328,8 @@ def test_s19_copy_as_draft_content_match(db_session):
     assert draft.targets == targets_json
 
 
-def test_s20_copy_as_draft_template_ref(db_session):
-    """S-20: 原公告有 template_id → draft.template_id 相同。"""
+def test_s20_copy_as_draft_does_not_inherit_template_ref(db_session):
+    """Q07: 复制公告为草稿只复制内容，不继承（也不激活）模板关联。"""
     user = create_user()
     template = _repo_create_template(
         name="模板", subject_template="主题", body_template="正文", created_by=user.id
@@ -339,7 +339,8 @@ def test_s20_copy_as_draft_template_ref(db_session):
     )
 
     draft = copy_announcement_as_draft_service(ann.id, created_by=user.id)
-    assert draft.template_id == template.id
+    assert draft.content == "正文"
+    assert not hasattr(draft, "template_id"), "草稿与模板没有持久关联"
 
 
 # ══════════════════════════════════════════════════════════════════════

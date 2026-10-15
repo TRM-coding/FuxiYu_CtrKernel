@@ -411,9 +411,12 @@ def test_a24_save_draft_create(client, monkeypatch):
 
 
 def test_a25_save_draft_update(client, monkeypatch):
-    """A-25: 已有 draft_id → 200 + 同 id。"""
-    mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
+    """A-25: 已有 draft_id → 200 + 同 id（草稿私有：以所属者身份请求）。"""
     user = _make_operator()
+    mock_operator_token(
+        monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]),
+        user_id=user.id,
+    )
     draft = _make_draft(user, title="旧标题")
     resp = client.post(
         "/api/announcements/drafts/save",
@@ -432,9 +435,12 @@ def test_a26_list_drafts(client, monkeypatch):
 
 
 def test_a27_get_draft_detail(client, monkeypatch):
-    """A-27: 草稿详情 → 200。"""
-    mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
+    """A-27: 草稿详情 → 200（以所属者身份）。"""
     user = _make_operator()
+    mock_operator_token(
+        monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]),
+        user_id=user.id,
+    )
     draft = _make_draft(user)
     resp = client.get(f"/api/announcements/drafts/{draft.id}", headers=_operator_headers())
     payload = assert_json_success(resp)
@@ -442,9 +448,12 @@ def test_a27_get_draft_detail(client, monkeypatch):
 
 
 def test_a28_delete_draft(client, monkeypatch):
-    """A-28: 删除草稿 → 200。"""
-    mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
+    """A-28: 删除草稿 → 200（以所属者身份）。"""
     user = _make_operator()
+    mock_operator_token(
+        monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]),
+        user_id=user.id,
+    )
     draft = _make_draft(user)
     resp = client.delete(f"/api/announcements/drafts/{draft.id}", headers=_operator_headers())
     assert_json_success(resp)
@@ -469,8 +478,11 @@ def test_a30_batch_send(client, monkeypatch, db_session):
     以便断言审计与终态；"发起即返回"的形状由 a30b 单独锁。
     """
     _patch_thread_inline(monkeypatch)
-    mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
     user = _make_operator()
+    mock_operator_token(
+        monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]),
+        user_id=user.id,
+    )
     d1 = _make_draft(user, title="d1")
     d2 = _make_draft(user, title="d2")
 
@@ -487,7 +499,7 @@ def test_a30_batch_send(client, monkeypatch, db_session):
     assert len(payload["announcement_ids"]) == 2
     logs = db_session.scalars(select(OperationLog).where(OperationLog.operation == "send_mail")).all()
     assert len(logs) == 2
-    assert all(log.operator_user_id == 1 for log in logs)
+    assert all(log.operator_user_id == user.id for log in logs)
     assert {log.detail["name"] for log in logs} == {"d1", "d2"}
 
 
@@ -498,8 +510,11 @@ def test_a30b_batch_send_returns_accepted_without_waiting(client, monkeypatch, d
     用户看到"失败"而信其实发出去了（2026-09 用户反馈）。
     """
     _patch_thread_noop(monkeypatch)
-    mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
     user = _make_operator()
+    mock_operator_token(
+        monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]),
+        user_id=user.id,
+    )
     draft = _make_draft(user, title="d1")
 
     resp = client.post(
@@ -553,8 +568,11 @@ def test_a33_batch_send_nonexistent_draft(client, monkeypatch):
     悄无声息地失败——那样前端只会看到一堆永远"发送中"的空公告。
     """
     _patch_thread_noop(monkeypatch)
-    mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
     user = _make_operator()
+    mock_operator_token(
+        monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]),
+        user_id=user.id,
+    )
     d1 = _make_draft(user)
 
     resp = client.post(

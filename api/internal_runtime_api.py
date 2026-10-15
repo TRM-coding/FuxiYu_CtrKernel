@@ -43,12 +43,21 @@ def _forbidden() -> HTTPException:
     return HTTPException(status_code=403, detail={"success": 0, "message": "forbidden", "error_reason": "forbidden"})
 
 
+def _require_internal_access(request: Request) -> None:
+    if not _is_loopback(request):
+        raise _forbidden()
+    if not _valid_internal_token(request):
+        raise HTTPException(
+            status_code=401,
+            detail={"success": 0, "message": "invalid or missing internal token", "error_reason": "invalid_token"},
+        )
+
+
 @router.post("/containers")
 def write_container_runtime_snapshot(request: Request, payload: RuntimeSnapshotRequest):
     """WSS 子进程写入容器运行态 buffer；非业务 API（loopback + 共享 token 双重校验）。"""
 
-    if not _is_loopback(request) or not _valid_internal_token(request):
-        raise _forbidden()
+    _require_internal_access(request)
     updated = node_comms.write_container_runtime_buffer(payload.machine_id, payload.snapshot)
     return {"success": 1, "updated": updated}
 
@@ -57,7 +66,6 @@ def write_container_runtime_snapshot(request: Request, payload: RuntimeSnapshotR
 def write_machine_runtime_snapshot(request: Request, payload: RuntimeSnapshotRequest):
     """WSS 子进程写入机器运行态 buffer；非业务 API（loopback + 共享 token 双重校验）。"""
 
-    if not _is_loopback(request) or not _valid_internal_token(request):
-        raise _forbidden()
+    _require_internal_access(request)
     updated = node_comms.write_machine_runtime_buffer(payload.machine_id, payload.snapshot)
     return {"success": 1, "updated": updated}

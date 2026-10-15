@@ -2,12 +2,14 @@ import pytest
 from sqlalchemy import select
 
 from ...constant import ContainerStatus, ROLE
+from ...extensions import SessionRegistry
+from ...models.authentications import Authentication
 from ...models.containers import Container
 from ...models.long_term_container import LongTermContainer
 from ...models.user import User
 from ...repositories import usercontainer_repo
 from ...services import user_tasks
-from ..factories import bind_user_container, create_container, create_machine, create_user
+from ..factories import bind_user_container, create_auth, create_container, create_machine, create_user
 
 
 def test_register_success(db_session):
@@ -93,6 +95,117 @@ def test_delete_user_raises_wild_containers(monkeypatch, db_session):
 
     assert getattr(excinfo.value, "wild_containers") == [144]
     assert db_session.get(User, user.id) is not None
+
+
+def _token_count(user_id):
+    return len(SessionRegistry.scalars(
+        select(Authentication).where(Authentication.user_id == user_id)
+    ).all())
+
+
+def test_delete_user_removes_its_authentication_tokens(monkeypatch, db_session):
+    """Q05：有 token、无容器时用户删除成功，同一事务里 token 一并删掉。"""
+    user = create_user(username="delete_token_user")
+    user_id = user.id
+    create_auth(user, token="del-token-1")
+    create_auth(user, token="del-token-2")
+    assert _token_count(user_id) == 2
+
+    monkeypatch.setattr(
+        user_tasks.usercontainer_repo,
+        "remove_user_from_all_containers",
+        lambda user_id, **kwargs: {"ok": True},
+    )
+
+    assert user_tasks.Delete_user(user_id) is True
+
+    db_session.expire_all()
+    assert db_session.get(User, user_id) is None
+    assert _token_count(user_id) == 0
+
+
+def test_delete_user_wild_container_keeps_user_and_tokens(monkeypatch, db_session):
+    """Q05：容器阻止删除时保留 wild_container 归因，用户与 token 都不动（事务不半提交）。"""
+    user = create_user(username="wild_keep_token_user")
+    user_id = user.id
+    create_auth(user, token="wild-keep-token")
+
+    monkeypatch.setattr(
+        user_tasks.usercontainer_repo,
+        "remove_user_from_all_containers",
+        lambda user_id, **kwargs: {"ok": False, "wild_containers": [144, 145]},
+    )
+
+    with pytest.raises(Exception) as excinfo:
+        user_tasks.Delete_user(user_id)
+
+    assert getattr(excinfo.value, "wild_containers") == [144, 145]
+    db_session.expire_all()
+    assert db_session.get(User, user_id) is not None
+    assert _token_count(user_id) == 1
+
+
+def test_delete_user_leaves_other_users_tokens_untouched(monkeypatch, db_session):
+    """Q05：级联删除只作用于目标用户，别人的 token 不动。"""
+    target = create_user(username="cascade_target_user")
+    other = create_user(username="cascade_other_user")
+    target_id, other_id = target.id, other.id
+    create_auth(target, token="cascade-target-token")
+    create_auth(other, token="cascade-other-token")
+
+    monkeypatch.setattr(
+        user_tasks.usercontainer_repo,
+        "remove_user_from_all_containers",
+        lambda user_id, **kwargs: {"ok": True},
+    )
+
+    assert user_tasks.Delete_user(target_id) is True
+
+    db_session.expire_all()
+    assert _token_count(target_id) == 0
+    assert _token_count(other_id) == 1
+
+
+def test_delete_user_token_delete_failure_rolls_back_user(monkeypatch, db_session):
+    """Q05：token 删除失败时整个删除事务回滚，用户仍在（不留半删除状态）。"""
+    user = create_user(username="rollback_token_user")
+    user_id = user.id
+    create_auth(user, token="rollback-token")
+
+    monkeypatch.setattr(
+        user_tasks.usercontainer_repo,
+        "remove_user_from_all_containers",
+        lambda user_id, **kwargs: {"ok": True},
+    )
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("token delete failed")
+
+    monkeypatch.setattr(user_tasks.authentications_repo, "delete_tokens_by_user_id", _boom)
+
+    with pytest.raises(RuntimeError, match="token delete failed"):
+        user_tasks.Delete_user(user_id)
+
+    db_session.expire_all()
+    assert db_session.get(User, user_id) is not None
+    assert _token_count(user_id) == 1
+
+
+def test_user_delete_is_blocked_by_token_without_explicit_cleanup(db_session):
+    """机制证据：测试库真的开了 PRAGMA foreign_keys=ON。
+
+    有 authentications 行时直接删 users 行会 IntegrityError——这正是旧 Delete_user
+    不先清 token 就失败、随后被 API 层误归因为 wild_container 的原因。
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    user = create_user(username="fk_evidence_user")
+    create_auth(user, token="fk-evidence-token")
+
+    with pytest.raises(IntegrityError):
+        db_session.delete(user)
+        db_session.flush()
+    db_session.rollback()
 
 
 def test_get_user_detail_information_returns_counts_and_long_term_count(db_session):

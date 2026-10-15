@@ -3,7 +3,7 @@ import pytest
 from ...api import deps
 from ...repositories import auth_repo
 from ...extensions import session_scope
-from ...services.rbac_service import list_user_entities, user_has_entity
+from ...services.rbac_service import list_user_entities, update_group_entities, user_has_entity
 
 pytestmark = pytest.mark.usefixtures("ensure_auth_users")
 
@@ -272,3 +272,42 @@ def test_set_user_groups_cannot_remove_own_rbac_manage(client, monkeypatch):
     assert resp.json()["error_reason"] == "cannot_remove_own_manage"
     with session_scope(commit=False) as session:
         assert auth_repo.list_user_group_ids(1, session=session) == before
+
+
+# ── Q09（2026-10 已确认行为）：update_group_entities 不设「最后管理者」保护 ──
+# 决策：编辑组实体时允许清空某用户的唯一管理权限来源，并允许该用户随后失去管理能力。
+# 这里补的是**代表性行为验证**，不是新增护栏；自锁护栏只存在于 set_user_groups
+# （见上一条 test_set_user_groups_cannot_remove_own_rbac_manage），两条路径语义不同。
+
+
+def test_update_group_entities_allows_clearing_last_manage_group_at_service_level():
+    """服务层直证：清空用户唯一 rbac:manage 来源的组 → 成功，该用户随后失去管理能力。"""
+    with session_scope() as session:
+        group = auth_repo.ensure_group("last_manage_group_test", "test", session=session)
+        auth_repo.ensure_group_entity(group.id, "rbac:manage", session=session)
+        auth_repo.ensure_user_group(1, group.id, session=session)
+    group_id = group.id
+    assert user_has_entity(1, "rbac:manage") is True
+
+    result = update_group_entities(group_id, [])
+
+    assert result["entity_codes"] == []
+    assert result["locked_entity_codes"] == []
+    assert user_has_entity(1, "rbac:manage") is False
+
+
+def test_update_group_entities_can_drop_editors_own_manage_via_api(client, monkeypatch):
+    """API 层同一条路径：操作者清空自己唯一的管理组 → 200，随后该请求身份失去管理能力。"""
+    _valid_token(monkeypatch, user_id=1)
+    _grant_rbac_manage(user_id=1)  # user 1 的唯一 rbac:manage 来源
+    with session_scope(commit=False) as session:
+        group_id = auth_repo.get_group("rbac_manager_test", session=session).id
+    assert user_has_entity(1, "rbac:manage") is True
+
+    resp = client.post(f"/api/rbac/groups/{group_id}/entities", json={"entity_codes": []})
+
+    assert resp.status_code == 200
+    assert resp.json()["group"]["entity_codes"] == []
+    assert user_has_entity(1, "rbac:manage") is False
+    # 代表「随后失去管理能力」的可见后果：同一个有效会话再访问管理端点得到 403（不是 401）
+    assert client.get("/api/rbac/matrix").status_code == 403

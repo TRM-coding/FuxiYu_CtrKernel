@@ -174,21 +174,24 @@ class _PreparedSend:
 class _DraftSnapshot:
     """发送前从草稿里取出的字段（只读，避免长事务）。"""
 
-    __slots__ = ("draft_id", "title", "content", "raw_content", "created_by", "template_id")
+    __slots__ = ("draft_id", "title", "content", "raw_content", "created_by")
 
-    def __init__(self, *, draft_id, title, content, raw_content, created_by, template_id):
+    def __init__(self, *, draft_id, title, content, raw_content, created_by):
         self.draft_id = draft_id
         self.title = title
         self.content = content
         self.raw_content = raw_content
         self.created_by = created_by
-        self.template_id = template_id
 
 
-def _load_draft_for_send(draft_id: int) -> _DraftSnapshot:
-    """**只读**：取出发送所需字段。草稿不存在在这里就抛，晚一步都不行。"""
+def _load_draft_for_send(draft_id: int, *, created_by: int | None = None) -> _DraftSnapshot:
+    """**只读**：取出发送所需字段。草稿不存在在这里就抛，晚一步都不行。
+
+    传了 `created_by` 就只认该操作员的草稿（Q08）：批量发送同样走草稿私有语义，
+    别人不能拿一个 draft_id 把别人的草稿发出去。
+    """
     with session_scope(commit=False) as session:
-        draft = announcement_repo.get_draft_by_id(draft_id, session=session)
+        draft = announcement_repo.get_draft_by_id(draft_id, session=session, created_by=created_by)
         if draft is None:
             raise ValueError("draft_not_found")
         return _DraftSnapshot(
@@ -197,7 +200,6 @@ def _load_draft_for_send(draft_id: int) -> _DraftSnapshot:
             content=draft.content,
             raw_content=draft.raw_content,
             created_by=draft.created_by,
-            template_id=draft.template_id,
         )
 
 
@@ -215,7 +217,6 @@ def _create_sending_announcement(
             targets=targets_json,
             target_snapshot=json.dumps([s.model_dump() for s in resolve_result.summary]),
             recipient_count=resolve_result.total_count,
-            template_id=snapshot.template_id,
             source_draft_id=snapshot.draft_id,
             session=session,
         )
@@ -358,7 +359,9 @@ def start_batch_send_service(
     # 全部校验**先做完、再动笔**：否则第 N 条草稿不存在时，前 N-1 条已经建好了
     # SENDING 公告——它们永远发不出去，却会一直显示"发送中"（2026-09 测试抓到的真 bug）。
     resolve_result, targets_json = _resolve_targets_for_send(targets)
-    snapshots = [_load_draft_for_send(did) for did in draft_ids]
+    snapshots = [
+        _load_draft_for_send(did, created_by=operator_user_id) for did in draft_ids
+    ]
 
     prepared = [
         _create_sending_announcement(snapshot, resolve_result, targets_json)
@@ -526,7 +529,11 @@ def start_resend_service(announcement_id: int, *, operator_user_id: int | None =
 def copy_announcement_as_draft_service(
     announcement_id: int, *, created_by: int
 ) -> "AnnouncementDraft":
-    """将已发送公告的内容复制为一条新草稿。"""
+    """将已发送公告的内容复制为一条新草稿。
+
+    只复制内容与目标（Q07）：草稿不与模板保持任何关联，公告上可能残留的历史
+    template_id 不随之下传——否则复制动作会把陈旧关联重新激活。
+    """
     with session_scope() as session:
         ann = announcement_repo.get_announcement_by_id(announcement_id, session=session)
         if ann is None:
@@ -538,7 +545,6 @@ def copy_announcement_as_draft_service(
             raw_content=ann.raw_content,
             created_by=created_by,
             targets=ann.targets,
-            template_id=ann.template_id,
             session=session,
         )
 

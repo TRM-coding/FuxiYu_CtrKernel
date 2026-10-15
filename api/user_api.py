@@ -281,15 +281,23 @@ def delete_user_api(
             operator_user_id=operator_user_id,
         )
     except Exception as e:
-        payload: dict[str, Any] = {
-            "success": 0,
-            "message": "Wild container NOT allowed. Must remove all affected containers first.",
-            "error_reason": "wild_container",
-        }
+        # 只有真的带野容器信息时才报 wild_container。旧的 `except Exception` 把**任何**
+        # 删除异常（例如 users 外键关联行没清干净）都说成野容器，用户按提示去删容器
+        # 却永远删不掉。无野容器信息时如实报一般删除失败。
         wild = getattr(e, "wild_containers", None)
         if wild:
-            payload["wild_containers"] = wild
-        return JSONResponse(status_code=400, content=payload)
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": 0,
+                    "message": "Wild container NOT allowed. Must remove all affected containers first.",
+                    "error_reason": "wild_container",
+                    "wild_containers": wild,
+                },
+            )
+        # 非野容器原因（例如关联行删除失败）：这是服务端删除失败，不是「容器挡住了」。
+        # 如实报 500 + delete_user_failed，避免用户被误导去删根本不存在的无主容器。
+        return _error(500, "user deletion failed", getattr(e, "error_reason", None) or "delete_user_failed")
 
     if ok:
         return {"success": 1, "message": "user deleted"}

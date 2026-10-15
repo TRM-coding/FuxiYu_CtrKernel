@@ -6,7 +6,7 @@ rollback. Transaction boundaries live in service/tasks or API dependencies.
 
 import datetime as dt
 
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect, select, text, update
 from sqlalchemy.orm import Session
 
 from ..constant import AnnouncementStatus, AnnouncementTemplateCategory
@@ -205,9 +205,51 @@ def delete_template(template_id: int, *, session: Session) -> bool:
         return False
     if template.category == AnnouncementTemplateCategory.SYSTEM:
         return False
+    # 2026-10 决策（Q06）：模板生命周期与已生成内容解耦——删除模板不得被"谁引用过它"
+    # 挡住，也不得反过来改写草稿/公告正文。草稿早已不保留关联（见 save_draft）；
+    # 公告上的 template_id 只剩历史追溯，删除前先把指向本模板的引用解除，之后外键
+    # 不再挡路（对旧库尤其重要：那里的外键约束是真的）。
+    _detach_template_references(template_id, session=session)
     session.delete(template)
     session.flush()
     return True
+
+
+def _detach_template_references(template_id: int, *, session: Session) -> int:
+    """把指向该模板的持久引用清空（幂等），返回解除的行数。
+
+    - `announcements.template_id` 走 ORM（新模型仍有这一追溯列）；
+    - 旧库的 `announcement_drafts.template_id` 已不在新模型里，只有物理列还在时才用
+      raw SQL 清，否则会因 no such column 报错。
+
+    反射必须走 **session 自己的连接**（`session.connection()`），不能走
+    `inspect(engine)`：测试库是 StaticPool 的单条 SQLite 连接，反射另开一次
+    engine.connect() 会在归还连接时把本事务里刚做的 UPDATE 一起回滚掉。
+    """
+
+    detached = int(
+        session.execute(
+            update(Announcement)
+            .where(Announcement.template_id == template_id)
+            .values(template_id=None)
+        ).rowcount
+        or 0
+    )
+    inspector = inspect(session.connection())
+    if inspector.has_table("announcement_drafts"):
+        columns = {column["name"] for column in inspector.get_columns("announcement_drafts")}
+        if "template_id" in columns:
+            detached += int(
+                session.execute(
+                    text(
+                        "UPDATE announcement_drafts SET template_id = NULL"
+                        " WHERE template_id = :template_id"
+                    ),
+                    {"template_id": template_id},
+                ).rowcount
+                or 0
+            )
+    return detached
 
 
 #####################
@@ -223,10 +265,18 @@ def save_draft(
     draft_id: int | None = None,
     raw_content: str | None = None,
     targets: str | None = None,
-    template_id: int | None = None,
 ) -> AnnouncementDraft:
+    """新建或更新草稿；更新只认属于 `created_by` 的草稿。
+
+    草稿是每个操作员的私有编辑区（Q08）：更新按 (draft_id, created_by) 定位，别人的
+    草稿当作不存在（`draft_not_found`），既不泄露存在性也不改动数据。
+
+    这里**没有** template_id 参数（Q06/Q07）：模板选择是编辑器侧的一次性初值复制，
+    草稿落库的是独立内容快照，不与模板保持持久关联。
+    """
+
     if draft_id is not None:
-        draft = get_draft_by_id(draft_id, session=session)
+        draft = get_draft_by_id(draft_id, session=session, created_by=created_by)
         if draft is None:
             raise ValueError("draft_not_found")
         draft.title = title
@@ -235,8 +285,6 @@ def save_draft(
             draft.raw_content = raw_content
         if targets is not None:
             draft.targets = targets
-        if template_id is not None:
-            draft.template_id = template_id
         draft.updated_at = dt.datetime.utcnow()
     else:
         draft = AnnouncementDraft(
@@ -245,15 +293,26 @@ def save_draft(
             created_by=created_by,
             raw_content=raw_content,
             targets=targets,
-            template_id=template_id,
         )
         session.add(draft)
     session.flush()
     return draft
 
 
-def get_draft_by_id(draft_id: int, *, session: Session) -> AnnouncementDraft | None:
-    return session.get(AnnouncementDraft, int(draft_id))
+def get_draft_by_id(
+    draft_id: int, *, session: Session, created_by: int | None = None
+) -> AnnouncementDraft | None:
+    """按 id 取草稿；给了 `created_by` 就只认该操作员的草稿（Q08 私有语义）。
+
+    `created_by=None` 只给不面向请求的内部路径用；API 与发送路径一律显式传操作员。
+    """
+
+    draft = session.get(AnnouncementDraft, int(draft_id))
+    if draft is None:
+        return None
+    if created_by is not None and draft.created_by != created_by:
+        return None
+    return draft
 
 
 def list_drafts(
@@ -276,8 +335,12 @@ def list_drafts(
     return rows, total
 
 
-def delete_draft(draft_id: int, *, session: Session) -> bool:
-    draft = get_draft_by_id(draft_id, session=session)
+def delete_draft(
+    draft_id: int, *, session: Session, created_by: int | None = None
+) -> bool:
+    """删除草稿；给了 `created_by` 就只能删自己的（Q08）。"""
+
+    draft = get_draft_by_id(draft_id, session=session, created_by=created_by)
     if draft is None:
         return False
     session.delete(draft)

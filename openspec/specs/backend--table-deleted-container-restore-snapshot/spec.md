@@ -2,7 +2,7 @@
 
 ## Purpose
 
-删除后用于复活的配置和挂载目录保留记录。本文件是 d6d0d0e26fb6（chester-next）在 2026-10-11 的代码逆向基线，以表结构为单位记录已实现的契约。字段声明、外键、唯一约束以模型和服务为依据；已知缺陷及迁移风险统一登记在 [Global QUESTIONS](../../../../FuxiYu_Global/QUESTIONS.md)，不代表修复已完成。
+删除后用于复活的配置和挂载目录保留记录。本规格按表结构记录当前持久化与生命周期契约，字段声明以模型与服务为依据。未完成问题见 [Global QUESTIONS](../../../../FuxiYu_Global/QUESTIONS.md)。
 
 ## Requirements
 
@@ -10,9 +10,7 @@
 
 系统 SHALL 使用数据附录的字段声明持久化 `DeletedContainerRestoreSnapshot`，遵守模型声明的主键、非空、唯一键、外键及默认值；Python 默认值与数据库 server_default 必须分别理解。
 
-
 字段与成员见文末同名数据附录。
-
 
 #### Scenario: 读取有效记录
 
@@ -27,6 +25,18 @@
 
 - **WHEN** 恢复门户成功重建容器并完成账号还原
 - **THEN** 消费恢复快照并清除对应挂载清理记录，避免同一快照被再次使用
+
+### Requirement: 长期配额失败保留可重试恢复状态
+
+长期容量校验 SHALL 在真正恢复操作的副作用之前进行。容量不足时 MUST NOT 复活容器、请求 Node 创建、消费恢复快照或清除挂载保留记录；调用方 SHALL 收到明确的超限失败，不能靠事后静默丢弃长期标记收尾。
+
+#### Scenario: 失败后仍可恢复
+- **WHEN** 长期恢复因数量已满而被拒绝
+- **THEN** 原容器保持已删除，恢复快照及挂载清理记录保留；释放配额后可以重试
+
+#### Scenario: 完成长期恢复
+- **WHEN** 有容量且恢复成功
+- **THEN** 长期标记和账号按快照恢复，并沿用原有成功时消费快照的规则
 
 ## Data model appendix
 
@@ -54,5 +64,4 @@
 
 - [models/deleted_container_restore_snapshot.py](../../../models/deleted_container_restore_snapshot.py)：DeletedContainerRestoreSnapshot，第 8 行。
 - 数据库初始化：[`__init__.py`](../../../__init__.py)、[`extensions.py`](../../../extensions.py)；`create_all` 只创建缺失表，不推定已替旧表完成列迁移。
-- 回归验证：[`test/`](../../../test/) 中该单元对应的仓储、服务、API 用例；本次默认安全套件 992 passed、6 deselected。
-
+- 回归验证：[test/container/test_restore_long_term_capacity.py](../../../test/container/test_restore_long_term_capacity.py)；运行结果以当前隔离安全套件为准。

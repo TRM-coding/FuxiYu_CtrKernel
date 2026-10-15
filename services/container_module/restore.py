@@ -541,15 +541,42 @@ def _get_restored_container_id(container_name: str, machine_id: int) -> int:
     return int(container_id)
 
 
+def _restore_root_user_ids(root_account: dict) -> list[int]:
+    """恢复后将成为 root 的用户：owner 恒为 root（其余 ROOT 角色的协作者绑定会被跳过）。
+
+    长期配额按 root 用户计（`count_by_user` join ROLE=ROOT），因此只取 owner。
+    """
+    owner_user_id = root_account.get("user_id")
+    return [int(owner_user_id)] if owner_user_id else []
+
+
+def _ensure_restore_long_term_capacity(snapshot: dict, root_account: dict) -> None:
+    """恢复长期态前的配额预检：快照是长期容器时，按与门户 set_long_term 同一口径校验。
+
+    必须在 `Create_container` 之前调用——那之前 Node 未调用、容器未复活、快照未消费，
+    超限可以干净拒绝，不产生半恢复。快照无 `is_long_term` 时不校验。
+    """
+    if not snapshot.get("is_long_term"):
+        return
+    # 与普通入口共用同一份配额实现（含失败原因里的 used/limit 数量值）。
+    from .long_term import _ensure_long_term_capacity_for_users
+
+    _ensure_long_term_capacity_for_users(_restore_root_user_ids(root_account))
+
+
 def _restore_long_term_state(container_id: int, snapshot: dict, operator_user_id: int | None) -> None:
-    """恢复长期态：快照里是长期容器才补长期标记（否则不动）。"""
-    if snapshot.get("is_long_term"):
-        with session_scope() as session:
-            long_term_container_repo.add(
-                container_id,
-                created_by_user_id=operator_user_id,
-                session=session,
-            )
+    """恢复长期态：快照里是长期容器才补长期标记（否则不动）。
+
+    落库委托门户同一份 `_persist_long_term_state`（按 `is_long_term` 幂等）；配额预检在
+    `Create_container` 之前，不在这里。
+    """
+    if not snapshot.get("is_long_term"):
+        return
+    from .long_term import _persist_long_term_state
+
+    with session_scope(commit=False) as session:
+        existing = long_term_container_repo.is_long_term(container_id, session=session)
+    _persist_long_term_state(container_id, True, existing, operator_user_id)
 
 
 def _delete_restore_artifacts(deleted_id: int, mount_cleanup_id: int | None) -> None:

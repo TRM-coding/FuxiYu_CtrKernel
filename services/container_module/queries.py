@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 
 from ...extensions import session_scope
 from ...repositories import (
@@ -14,7 +13,7 @@ from ...repositories import (
     usercontainer_repo,
 )
 from .. import settings_tasks
-from .utils import build_cleanup_info, effective_grace_until
+from .utils import build_cleanup_info, effective_days_frozen, effective_grace_until
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +94,7 @@ def _get_container_freeze_state(container_id: int, *, ignore_errors: bool = Fals
                 _effective.isoformat()
                 if (_effective := effective_grace_until(state)) else None
             ),
-            "days_frozen": (datetime.utcnow() - state.first_frozen_at).days if state.first_frozen_at else 0,
+            "days_frozen": effective_days_frozen(state.first_frozen_at, state.deferral_seconds),
             "escalation_days": settings_tasks.get_container_disk_freeze_escalation_days(),
         }
     except Exception as exc:
