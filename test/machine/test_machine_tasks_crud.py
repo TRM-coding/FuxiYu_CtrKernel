@@ -271,6 +271,19 @@ def test_get_detail_information_success(db_session):
     assert info.machine_name == "detail_machine"
     assert info.machine_status == MachineStatus.ONLINE.value
     assert info.containers == []
+    assert info.port is None
+
+
+def test_get_detail_information_returns_configured_port(db_session):
+    """Q15：服务层必须把记录里显式配置的端口带出来，而不是回落全局默认。"""
+
+    machine = create_machine(machine_name="detail_port_machine")
+    with session_scope() as session:
+        session.get(Machine, machine.id).port = 6789
+
+    info = machine_tasks.Get_detail_information(machine.id)
+
+    assert info.port == 6789
 
 
 def test_get_detail_information_missing_machine_returns_none(db_session):

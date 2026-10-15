@@ -2,7 +2,7 @@
 
 ## Purpose
 
-宿主机身份、信任锚、硬件事实及分配上限。本文件是 d6d0d0e26fb6（chester-next）在 2026-10-11 的代码逆向基线，以表结构为单位记录已实现的契约。字段声明、外键、唯一约束以模型和服务为依据；已知缺陷及迁移风险统一登记在 [Global QUESTIONS](../../../../FuxiYu_Global/QUESTIONS.md)，不代表修复已完成。
+定义宿主机身份、信任锚、硬件事实、分配上限和 Node 端点契约。详情保留逐机端口或平台默认配置的空值语义，机器读取、修改与出站连接分别遵守既有权限及信任规则。
 
 ## Requirements
 
@@ -10,9 +10,7 @@
 
 系统 SHALL 使用数据附录的字段声明持久化 `Machine`，遵守模型声明的主键、非空、唯一键、外键及默认值；Python 默认值与数据库 server_default 必须分别理解。
 
-
 字段与成员见文末同名数据附录。
-
 
 #### Scenario: 读取有效记录
 
@@ -154,6 +152,18 @@
 - **WHEN** 动作类定时任务遇到维护中或不可达的机器
 - **THEN** 该次动作不发生，且不写审计与常规日志；机器记录缺失同样按范畴外处理，不抛异常
 
+### Requirement: 机器详情保留配置端口
+
+机器详情响应 SHALL 提供 port: int | null，非空取值范围为 1–65535，保留机器实际配置的 Node 端口；配置为空时 SHALL 表达使用全局默认端口，MUST NOT 将默认值硬编码写入机器记录或伪装成逐机配置。接口响应模型 MUST NOT 丢弃服务返回的端口，现有机器读取与资源权限 SHALL 保持生效。
+
+#### Scenario: 自定义端口可读取
+- **WHEN** 已登记机器配置 port=6789，用户具备该机器详情读取权限
+- **THEN** 实际 API 响应保留 6789，不被模型过滤或默认端口覆盖
+
+#### Scenario: 空配置仍使用平台默认
+- **WHEN** 机器记录 port 为空
+- **THEN** 响应保留空配置语义，出站解析仍按现行全局默认配置执行
+
 ## Data model appendix
 
 ### machines 持久化结构
@@ -191,5 +201,4 @@
 - [models/machine.py](../../../models/machine.py)：Machine，第 5 行。
 - 数据库初始化：[`__init__.py`](../../../__init__.py)、[`extensions.py`](../../../extensions.py)；`create_all` 只创建缺失表，不推定已替旧表完成列迁移。
 - 共享内存上限校验：[`services/machine_tasks.py`](../../../services/machine_tasks.py) `Update_machine`，第 565-636 行（无固定 8GB 上限、可解析整数且拒绝非整小数、按实际落库状态校验组合后的 shared ≤ mem，显式 null 沿用当前记录）；回归见 [`test/machine/test_machine_tasks_status.py`](../../../test/machine/test_machine_tasks_status.py) 与 [`test/machine/test_machine_api_crud.py`](../../../test/machine/test_machine_api_crud.py)。
-- 回归验证：[`test/`](../../../test/) 中该单元对应的仓储、服务、API 用例；本次默认安全套件 992 passed、6 deselected。
-
+- 回归验证：[`test/`](../../../test/) 中该单元对应的仓储、服务、API 用例；运行结果以当前隔离安全套件为准。

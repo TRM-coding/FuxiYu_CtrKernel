@@ -3,7 +3,7 @@ from ..models.user import User
 from werkzeug.security import check_password_hash, generate_password_hash
 from ..extensions import session_scope
 from ..repositories.user_repo import *
-from ..repositories import authentications_repo
+from ..repositories import auth_repo, authentications_repo
 from ..repositories import registration_code_repo
 from ..repositories import usercontainer_repo, containers_repo, long_term_container_repo
 from .operation_log_tasks import log_failure, log_success
@@ -12,6 +12,8 @@ from ..constant import ROLE, ContainerStatus, OperationType
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 import secrets
+
+from sqlalchemy.exc import IntegrityError
 
 #####################################
 # API Definition
@@ -78,29 +80,17 @@ def Login(username: str, password: str, *, remember: bool = False):
 
 #####################################
 #注册
-def Register(username: str, email: str, password: str, graduation_year):
-    """用户注册
-    
-    Args:
-        username: 用户名
-        email: 邮箱
-        password: 密码
-        graduation_year: 毕业年份
-        
-    Returns:
-        tuple: (是否成功, User对象或错误原因, None)
-               - 用户名已存在: (False, "username_exists", None)
-               - 邮箱已存在: (False, "email_exists", None)
-               - 注册成功: (True, User对象, None)
-    """
+def _validate_registration_fields(username: str, email: str, password: str) -> str | None:
+    """校验注册参数，返回错误原因或 None。"""
     # enforce length limits
     if username and len(username) > 75:
-        return False, "username_too_long", None
+        return "username_too_long"
     if email and len(email) > 115:
-        return False, "email_too_long", None
+        return "email_too_long"
 
     # 禁用非ASCII字符（如中文）以避免数据库异常
     import re
+
     # username must be strict identifier: letters/digits/underscore only
     def _is_valid_username(s: str) -> bool:
         try:
@@ -120,34 +110,65 @@ def Register(username: str, email: str, password: str, graduation_year):
 
     # enforce username format first
     if not _is_valid_username(username):
-        return False, 'invalid_username', None
+        return 'invalid_username'
 
     # keep ascii checks for other fields
     if not _is_all_ascii(email) or not _is_all_ascii(password):
-        return False, "no_none_ascii", None
+        return "no_none_ascii"
+    return None
 
-    # 检查用户名是否已存在
-    with session_scope() as session:
-        if get_by_name(username, session=session):
-            return False, "username_exists", None
 
-        # 检查邮箱是否已存在
-        if get_by_email(email, session=session):
-            return False, "email_exists", None
+def _registration_conflict_reason(session, username: str, email: str) -> str | None:
+    """重名预检：只用于给出既有 error_reason；唯一性最终由 users 唯一约束兜底。"""
 
-        # 创建新用户
-        try:
-            new_user = create_user( # 改用repository层的create_user函数
-                username=username,
-                email=email,
-                password_hash=generate_password_hash(password),
+    if get_by_name(username, session=session):
+        return "username_exists"
+    if get_by_email(email, session=session):
+        return "email_exists"
+    return None
+
+
+def _create_user_row(session, username: str, email: str, password: str, graduation_year):
+    """在调用方事务内建用户；事务结束后再由调用方记录审计。"""
+    reason = _registration_conflict_reason(session, username=username, email=email)
+    if reason:
+        return reason, None
+    new_user = create_user(
+        username=username,
+        email=email,
+        password_hash=generate_password_hash(password),
+        graduation_year=graduation_year,
+        session=session,
+    )
+    return None, new_user
+
+
+def _bind_default_group_in_session(session, user_id: int) -> None:
+    """在注册事务内绑定默认组，绑定失败时交由调用方整体回滚。"""
+
+    group = auth_repo.get_group("user", session=session)
+    if group is not None:
+        auth_repo.ensure_user_group(user_id, group.id, session=session)
+
+
+def Register(username: str, email: str, password: str, graduation_year):
+    """普通建号，保留既有校验、默认组绑定与返回元组。"""
+    reason = _validate_registration_fields(username, email, password)
+    if reason:
+        return False, reason, None
+
+    try:
+        with session_scope() as session:
+            reason, new_user = _create_user_row(
+                session, username=username, email=email, password=password,
                 graduation_year=graduation_year,
-                session=session,
             )
-        except Exception as e:
-            log_failure(operation=OperationType.REGISTER_USER, target_type="user", target_id=0,
-                         detail={"username": username, "email": email}, error_reason=str(e))
-            raise
+            if reason:
+                return False, reason, None
+    except Exception as e:
+        log_failure(operation=OperationType.REGISTER_USER, target_type="user", target_id=0,
+                     detail={"username": username, "email": email}, error_reason=str(e))
+        raise
     # RBAC 建号组绑定：新用户默认 user 组（operator 建号由 seed 显式绑 operator 组）
     from .rbac_service import bind_user_default_group
     bind_user_default_group(new_user.id)
@@ -512,8 +533,26 @@ def Request_register_code(email: str):
     return True, 'code_sent'
 
 
+class _RegistrationRejected(Exception):
+    """注册业务性拒绝：让 session_scope 回滚验证码消费，再由调用方转成既有返回元组。"""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _conflict_reason_after_rollback(username: str, email: str) -> str | None:
+    """唯一约束兜底失败后，在全新只读事务里复核冲突字段，归类为既有 error_reason。"""
+
+    try:
+        with session_scope(commit=False) as session:
+            return _registration_conflict_reason(session, username=username, email=email)
+    except Exception:
+        return None
+
+
 def Register_with_code(username: str, email: str, password: str, graduation_year, registration_code: str):
-    '''带验证码的注册流程。'''
+    '''同一事务提交用户、默认组和验证码消费，失败时保留有效验证码。'''
     if not registration_code:
         return False, 'registration_code_required', None
 
@@ -521,15 +560,47 @@ def Register_with_code(username: str, email: str, password: str, graduation_year
     if domain not in ALLOWED_REGISTRATION_EMAIL_DOMAINS:
         return False, 'email_domain_not_allowed', None
 
-    with session_scope() as session:
-        if not registration_code_repo.verify_code(
-            email=email,
-            code=registration_code,
-            school_domain=domain,
-            session=session,
-        ):
-            return False, 'registration_code_invalid', None
+    # 参数校验前置：非法输入不消费验证码（原实现先消费、后由 Register 拒绝）
+    reason = _validate_registration_fields(username, email, password)
+    if reason:
+        return False, reason, None
 
-    return Register(username, email, password, graduation_year)
+    try:
+        with session_scope() as session:
+            # 消费与建档共用同一 session：以下任何 raise 都会让 session_scope 整体回滚
+            if not registration_code_repo.verify_and_consume_code(
+                email=email,
+                code=registration_code,
+                school_domain=domain,
+                session=session,
+            ):
+                raise _RegistrationRejected('registration_code_invalid')
+
+            reason, new_user = _create_user_row(
+                session, username=username, email=email, password=password,
+                graduation_year=graduation_year,
+            )
+            if reason:
+                raise _RegistrationRejected(reason)
+            # 必要身份关联与用户创建、验证码消费同一次提交：绑定失败则整体回滚
+            _bind_default_group_in_session(session, new_user.id)
+    except _RegistrationRejected as rejected:
+        return False, rejected.reason, None
+    except IntegrityError as exc:
+        # 并发下双方预检都可能通过，users 唯一约束才是最终闸门；消费已随事务回滚。
+        fallback = _conflict_reason_after_rollback(username, email)
+        if fallback:
+            return False, fallback, None
+        log_failure(operation=OperationType.REGISTER_USER, target_type="user", target_id=0,
+                     detail={"username": username, "email": email}, error_reason=str(exc))
+        raise
+    except Exception as e:
+        log_failure(operation=OperationType.REGISTER_USER, target_type="user", target_id=0,
+                     detail={"username": username, "email": email}, error_reason=str(e))
+        raise
+
+    log_success(operation=OperationType.REGISTER_USER, target_type="user", target_id=new_user.id,
+                 detail={"username": username, "email": email})
+    return True, new_user, None
 
 

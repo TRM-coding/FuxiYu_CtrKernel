@@ -178,6 +178,8 @@ class MachineStatusResponse(BaseModel):
 class MachineDetailResponse(NodeHardwareProfile, MachineAllocationLimit):
     machine_name: str = ""
     machine_ip: str = ""
+    # 原样保留逐机配置；None 表示使用平台默认端口。
+    port: int | None = Field(default=None, ge=1, le=65535)
     machine_type: MachineType = "CPU"
     machine_status: MachineStatus = "offline"
     is_maintenance: bool = False

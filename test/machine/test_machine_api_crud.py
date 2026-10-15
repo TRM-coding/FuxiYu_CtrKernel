@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ...extensions import session_scope
 from ...models.machine import Machine
 from ...services.container_module.exceptions import NodeServiceError
 
@@ -468,6 +469,34 @@ def test_get_machine_detail_success(client, monkeypatch):
 
     assert resp.status_code == 200
     assert resp.json()["machine_name"] == "m"
+
+
+def test_get_machine_detail_returns_configured_port(client, monkeypatch, db_session):
+    """Q15：response_model 必须保留服务返回的 port，不能把自定义端口过滤成默认。"""
+
+    _auth(monkeypatch)
+    machine = create_machine(machine_name="detail_port_machine")
+    with session_scope() as session:
+        session.get(Machine, machine.id).port = 6789
+
+    resp = client.post("/api/machines/get_detail_information", json={"machine_id": machine.id})
+
+    assert resp.status_code == 200
+    assert resp.json()["port"] == 6789
+
+
+def test_get_machine_detail_keeps_null_port_without_default_filling(client, monkeypatch, db_session):
+    """Q15：未配置端口回传 null，MUST NOT 填入全局默认端口号掩盖真实配置。"""
+
+    _auth(monkeypatch)
+    machine = create_machine(machine_name="detail_default_port_machine")
+    with session_scope() as session:
+        session.get(Machine, machine.id).port = None
+
+    resp = client.post("/api/machines/get_detail_information", json={"machine_id": machine.id})
+
+    assert resp.status_code == 200
+    assert resp.json()["port"] is None
 
 
 #####################
