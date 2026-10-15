@@ -2,7 +2,7 @@
 
 ## Purpose
 
-容器身份、资源配置、软删标记及运行快照。本文件是 d6d0d0e26fb6（chester-next）在 2026-10-11 的代码逆向基线，以表结构为单位记录已实现的契约。字段声明、外键、唯一约束以模型和服务为依据；已知缺陷及迁移风险统一登记在 [Global QUESTIONS](../../../../FuxiYu_Global/QUESTIONS.md)，不代表修复已完成。
+定义容器资源的持久化字段、账号关联、配方留痕、构建版本与恢复行为。区分资源身份与实际制品版本，保持旧容器留痕，并约束恢复内容选择及挂载数据边界。
 
 ## Requirements
 
@@ -10,9 +10,7 @@
 
 系统 SHALL 使用数据附录的字段声明持久化 `Container`，遵守模型声明的主键、非空、唯一键、外键及默认值；Python 默认值与数据库 server_default 必须分别理解。
 
-
 字段与成员见文末同名数据附录。
-
 
 #### Scenario: 读取有效记录
 
@@ -46,17 +44,19 @@
 
 ### Requirement: containers 构建版本戳与运行标签
 
-系统 SHALL 以 `last_build_at` 记录本次运行标签的版本戳：缓存命中时取该机器上 `machine_image.created_at`，现造时取派发时刻；它与标签同源同生，容器行照抄。运行镜像标签 SHALL 由 `image_id` 与 `last_build_at` 推导并 MUST NOT 落库；两者缺一时 SHALL 返回空值，MUST NOT 用当前时间等替代值拼出标签。容器是否落后于模板 SHALL 由 `last_build_at` 早于模板当前版本（`images.updated_at`）判定，MUST NOT 用容器 `created_at` 参与该判定。
+系统 SHALL 以 last_build_at 保存本次实际标签的版本戳，与本次配方解析结果同源；缓存命中时复用已选版本，不命中时选择可区分的新版本。运行镜像标签 SHALL 由 image_id 和 last_build_at 推导，MUST NOT 另存入容器行；两者缺一 SHALL 返回空值。恢复是否需要选择内容 SHALL 优先比较容器留痕与当前模板的基础镜像、业务片段及入口命令，MUST NOT 将逻辑递增的构建版本当作模板内容版本。无完整留痕的存量数据才采用构建版本戳与模板更新时间比较，容器 created_at MUST NOT 参与。
 
 #### Scenario: 落后判据只看版本戳
-
-- **WHEN** 容器的 `last_build_at` 早于其模板的当前版本
-- **THEN** 判定为落后；`created_at` 不参与判定，按最新模板恢复过的容器不因创建时间早被误判
+- **WHEN** 存量容器没有可供比较的配方留痕，构建版本戳早于模板当前版本
+- **THEN** 时间戳回落判定为落后；不比较容器创建时间。有完整留痕时按内容比较，不适用此回落
 
 #### Scenario: 标签推导不出时不编造
+- **WHEN** 容器的 image_id 或 last_build_at 缺失
+- **THEN** 运行镜像标签推导为空值，不用当前时间替代缺失输入
 
-- **WHEN** 容器的 `image_id` 或 `last_build_at` 缺失
-- **THEN** 运行镜像标签推导为空值；不落库，也不用当前时间顶替缺失的输入拼出一个从未存在过的标签
+#### Scenario: 秒级版本递增不掩盖内容差异
+- **WHEN** 容器构建版本因连续换代而晚于当前墙钟，但模板正文随后发生改变
+- **THEN** 仍能通过配方比较识别内容不同，恢复前提供内容选择；仅改名或描述不制造内容差异
 
 ### Requirement: containers 构建配方留痕与运行基底展示
 
@@ -69,12 +69,11 @@
 
 ### Requirement: containers 恢复内容来源选择
 
-恢复软删容器 SHALL 以容器留痕为前提；内容来源按归属与模板状态判定：归属为空或模板非 READY 时取容器留痕；模板 READY 且容器不落后时取当前模板；模板 READY 但容器落后且未指定内容来源时 SHALL 返回选择响应而不执行恢复；指定容器留痕时取留痕，显式指定 `content_source=template` 时取当前模板。恢复 SHALL 刷新 `last_build_at` 与配方留痕，使其反映本次实际采用的内容。
+恢复软删容器 SHALL 以留痕为前提。归属为空或模板非 READY 时取容器留痕；模板 READY 且模板侧配方相同时可取当前模板；模板侧配方不同时，未指定内容来源 SHALL 返回选择响应而不恢复，指定 snapshot 取留痕，指定 template 取当前模板。两种来源 SHALL 均使用当前平台注入，并按实际最终配方选择标签和刷新 last_build_at，不复用与当前组合不一致的历史标签。
 
 #### Scenario: 内容会变时先交回两份
-
-- **WHEN** 容器落后于模板且调用方未指定内容来源
-- **THEN** 不执行恢复，响应带 `requires_choice=true`、两份内容与按配方分段（不含平台注入段）的差异，且 `container_id` 为空
+- **WHEN** 容器留痕与当前 READY 模板内容不同，调用方未指定来源
+- **THEN** 不执行恢复，响应带 requires_choice=true、两份内容及不含平台注入的分段差异，container_id 为空
 
 ### Requirement: containers 恢复挂载与数据位置
 
@@ -84,6 +83,18 @@
 
 - **WHEN** 调用方选择任一内容来源恢复容器，并调整容器名称
 - **THEN** 恢复使用同一挂载路径和数据位置，容器改名不改变数据位置
+
+### Requirement: 镜像换代保持容器留痕与关联有效
+
+模板或平台注入换代 SHALL 保留已有容器的 image_id、构建版本、账号绑定和机器关联。新建或恢复实际采用的新配方 MUST 使用与该配方一致的构建标签及留痕，不将旧标签与变化后的平台注入组合；历史版本的查询不能因当前缓存已更新而凭空改为新版本标签。
+
+#### Scenario: 缓存换代后读取旧容器
+- **WHEN** 模板缓存已指向新版本，查询旧容器
+- **THEN** 旧容器归属及实际版本仍可识别，不被改写为新派发的版本
+
+#### Scenario: 恢复采用历史正文与当前注入
+- **WHEN** 恢复使用容器保留的正文，但当前平台注入已变化
+- **THEN** 发送与该实际组合一致的构建版本，不因旧标签已存在而跳过新组合的构建
 
 ## Data model appendix
 
@@ -133,5 +144,4 @@
 - [models/containers.py](../../../models/containers.py)：Container，第 7 行。
 - 数据库初始化：[`__init__.py`](../../../__init__.py)、[`extensions.py`](../../../extensions.py)；`create_all` 只创建缺失表，不推定已替旧表完成列迁移。
 - 共享内存双重上限校验：[`repositories/containers_repo.py`](../../../repositories/containers_repo.py) `validate_shared_request`，第 420-448 行（机器共享上限 + 本次申请内存）；回归见 [`test/container/test_container_shared_memory_limit.py`](../../../test/container/test_container_shared_memory_limit.py)。
-- 回归验证：[`test/`](../../../test/) 中该单元对应的仓储、服务、API 用例；本次默认安全套件 992 passed、6 deselected。
-
+- 回归验证：[`test/`](../../../test/) 中该单元对应的仓储、服务、API 用例；运行结果以当前隔离安全套件为准。

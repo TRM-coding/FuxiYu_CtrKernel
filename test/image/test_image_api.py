@@ -305,25 +305,37 @@ def test_normal_user_cannot_detail_system_image(client, monkeypatch):
     assert resp.status_code == 403
 
 
-def test_mine_only_list_uses_user_image_binding_not_created_by(client, monkeypatch):
-    """编辑页“只看我的”按 user_images 资源绑定，不按 created_by_user_id 派生。"""
+def test_mine_only_list_uses_created_by_not_user_image_binding(client, monkeypatch):
+    """编辑页“只看我的”按 created_by_user_id；user_images 授权只决定 CUSTOM 可见性。
+
+    ★ 授权不是所有权：被授权者在这一栏看不到别人建的模板，创建者才看得到自己的。
+    """
     editor = create_user()
     _auth(monkeypatch, user_id=7)
-    image_id = client.post(
+    other_id = client.post(
         "/api/images/create_image",
         json={"name": "shared-to-editor", "base_image": "ubuntu:24.04", "dockerfile_body": ""},
     ).json()["image_id"]
 
+    # editor 自己建的模板（自己的那份才是"我的"）
+    _auth(monkeypatch, user_id=editor.id)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service._has_resource_manage_direct", lambda uid, kind: True)
+    own_id = client.post(
+        "/api/images/create_image",
+        json={"name": "own-by-editor", "base_image": "ubuntu:24.04", "dockerfile_body": ""},
+    ).json()["image_id"]
+
     with session_scope() as session:
-        userimage_repo.grant_image(editor.id, image_id, session=session)
+        userimage_repo.grant_image(editor.id, other_id, session=session)
 
     _auth(monkeypatch, user_id=editor.id)
     monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service._has_resource_manage_direct", lambda uid, kind: False)
 
     body = client.get("/api/images/list_image_bref_information?mine_only=true&page_size=50").json()
     images = {item["name"]: item for item in body["images"]}
-    assert "shared-to-editor" in images
-    assert images["shared-to-editor"]["created_by_user_id"] == 7
+    assert "own-by-editor" in images
+    assert images["own-by-editor"]["created_by_user_id"] == editor.id
+    assert "shared-to-editor" not in images, "被授权 ≠ 我的：授权行不得混进 mine_only"
     assert "Ubuntu 24.04 · 基础" not in images
 
 

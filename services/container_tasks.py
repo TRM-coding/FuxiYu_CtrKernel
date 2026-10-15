@@ -140,35 +140,35 @@ def Create_container(
         container, machine_id, image_build, restore_mount_path, reuse_container_id,
         image_id, image_version_at, dockerfile_parts,
     )
-    _record_machine_image(machine_id, image_id, image_build, image_version_at)
+    _record_machine_image(machine_id, image_id, image_build, image_version_at, dockerfile_parts)
     _bind_owner_and_restored_accounts(container_id, owner_user_id, public_key, restore_accounts)
     _seed_initial_ssh_record(machine_id, container_id)
     _audit_create(container_id, container, machine_id, operator_user_id, reuse_container_id, image_id)
     return True
 
 
-def _record_machine_image(machine_id: int, image_id: int | None, image_build: dict | None, version_at) -> None:
-    """把"这台机器上这份模板该用哪条标签"写进缓存表（机器 × 模板 一行）。
-
-    写入时机是**派发之后**，语义是"请求过"、不是"建成过"，因此构建失败也会留痕；
-    宿主机上的制品被外部 prune 掉时本表不会更正——但无害：标签没变，Node 那边
-    `images.get(tag)` 未命中会依随行的 Dockerfile 重建，自愈。
-
-    `image_build["image_tag"]` 与 `version_at` 必须来自**同一次解析**
-    （`image_tasks.resolve_image_build_tag` 的返回值），不要在这里另取 now()——它们要成为
-    下一次创建读回来复用的权威值，两个值必须一模一样。
-    没有构建段的通路（直接运行）不写：那次根本没有派发构建。
-    失败只 warning 不阻断：这张表是缓存层，它的可用性不该影响创建容器。
-    """
+def _record_machine_image(
+    machine_id: int,
+    image_id: int | None,
+    image_build: dict | None,
+    version_at,
+    dockerfile_parts: DockerfileParts | None = None,
+) -> None:
+    """派发后确认同次解析的缓存版本；确认失败记录告警，不回滚已受理的创建。"""
     if image_id is None or version_at is None or not image_build:
         return
     image_tag = image_build.get("image_tag")
     if not image_tag:
         return
+    fingerprint = None
+    if dockerfile_parts is not None:
+        from .image_tasks import recipe_fingerprint
+
+        fingerprint = recipe_fingerprint(dockerfile_parts)
     try:
         with session_scope() as session:
             machine_image_repo.record_dispatch(
-                machine_id, int(image_id), image_tag, version_at, session=session
+                machine_id, int(image_id), image_tag, version_at, fingerprint, session=session
             )
     except Exception as e:  # pragma: no cover
         logger.warning(

@@ -24,8 +24,9 @@ from ..models.userimage import UserImage
 class ImageScope(NamedTuple):
     """镜像列表的可见性口径（由 services.image_tasks._visible_scope 造出）。
 
-    - `unrestricted`：资源通配者（image:manage / bypass_resource）→ 不过滤，看全部
-    - `mine_only`   ：编辑页"只看我的" → 只认 user_images 授权行，**不走三态**
+    - `unrestricted`：资源通配者（bypass_resource / image:manage）→ 不过滤，看全部
+    - `mine_only`   ：编辑页"只看我的" → **严格 created_by_user_id == 当前用户**，
+                      **不走三态**、**不看 `unrestricted`**、也**不看 `granted_ids`**
     - 其余          ：走三态可见性（见 image_visibility_condition）
     """
     unrestricted: bool
@@ -44,10 +45,12 @@ class ImageScope(NamedTuple):
 
 def image_visibility_condition(scope: ImageScope):
     """列表可见性的 SQL 谓词。unrestricted → None（调用方不加过滤）。"""
+    if scope.mine_only:
+        if scope.viewer_user_id is None:
+            return false()
+        return Image.created_by_user_id == scope.viewer_user_id
     if scope.unrestricted:
         return None
-    if scope.mine_only:
-        return Image.id.in_(sorted(scope.granted_ids)) if scope.granted_ids else false()
     conds = [Image.valid_range == ImageValidRange.EVERYONE]
     if scope.viewer_user_id is not None:
         # 自己建的一律看得见（PRIVATE 靠这一条，CUSTOM 下也成立——名单把人删掉也不该

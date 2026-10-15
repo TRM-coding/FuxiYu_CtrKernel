@@ -2,7 +2,7 @@
 
 ## Purpose
 
-某机器已构建镜像模板版本的缓存记录。本文件是 d6d0d0e26fb6（chester-next）在 2026-10-11 的代码逆向基线，以表结构为单位记录已实现的契约。字段声明、外键、唯一约束以模型和服务为依据；已知缺陷及迁移风险统一登记在 [Global QUESTIONS](../../../../FuxiYu_Global/QUESTIONS.md)，不代表修复已完成。
+机器与镜像模板配对的构建版本选择缓存，记录标签、版本戳和配方指纹；Node 根据准确标签判断实际制品是否存在。
 
 ## Requirements
 
@@ -10,9 +10,7 @@
 
 系统 SHALL 使用数据附录的字段声明持久化 `MachineImage`，遵守模型声明的主键、非空、唯一键、外键及默认值；Python 默认值与数据库 server_default 必须分别理解。
 
-
 字段与成员见文末同名数据附录。
-
 
 #### Scenario: 读取有效记录
 
@@ -21,41 +19,63 @@
 
 ### Requirement: machine_image 生产职责与生命周期
 
-系统 SHALL 按以下已实现的生命周期使用本表：machine_id/image_id 配对映射到 image_tag；镜像模板编辑使记录失效，entrypoint 参与最终 Dockerfile 的 ENTRYPOINT 构建段。实际渲染以 image_tasks 为准，模型内仍有旧注释，差异见 Global QUESTIONS。
+系统 SHALL 按 machine_id/image_id 配对保存当前已选择的构建版本。最终配方包括基础镜像、平台注入、业务片段和入口命令；配方改变 SHALL 使旧缓存不能继续命中，新版本一经可靠分配后 SHALL 稳定复用，不删除或重建镜像、容器及用户授权的身份关联。
 
 #### Scenario: 模板构建内容变化
-
-- **WHEN** 模板 Dockerfile 内容更新
-- **THEN** 使对应机器构建记录失效，后续创建重新构建所需镜像
+- **WHEN** 模板构建内容变化后再次在同一机器创建容器
+- **THEN** 下发新配方与不同于旧制品的标签，更新该配对缓存；后续相同配方复用更新后的标签
 
 ### Requirement: machine_image 派发记录与构建缓存
 
-本表 SHALL 记录 Ctrl 已派发构建的标签与版本戳，MUST NOT 单凭记录存在认定 Docker 制品已成功建成。有效缓存行 SHALL 参与 Ctrl 下次构建标签与版本戳的选择；Node 是否真正跳过构建仍由本机 Docker 标签查验决定。创建请求已被 Node 受理且 Ctrl 已记录派发后，后台构建失败不会自动删除该记录。
+本表 SHALL 保存 Ctrl 已解析选择的标签、版本戳及配方指纹，不代表 Node 已受理或 Docker 已构建成功。实际派发前 SHALL 可靠预留版本，确保两个尚未完成派发的不同配方不会共享标签。派发确认 SHALL 使用同一组值，不覆盖更晚版本或为同标签替换配方指纹。构建段 SHALL 随实际创建或恢复下发，Node 按准确标签查验本机制品后决定是否构建；失败或未派发版本不导致错误跳过构建。
 
 #### Scenario: 构建失败也留观测
+- **WHEN** Ctrl 已选择版本，而 Node 未受理或后台构建失败
+- **THEN** 可保留该版本选择；后续相同配方仍由 Node 查验标签并在未命中时构建，不将记录存在作为构建成功凭据
 
-- **WHEN** 创建请求已被 Node 受理、Ctrl 已记录派发，但后台镜像构建随后失败
-- **THEN** 既有派发记录仍保留，不被当作构建成功凭据；后续使用该缓存标签时仍由 Node 查验本机制品
+#### Scenario: 派发回写前连续修改
+- **WHEN** 首个配方已解析但尚未回写派发确认，随后解析不同配方
+- **THEN** 分配不同标签；重复解析第二个配方返回相同版本，迟到的首个派发确认不能回退缓存
+
+#### Scenario: 独立会话交错预留
+- **WHEN** 较早读取缓存的会话尝试写入另一会话刚占用的标签
+- **THEN** 数据库写入不覆盖该标签的配方；解析器按当前记录重试或安全失败，MUST NOT 交付与本次配方不一致的标签
 
 ### Requirement: machine_image 复合键与读写入口
 
-检索 SHALL 一律按 `(machine_id, image_id)` 复合键；`image_tag` 只 SHALL 作为值读出，MUST NOT 进入查询谓词、MUST NOT 参与身份判定。
+检索 SHALL 一律按 `(machine_id, image_id)` 复合键，image_tag SHALL 仅作缓存值而非资源身份。缓存版本改变时 SHALL 就地更换该配对记录的版本信息，标签、版本戳及配方一致性元数据 MUST 来自同一次解析；MUST NOT 保留“有行永不更新”和“仅删除整行才能换代”两种冲突路径。
 
-写入 SHALL 只有一个入口且为「有行即返回」：已存在 SHALL 原样返回、MUST NOT 就地改写（改写等于凭空换代，而宿主机上的制品仍挂在旧标签下成为孤儿）；`image_tag` 与其版本戳 SHALL 来自同一次标签解析，MUST NOT 在写入点另取当前时间。删除 SHALL 只有「按模板清理该模板在所有机器上的行」这一个入口，由模板更新在同一事务内调用；该清理 SHALL 宁可多删——改配方之外的编辑（改名、改描述）也一并触发重建。
+#### Scenario: 有行时更新陈旧版本
+- **WHEN** 为已有配对记录持久化新派发版本
+- **THEN** 同一配对记录指向本次实际派发的版本，稳定关联身份不变，标签和版本戳不在写入点重新生成
 
 #### Scenario: 有行即返回不改写
-
-- **WHEN** 对已有 `(machine_id, image_id)` 调用 record_dispatch 写入口
-- **THEN** 返回既有行，行内标签与版本戳保持原值，不被改写；构建标签的解析另按新鲜度检查处理
+- **WHEN** 已有配对记录的指纹与本次实际配方一致
+- **THEN** 返回该记录的标签和版本戳，不为重复解析或重复回写生成新版本；陈旧配方不适用此复用分支
 
 ### Requirement: machine_image 缓存新鲜度与失败回退
 
-读取缓存时 SHALL 另有第二道闸：行的时间戳不晚于模板当前版本即视为陈旧，退回现造一条新标签并告警；读表失败同样退回现造，MUST NOT 因此返回错误结果。
+缓存命中 SHALL 以本次实际最终配方与已记录版本的一致性为依据，平台注入变化 MUST 纳入判断。陈旧或无法确认一致性的历史缓存 SHALL 重新解析可区分的新版本。缓存读取异常 MUST NOT 将旧标签与新配方拼接后继续命中；无法可靠记录派发时也 MUST NOT 宣称缓存已更新。
 
 #### Scenario: 陈旧行退回现造
+- **WHEN** 缓存版本对应配方已过时，或历史元数据不足以证明其一致性
+- **THEN** 不直接复用旧标签；后续记录新派发版本后，相同配方读取稳定命中新版本
 
-- **WHEN** 读到的行时间戳不晚于模板当前版本（删行未生效或有人直连改库）
-- **THEN** 不返回该行的标签，退回现造一条新标签并告警，代价仅是一次多余的重建
+#### Scenario: 同秒内连续更新
+- **WHEN** 模板或平台注入在同一秒内连续修改并派发
+- **THEN** 不同最终配方得到不同标签，不能因秒级时间戳相同命中旧镜像
+
+#### Scenario: 未修改配方重复解析
+- **WHEN** 配方未改变且该机器已记录有效派发版本
+- **THEN** 返回同一标签与版本戳，不因读取时刻改变而连续生成新版本
+
+### Requirement: 缓存换代不破坏旧运行制品
+
+缓存换代 SHALL 仅改变后续构建选择，不迁移或覆盖旧容器实际使用的镜像版本，不删除仍可能被旧容器使用的 Docker 制品。恢复历史配方时 SHALL 使用与该配方一致的版本，并避免将历史派发误记为当前模板的有效缓存。
+
+#### Scenario: 新旧容器并存
+- **WHEN** 同一模板换代后创建新容器，同时已有旧版本容器仍在运行
+- **THEN** 两者归属同一 image_id，各自版本留痕仍有效，既有用户授权、机器和容器关联不失效
 
 ## Data model appendix
 
@@ -63,11 +83,12 @@
 
 | 字段 | 模型声明 | 源码行 |
 | --- | --- | --- |
-| `id` | `db.Column(db.Integer, primary_key=True)` | 27 |
-| `machine_id` | `db.Column(db.Integer, db.ForeignKey('machines.id', ondelete='CASCADE'), nullable=False, index=True)` | 28 |
-| `image_id` | `db.Column(db.Integer, db.ForeignKey('images.id'), nullable=False, index=True)` | 31 |
-| `image_tag` | `db.Column(db.String(200), nullable=False)` | 34 |
-| `created_at` | `db.Column(db.DateTime, default=db.func.now(), nullable=False)` | 35 |
+| `id` | `db.Column(db.Integer, primary_key=True)` | 11 |
+| `machine_id` | `db.Column(db.Integer, db.ForeignKey('machines.id', ondelete='CASCADE'), nullable=False, index=True)` | 12 |
+| `image_id` | `db.Column(db.Integer, db.ForeignKey('images.id'), nullable=False, index=True)` | 15 |
+| `image_tag` | `db.Column(db.String(200), nullable=False)` | 18 |
+| `created_at` | `db.Column(db.DateTime, default=db.func.now(), nullable=False)` | 19 |
+| `recipe_fingerprint` | `db.Column(db.String(64), nullable=True)` | 23 |
 
 ### 表级约束
 
@@ -78,5 +99,4 @@
 
 - [models/machine_image.py](../../../models/machine_image.py)：MachineImage，第 6 行。
 - 数据库初始化：[`__init__.py`](../../../__init__.py)、[`extensions.py`](../../../extensions.py)；`create_all` 只创建缺失表，不推定已替旧表完成列迁移。
-- 回归验证：[`test/`](../../../test/) 中该单元对应的仓储、服务、API 用例；本次默认安全套件 992 passed、6 deselected。
-
+- 回归验证：[`test/`](../../../test/) 中该单元对应的仓储、服务、API 用例；运行结果以当前隔离安全套件为准。

@@ -1,4 +1,4 @@
-﻿from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -861,12 +861,16 @@ def _strip_legacy_snapshot_image_key() -> None:
 
 
 def _ensure_machine_image_schema() -> None:
-    """machine_image 行身份自愈（2026-09）：从 (machine_id, image_tag) 收敛到
-    (machine_id, image_id)。
+    """machine_image 行身份与配方指纹自愈。
 
+    行身份自愈（2026-09）：从 (machine_id, image_tag) 收敛到 (machine_id, image_id)。
     标签是**派生值**（归属标识 + 版本戳），不能承担身份——拿它做检索，格式一变即断。
     旧库上这张表的唯一键落在标签上，本函数幂等地：补 image_id 列 → 从既存标签反解回填
     → 清掉回填不出来的行 → 换唯一键。
+
+    配方指纹列（2026-10）：`create_all` 只建新表、不改旧表，因此旧库要补
+    `recipe_fingerprint`。存量行留 NULL，读侧判旧一次、下一次派发就地补齐——安全收敛，
+    刻意不做任何猜测性回填。
 
     反解只服务这一次性迁移，理由同 `_backfill_container_image_id`：存量数据只有标签
     这一个载体，别无他途。新代码一律按 `(machine_id, image_id)` 检索，不再反解字符串。
@@ -894,6 +898,14 @@ def _ensure_machine_image_schema() -> None:
     with current_engine.begin() as conn:
         if "image_id" not in columns:
             conn.execute(text("ALTER TABLE machine_image ADD COLUMN image_id INTEGER NULL"))
+        # 配方指纹（2026-10 决策）：判"这一行缓存还算不算当前配方"用。
+        # 旧行读回 NULL → 下一次派发判旧一次并就地补齐。**刻意不回填**：这一行没有记录
+        # 当年那份配方是什么，任何猜测都可能把旧制品错认成新配方，宁可多重建一次。
+        fingerprint_added = "recipe_fingerprint" not in columns
+        if fingerprint_added:
+            conn.execute(text(
+                "ALTER TABLE machine_image ADD COLUMN recipe_fingerprint VARCHAR(64) NULL"
+            ))
         # 回填：只认 fuxi/image-<模板id>:… 这个形式；模板行不在了的也不留（会成悬挂值）。
         rows = conn.execute(text(
             "SELECT id, image_tag FROM machine_image WHERE image_id IS NULL"
@@ -940,10 +952,10 @@ def _ensure_machine_image_schema() -> None:
             except Exception as e:
                 logger.warning("machine_image image_id NOT NULL failed: %s", e)
 
-    if patched or unresolvable:
+    if patched or unresolvable or fingerprint_added:
         logger.warning(
-            "machine_image composite key migrated: backfilled=%s removed=%s row(s)",
-            patched, unresolvable,
+            "machine_image schema converged: backfilled=%s removed=%s fingerprint_column_added=%s",
+            patched, unresolvable, fingerprint_added,
         )
 
 

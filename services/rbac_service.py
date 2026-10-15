@@ -311,9 +311,17 @@ _RESOURCE_TYPE_TABLE = {
 
 
 def _has_resource_manage_direct(user_id: int, resource_type: str) -> bool:
-    """用户是否持有指定资源类型的管理实体（{type}:manage → 该类型资源通配）。"""
+    """用户是否**直持**指定资源类型的管理实体（{type}:manage → 该类型资源通配）。"""
     base_type = resource_type.split(":", 1)[0]
     return _has_entity_direct(user_id, f"{base_type}:manage")
+
+
+def has_resource_wildcard(user_id: int, resource_type: str) -> bool:
+    """仅直接资源通配或同类管理权限扩大资源范围；方法通配单独校验。"""
+    base_type = resource_type.split(":", 1)[0]
+    return _has_entity_direct(user_id, "bypass_resource") or _has_resource_manage_direct(
+        user_id, base_type
+    )
 
 
 def user_has_resource(user_id: int, resource_type: str, resource_id: int) -> bool:
@@ -334,7 +342,7 @@ def user_has_resource(user_id: int, resource_type: str, resource_id: int) -> boo
                 if containers_repo.get_by_id(resource_id, session=session) is None:
                     return False
         # 0) 资源通配：bypass_resource（全类型）或 {type}:manage（单类型管理面 = 该类型通配）
-        if _has_entity_direct(user_id, "bypass_resource") or _has_resource_manage_direct(user_id, resource_type):
+        if has_resource_wildcard(user_id, resource_type):
             return True
         if resource_type == "machine":
             with session_scope(commit=False) as session:

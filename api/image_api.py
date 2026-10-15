@@ -90,8 +90,9 @@ def create_image_api(
 def update_image_api(
     message: UpdateImageRequest,
     operator_user_id: int = Depends(require_permission("image:edit")),
-    # **归属闸**：编辑（含改 Dockerfile）只能动自己建的模板。资源通配者（image:manage）
-    # 照旧放行——通配判定在 user_has_resource 的第 0 步，不看这里用的是哪条口径。
+    # **归属闸**：编辑（含改 Dockerfile）只能动自己建的模板。资源通配者
+    # （bypass_resource 或直持 image:manage）照旧放行——资源判定在 user_has_resource
+    # 的第 0 步，不看这里用的是哪条口径；方法级权限另由上面的 require_permission 管。
     _: int = Depends(require_resource("image:owner", "image_id")),
 ):
     """更新镜像模板。"""

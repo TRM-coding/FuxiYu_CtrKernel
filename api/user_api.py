@@ -195,15 +195,20 @@ def my_permissions_api(
     所以"我是谁"只能从响应体来。此前前端把这两个值存在 localStorage 里当登录标记，
     于是和服务端的真相各说各话——这正是 401 处理要"清本地 + 硬重载"、登录页又会
     凭本地标记把人推进去的根源（2026-09 修）。
+
+    `image_resource_unrestricted` 是**资源级通配**的真实判定结果（服务端口径
+    `has_resource_wildcard`）。`entities` 是生效集，含 bypass_auth_entity / 同域 manage
+    的派生，前端从它反推资源能力会误判，所以这里直接明说这一位。
     """
 
-    from ..services.rbac_service import list_user_entities
+    from ..services.rbac_service import has_resource_wildcard, list_user_entities
 
     with session_scope(commit=False) as session:
         user = user_repo.get_by_id(int(user_id), session=session)
     return {
         "success": 1,
         "entities": list_user_entities(user_id),
+        "image_resource_unrestricted": has_resource_wildcard(int(user_id), "image"),
         "user_id": int(user_id),
         "username": (user.username if user is not None else "") or "",
     }

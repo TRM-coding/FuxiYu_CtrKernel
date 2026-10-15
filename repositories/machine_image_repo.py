@@ -1,23 +1,16 @@
-"""MachineImage 仓储层：某台机器上、某份模板的制品是哪一版。
-
-repo 只接收显式 session，负责查询、写入和 flush；事务边界由 service/tasks
-的 session_scope 决定。
-
-**检索一律按 `(machine_id, image_id)` 复合键。** `image_tag` 只作**值**读出，
-MUST NOT 进任何查询谓词、MUST NOT 参与身份判定。
-
-**本模块只有一个写入口，且是"有行即返回"**：一行就是"这台机器上那个制品"，就地改写它
-等于凭空换版本、把宿主机上已有的制品变成孤儿。要换代只有一条路——
-`services/image_tasks.Update_image` 在模板变更时**删掉整行**，让下次派发重新插入。
-"""
+"""镜像缓存仓储；按机器与模板配对读写，事务由调用方管理。"""
 
 import datetime as dt
+import logging
 from typing import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import and_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..models.machine_image import MachineImage
+
+logger = logging.getLogger(__name__)
 
 
 def get_by_machine_image(
@@ -36,57 +29,93 @@ def record_dispatch(
     image_id: int,
     image_tag: str,
     created_at: dt.datetime,
+    recipe_fingerprint: str | None = None,
     *,
     session: Session,
 ) -> MachineImage:
-    """把"这台机器上这份模板该用哪条标签"写进缓存；**已存在则原样返回，不做任何改写**。
+    """登记同次解析的版本与指纹；已有版本不回退，同标签不改配方。"""
+    machine_id = int(machine_id)
+    image_id = int(image_id)
+    for _ in range(3):
+        existing = get_by_machine_image(machine_id, image_id, session=session)
+        if existing is None:
+            row = MachineImage(
+                machine_id=machine_id,
+                image_id=image_id,
+                image_tag=image_tag,
+                created_at=created_at,
+                recipe_fingerprint=recipe_fingerprint,
+            )
+            session.add(row)
+            try:
+                session.flush()
+                return row
+            except IntegrityError:
+                session.rollback()
+                if get_by_machine_image(machine_id, image_id, session=session) is not None:
+                    # 并发首次插入：让位给对方，回滚后按既有行走 CAS。
+                    continue
+                # 行仍不存在 ⇒ 冲突来自外键（机器/模板不成立），不是并发插入，交给上层。
+                raise
 
-    两列一起写：`image_tag` 是缓存的值本身，`created_at` 是它的版本戳。它们必须来自
-    同一次解析（`services/image_tasks.resolve_image_build_tag` 的返回值），不能在写点
-    另取一次 now()——版本戳要成为下一次读取时的权威值，差一微秒就会让下次算出的东西
-    与库里那条对不上。
+        conditions = [
+            MachineImage.machine_id == machine_id,
+            MachineImage.image_id == image_id,
+            MachineImage.created_at < created_at,
+        ]
+        if recipe_fingerprint is None:
+            conditions.append(
+                ~and_(
+                    MachineImage.image_tag == image_tag,
+                    MachineImage.recipe_fingerprint.is_not(None),
+                )
+            )
+        else:
+            conditions.append(
+                ~and_(
+                    MachineImage.image_tag == image_tag,
+                    MachineImage.recipe_fingerprint.is_not(None),
+                    MachineImage.recipe_fingerprint != recipe_fingerprint,
+                )
+            )
+        result = session.execute(
+            update(MachineImage)
+            .where(*conditions)
+            .values(
+                image_tag=image_tag,
+                created_at=created_at,
+                recipe_fingerprint=recipe_fingerprint,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        # 丢弃会话里可能过期的副本；否则下面的回读会拿到同一个未刷新的 ORM 对象。
+        if existing is not None:
+            session.expire(existing)
+        if result.rowcount:
+            return get_by_machine_image(machine_id, image_id, session=session)
 
-    已存在时**不改写**：那一行就是"这台机器上那个制品"，改写它等于悄悄换版本，而宿主机上
-    那个制品还挂在旧标签下——它成了孤儿，且没有任何地方记得它。要换代只有一条路：
-    `services/image_tasks.Update_image` 在模板变更时**整行删掉**（`delete_by_image`）。
-    """
-    existing = get_by_machine_image(machine_id, image_id, session=session)
-    if existing is not None:
-        return existing
-
-    row = MachineImage(
-        machine_id=int(machine_id),
-        image_id=int(image_id),
-        image_tag=image_tag,
-        created_at=created_at,
+        current = get_by_machine_image(machine_id, image_id, session=session)
+        if current is None:
+            continue
+        if (
+            current.image_tag == image_tag
+            and current.created_at == created_at
+            and current.recipe_fingerprint == recipe_fingerprint
+        ):
+            return current
+        logger.warning(
+            "machine_image write not applied (newer version or tag taken by another recipe):"
+            " machine=%s image=%s tag=%s",
+            machine_id, image_id, image_tag,
+        )
+        return current
+    raise RuntimeError(
+        f"machine_image record_dispatch did not converge: machine={machine_id} image={image_id}"
     )
-    session.add(row)
-    session.flush()
-    return row
-
-
-def delete_by_image(image_id: int, *, session: Session) -> int:
-    """清掉某份模板在**所有机器**上的版本记录；返回删掉的行数。
-
-    这是本表唯一合法的删除入口，由 `services/image_tasks.Update_image` 在模板变更的同一
-    事务里调用。语义是"这台机器上那份制品已经不是这一版了"——下次派发重新插入、拿到新的
-    `created_at`、算出新的标签，宿主机因此必然重建。
-
-    刻意"宁可多删"：模板改名、改描述这类不动配方的编辑也会触发重建。代价是几台机器各重建
-    一次；换来的是**不可能漏删**——漏删会让模板改了而机器不重建，那是静默的、事后无从发现
-    的错。
-    """
-    rows = list(session.scalars(
-        select(MachineImage).where(MachineImage.image_id == int(image_id))
-    ).all())
-    for row in rows:
-        session.delete(row)
-    session.flush()
-    return len(rows)
 
 
 def list_by_machine(machine_id: int, *, session: Session) -> Sequence[MachineImage]:
-    """某台机器上全部有记录的 (模板, 版本)（观测用，不参与任何决策）。"""
+    """某台机器上全部 (模板, 版本)（观测与诊断用）。"""
     return list(
         session.scalars(
             select(MachineImage)

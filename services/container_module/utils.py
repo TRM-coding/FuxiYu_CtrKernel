@@ -180,14 +180,7 @@ def build_long_term_container_state(container_id: int, bindings: list | None = N
 
 
 def is_version_behind(image_version_at, template_updated_at) -> bool:
-    """容器是否落后于模板：其构建版本戳早于模板的当前版本。
-
-    **刻意不看容器的 `created_at`**：恢复路径不更新创建时间，用它会把一个刚按最新模板
-    重建的容器误判为"落后"，从而展示错误的运行基底。
-
-    展示出口与恢复判定共用这一个比较——两处对"是否落后"必须是同一口径，否则会出现
-    「详情页说它是最新的、恢复却按落后的分支问你」这种自相矛盾。
-    """
+    """无配方留痕的存量数据按构建版本与模板时间判旧，不比较容器创建时间。"""
     if template_updated_at is None:
         return False
     if image_version_at is None:

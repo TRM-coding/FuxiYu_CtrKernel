@@ -2,7 +2,7 @@
 
 ## Purpose
 
-custom 镜像可见范围的用户授权名单。本文件是 d6d0d0e26fb6（chester-next）在 2026-10-11 的代码逆向基线，以表结构为单位记录已实现的契约。字段声明、外键、唯一约束以模型和服务为依据；已知缺陷及迁移风险统一登记在 [Global QUESTIONS](../../../../FuxiYu_Global/QUESTIONS.md)，不代表修复已完成。
+定义镜像 CUSTOM 可见名单的持久化授权关联、唯一配对和整组更新语义。查看授权不转移创建者归属，不赋予编辑方法权限，也不扩大仅看我创建的筛选结果。
 
 ## Requirements
 
@@ -10,9 +10,7 @@ custom 镜像可见范围的用户授权名单。本文件是 d6d0d0e26fb6（che
 
 系统 SHALL 使用数据附录的字段声明持久化 `UserImage`，遵守模型声明的主键、非空、唯一键、外键及默认值；Python 默认值与数据库 server_default 必须分别理解。
 
-
 字段与成员见文末同名数据附录。
-
 
 #### Scenario: 读取有效记录
 
@@ -21,12 +19,15 @@ custom 镜像可见范围的用户授权名单。本文件是 d6d0d0e26fb6（che
 
 ### Requirement: user_images 生产职责与生命周期
 
-系统 SHALL 按以下已实现的生命周期使用本表：唯一 user_id/image_id 配对；名单仅在 custom 范围下可管理，private/everyone 状态不依该名单决定可见性；created_by 不替代范围规则。
+user_images SHALL 保存唯一 user_id/image_id 的 CUSTOM 查看授权配对，名单仅在 custom 范围下可管理，private/everyone 不依该名单决定可见性。创建者保有自己的资源归属，名单增删 MUST NOT 转让所有权、授予编辑方法能力或扩大“仅看我的”结果。
 
 #### Scenario: 整组更新名单
-
 - **WHEN** 镜像范围为 custom 且用户 ids 均有效
-- **THEN** 落定去重后的授权集合；非 custom 范围的名单变更被服务拒绝
+- **THEN** 落定去重后的查看授权集合；非 custom 范围的名单变更仍被服务拒绝
+
+#### Scenario: 授权别人查看
+- **WHEN** 创建者把另一用户加入 CUSTOM 名单
+- **THEN** 对方可在满足方法权限时查看或使用该镜像，但镜像不会成为对方创建的资源，原所有权不变
 
 ## Data model appendix
 
@@ -48,5 +49,4 @@ custom 镜像可见范围的用户授权名单。本文件是 d6d0d0e26fb6（che
 
 - [models/userimage.py](../../../models/userimage.py)：UserImage，第 5 行。
 - 数据库初始化：[`__init__.py`](../../../__init__.py)、[`extensions.py`](../../../extensions.py)；`create_all` 只创建缺失表，不推定已替旧表完成列迁移。
-- 回归验证：[`test/`](../../../test/) 中该单元对应的仓储、服务、API 用例；本次默认安全套件 992 passed、6 deselected。
-
+- 回归验证：[`test/`](../../../test/) 中该单元对应的仓储、服务、API 用例；运行结果以当前隔离安全套件为准。

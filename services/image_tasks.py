@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 
 from sqlalchemy.exc import IntegrityError
@@ -60,78 +61,119 @@ def _serialize(image, *, include_content: bool = False) -> dict:
     return result
 
 
-def resolve_image_build_tag(image_id: int, machine_id: int | None) -> tuple[str, datetime]:
-    """这次构建该用哪条标签——**返回 `(tag, 版本戳)`，tag 是缓存的值，不现算**。
+def _floor_second(moment: datetime) -> datetime:
+    """把时刻截到整秒——标签的版本戳精度就是秒。"""
+    return moment.replace(microsecond=0)
 
-    两个来源，正如设计：
 
-    1. **`machine_image` 有行且没过时** → **直接把行里的 `image_tag` 拿出来用**。
-       这就是缓存命中：宿主机上那个制品还在，Node 的 `images.get(tag)` 会命中、不重建。
-       注意是**读**，不是拿行里的时间戳再算一遍——缓存表存的就是值本身。
-    2. **没有行，或行已过时** → **用当前时间现造**一条 `f(image_id, now())`；
-       调用方随后要把这条标签与这个时间戳一起写进表，成为下一次的权威值。
+def _superseding_version(previous: datetime | None, now_second: datetime) -> datetime:
+    """选择严格晚于上一标签版本的整秒时间。"""
+    if previous is None:
+        return now_second
+    previous_second = _floor_second(previous)
+    if now_second > previous_second:
+        return now_second
+    return previous_second + timedelta(seconds=1)
 
-    版本戳（第二个返回值）落在容器行上（`containers.last_build_at`），于是容器也能回答
-    "我跑的是哪一版"。
 
-    **过时判据** = `machine_image.created_at <= images.updated_at`（严格大于才算新鲜），
-    是"删行"之外的第二道闸：正常失效由 `Update_image` 删行承担，这条判据兜住"删行没成功、
-    或有人直连改库"的情况——没有它，一个陈旧的标签会被永久复用。判过时只会退回现造
-    （结果恒正确），代价是一次多余的重建。
-
-    `machine_id` 为空（拿不到"机器上那一版"）时按首次构建处理。
-
-    读表失败只 warning 并退回现造——那只会导致一次多余的重建，不会给出错误结果。
-    """
+def _resolve_tag_in_session(
+    session, image_id: int, machine_id: int, fingerprint: str | None
+) -> tuple[str, datetime]:
+    """复用一致配方，或可靠预留可区分的新版本；冲突重试失败则拒绝。"""
     import logging
+
+    from sqlalchemy.exc import IntegrityError
 
     from ..repositories import machine_image_repo
 
     logger = logging.getLogger(__name__)
-    if machine_id is not None:
-        try:
-            with session_scope(commit=False) as session:
-                row = machine_image_repo.get_by_machine_image(
-                    int(machine_id), int(image_id), session=session
-                )
-                if row is not None and row.image_tag and row.created_at is not None:
-                    image = image_repo.get_by_id(int(image_id), session=session)
-                    if image is not None and image.updated_at is not None \
-                            and row.created_at <= image.updated_at:
-                        logger.warning(
-                            "machine_image row stale (template edited after it was cached):"
-                            " machine=%s image=%s; rebuilding a fresh tag",
-                            machine_id, image_id,
-                        )
-                    else:
-                        return row.image_tag, row.created_at
-        except Exception as e:  # pragma: no cover
+    for _ in range(3):
+        row = machine_image_repo.get_by_machine_image(machine_id, image_id, session=session)
+        if (
+            row is not None
+            and row.image_tag
+            and row.created_at is not None
+            and fingerprint
+            and row.recipe_fingerprint == fingerprint
+        ):
+            return row.image_tag, row.created_at
+        if row is not None and row.created_at is not None:
             logger.warning(
-                "resolve_image_build_tag fell back to a fresh tag: machine=%s image=%s: %s",
-                machine_id, image_id, e,
+                "machine_image cache stale (recipe changed or row predates fingerprints):"
+                " machine=%s image=%s; superseding the cached tag",
+                machine_id, image_id,
             )
+        version_at = _superseding_version(
+            row.created_at if row is not None else None, _floor_second(datetime.utcnow())
+        )
+        tag = format_image_build_tag(image_id, version_at)
+        try:
+            persisted = machine_image_repo.record_dispatch(
+                machine_id, image_id, tag, version_at, fingerprint, session=session
+            )
+        except IntegrityError:
+            session.rollback()
+            if machine_image_repo.get_by_machine_image(machine_id, image_id, session=session) is not None:
+                # 并发首次解析：对方刚插入这一行。按它的版本再推进一秒。
+                continue
+            from ..repositories import machine_repo
 
-    version_at = datetime.utcnow()
-    return format_image_build_tag(image_id, version_at), version_at
+            if machine_repo.get_by_id(machine_id, session=session) is None:
+                # 机器不存在：没有可预留的对象，这条标签不会被之后的读取复用；
+                # 交给创建门户的机器校验去拒绝，保持 machine_not_found 的对外语义。
+                logger.warning(
+                    "machine_image reservation skipped: machine %s not found", machine_id
+                )
+                return tag, version_at
+            continue
+        if (
+            persisted.image_tag == tag
+            and persisted.created_at == version_at
+            and persisted.recipe_fingerprint == fingerprint
+        ):
+            return tag, version_at
+        # 行在"读"与"写"之间被并发改过（含同一标签被换成别的配方）：按新行重来一轮，
+        # 不返回未按本次配方持久化的标签。
+    raise RuntimeError(
+        f"failed to allocate a non-colliding image build tag: machine={machine_id} image={image_id}"
+    )
+
+
+def resolve_image_build_tag(
+    image_id: int,
+    machine_id: int | None,
+    *,
+    fingerprint: str | None = None,
+) -> tuple[str, datetime]:
+    """返回实际配方对应的标签与版本戳；有机器上下文时预留版本，缓存异常不伪造标签。"""
+    if machine_id is None:
+        version_at = _floor_second(datetime.utcnow())
+        return format_image_build_tag(image_id, version_at), version_at
+
+    import logging
+
+    logger = logging.getLogger(__name__)
+    try:
+        with session_scope() as session:
+            if fingerprint is None:
+                image = image_repo.get_by_id(int(image_id), session=session)
+                fingerprint = (
+                    recipe_fingerprint(_parts_for_image(image)) if image is not None else None
+                )
+            return _resolve_tag_in_session(session, int(image_id), int(machine_id), fingerprint)
+    except Exception:
+        logger.exception(
+            "resolve_image_build_tag failed (no fabricated fallback): machine=%s image=%s",
+            machine_id, image_id,
+        )
+        raise
 
 
 def format_image_build_tag(
     image_id: int | None,
     version_at: datetime | None,
 ) -> str | None:
-    """由「归属标识 + 版本戳」推导 Docker tag；两者缺一就推不出来，返回 None。
-
-    这是**唯一**的标签构造实现。标签是**派生值，MUST NOT 落库**：库里存的只有归属标识
-    （`containers.image_id`）与版本戳（`containers.last_build_at` ／ `machine_image.created_at`），
-    标签本身由这两个输入现算。
-
-    它同时**不是** Ctrl 对外的展示口径：平台的管理粒度是「配方 + 归属 + 版本戳」，标签是
-    Node 侧的缓存键与 docker 制品名，只在 Ctrl→Node 的线上出现（2026-09 决策）。
-
-    刻意**不**用 now() 兜底：那会编出一个从未出现过的标签。标签是 Node 侧的缓存键，
-    编一个假的比返回空坏得多——会去命中一个不存在的东西，也会指向一个没跑过的制品。
-    推不出来就是推不出来，由调用方各自决定是拒绝还是留空。
-    """
+    """按镜像归属和版本戳推导标签；缺少任一输入时返回空。"""
     if image_id is None or version_at is None:
         return None
     version_time = version_at
@@ -226,6 +268,46 @@ class DockerfileParts:
         )
 
 
+def recipe_fingerprint(parts: DockerfileParts) -> str:
+    """计算最终 Dockerfile 的 SHA-256，用于配方一致性校验。"""
+    return hashlib.sha256(parts.render().encode("utf-8")).hexdigest()
+
+
+def _parts_for_image(image) -> DockerfileParts:
+    """把模板行 + **当下**平台注入拼成配方输入（渲染之前的那份）。"""
+    return DockerfileParts(
+        base_image=image.base_image,
+        platform_injection=settings_tasks.get_image_platform_injection_content() or "",
+        dockerfile_body=image.dockerfile_body,
+        # NULL 与 "" 都折成 None——渲染时再兜平台默认，调用方只见两态
+        entrypoint=(image.entrypoint or "").strip() or None,
+    )
+
+
+def resolve_build_tag_for_recipe(
+    image_id: int | None,
+    machine_id: int | None,
+    parts: DockerfileParts | None,
+) -> tuple[str | None, datetime | None]:
+    """为恢复实际采用的配方解析版本；缺少必要上下文时不生成占位标签。"""
+    if image_id is None or parts is None or machine_id is None:
+        return None, None
+
+    import logging
+
+    logger = logging.getLogger(__name__)
+    fingerprint = recipe_fingerprint(parts)
+    try:
+        with session_scope() as session:
+            return _resolve_tag_in_session(session, int(image_id), int(machine_id), fingerprint)
+    except Exception:
+        logger.exception(
+            "resolve_build_tag_for_recipe failed (no fabricated fallback): machine=%s image=%s",
+            machine_id, image_id,
+        )
+        raise
+
+
 @dataclass(frozen=True)
 class ImageBuild:
     """一次构建的全部留痕。
@@ -237,11 +319,8 @@ class ImageBuild:
 
     payload: dict
     image_id: int
-    # **这条标签的版本戳**（2026-09 决策）。与标签同源同生：缓存命中时它是行里那个
-    # `created_at`，现造时是 `now()`。容器行照抄它，于是容器也能回答"我跑的是哪一版"。
-    #
-    # ⚠ 它不是"模板最后一次被改的时刻"。两者曾经的绑定是旧口径：那时标签=f(模板版本)，
-    #   模板一改标签就变、机器被迫重建。现在换代由 `Update_image` 删除缓存行触发。
+    # **这条标签的版本戳**。与标签同源同生：缓存命中时它是行里那个 `created_at`，
+    # 现造时是严格晚于上一版的整秒。容器行照抄它，于是容器也能回答"我跑的是哪一版"。
     version_at: datetime
     # 本次构建实际使用的配方（三段输入，而非渲染结果），要落成容器的留痕。
     # `dockerfile_parts.render()` 就是 payload 里那份 dockerfile_text。
@@ -249,43 +328,33 @@ class ImageBuild:
 
 
 def resolve_image_build(image_id: int, machine_id: int | None = None) -> ImageBuild | None:
-    """按 image_id 解析出一次构建的全部留痕。
+    """解析本次实际配方、标签和版本；无机器上下文时不登记缓存。"""
 
-    payload 只回 Node 真正读的两个键（ImageBuildConfig 的 dockerfile_text / image_tag）。
-    曾经还带 image_id 与 base_image：前者 Ctrl 自己就知道、Node 丢弃，后者已经作为
-    `FROM ...` 写在 dockerfile_text 首行了 —— 都是没人读的冗余。
-
-    取模板走 `image_repo.get_by_id` 原语，**不受停用过滤影响**：恢复链路要用已停用
-    模板的内容判定分支，管理路径也要能取到停用行。
-
-    `machine_id` 透传给 `format_image_build_tag` 的新鲜度预检查（见该函数）。调用方只
-    取 `dockerfile_parts` 时可以不给——那时标签根本不被使用，给了只会多一次查询。
-    """
-
+    # 配方与标签分开取：先在一个只读 scope 里读出模板并渲染输入，再关闭它去解析标签。
+    # 不嵌套 session 是关键——标签解析要写缓存（分配版本），写在另一个 scope 里提交，
+    # 与"读模板"混在同一事务里会在 SQLite/MySQL 上把两个关注点绑死。
     with session_scope(commit=False) as session:
         image = image_repo.get_by_id(image_id, session=session)
         if image is None:
             return None
-        parts = DockerfileParts(
-            base_image=image.base_image,
-            platform_injection=settings_tasks.get_image_platform_injection_content() or "",
-            dockerfile_body=image.dockerfile_body,
-            # NULL 与 "" 都折成 None——渲染时再兜平台默认，调用方只见两态
-            entrypoint=(image.entrypoint or "").strip() or None,
-        )
-        # 标签的来源见 resolve_image_build_tag：缓存里有就直接用，没有就现造
-        image_tag, version_at = resolve_image_build_tag(image.id, machine_id)
-        if image_tag is None:  # pragma: no cover - 上面恒返回非空标签
-            raise ValueError(f"image {image.id} has no usable build tag")
-        return ImageBuild(
-            payload={
-                "image_tag": image_tag,
-                "dockerfile_text": parts.render(),
-            },
-            image_id=image.id,
-            version_at=version_at,
-            dockerfile_parts=parts,
-        )
+        parts = _parts_for_image(image)
+        resolved_image_id = image.id
+
+    # 标签与配方同源：把**这份**配方的指纹交给缓存判定，命中复用、未命中分配并登记
+    image_tag, version_at = resolve_image_build_tag(
+        resolved_image_id, machine_id, fingerprint=recipe_fingerprint(parts)
+    )
+    if image_tag is None:  # pragma: no cover - 上面恒返回非空标签
+        raise ValueError(f"image {resolved_image_id} has no usable build tag")
+    return ImageBuild(
+        payload={
+            "image_tag": image_tag,
+            "dockerfile_text": parts.render(),
+        },
+        image_id=resolved_image_id,
+        version_at=version_at,
+        dockerfile_parts=parts,
+    )
 
 
 class ImageUsability(str, Enum):
@@ -332,16 +401,12 @@ def Can_use_image_for_container(user_id: int | None, image_id: int) -> ImageUsab
 
 
 def _visible_scope(viewer_user_id: int | None) -> image_repo.ImageScope:
-    """镜像可见性口径（列表谓词与点判定共用同一规则，见 image_repo）。
-
-    - 资源通配者（image:manage / bypass_resource）：不过滤，看全部
-    - 其余：走三态枚举——EVERYONE / 自己建的 / CUSTOM ∧ 在授权名单里
-    """
+    """默认列表使用后端真实资源通配，否则按创建者与可见范围筛选。"""
     if viewer_user_id is None:
         return image_repo.ImageScope(unrestricted=False, viewer_user_id=None, granted_ids=frozenset())
-    from .rbac_service import _has_resource_manage_direct
+    from .rbac_service import has_resource_wildcard
 
-    if _has_resource_manage_direct(viewer_user_id, "image"):
+    if has_resource_wildcard(viewer_user_id, "image"):
         return image_repo.ImageScope(
             unrestricted=True, viewer_user_id=viewer_user_id, granted_ids=frozenset()
         )
@@ -353,18 +418,12 @@ def _visible_scope(viewer_user_id: int | None) -> image_repo.ImageScope:
 
 
 def _resource_scope(viewer_user_id: int | None) -> image_repo.ImageScope:
-    """编辑页"只看我的"：只认 user_images 资源绑定，**不走三态可见性**（未授权即不可见，
-    哪怕它是 EVERYONE）。"""
-
-    if viewer_user_id is None:
-        return image_repo.ImageScope(
-            unrestricted=False, viewer_user_id=None, granted_ids=frozenset(), mine_only=True
-        )
-    with session_scope(commit=False) as session:
-        granted = userimage_repo.list_image_ids_by_user(viewer_user_id, session=session)
+    """仅看我的按创建者归属过滤，不受查看授权或资源通配扩大。"""
     return image_repo.ImageScope(
-        unrestricted=False, viewer_user_id=viewer_user_id,
-        granted_ids=frozenset(granted), mine_only=True,
+        unrestricted=False,
+        viewer_user_id=viewer_user_id,
+        granted_ids=frozenset(),
+        mine_only=True,
     )
 
 
@@ -472,20 +531,11 @@ def Update_image(
                 if clash is not None and clash.id != int(image_id):
                     raise ValueError(f"image name already in use: {name}")
             ok = image_repo.update_image(image_id, session=session, **fields)
-            if ok:
-                # 模板变了 → 所有机器上那份制品都不再是"这一版" → 清掉版本记录。
-                # **必须同事务**：删了却没改成功（或反过来）都会留下一台机器永不重建的
-                # 静默状态。下次派发会重新插入、拿到新的 created_at、算出新的标签，
-                # 宿主机因此必然未命中并重建。
-                from ..repositories import machine_image_repo
-
-                cleared = machine_image_repo.delete_by_image(image_id, session=session)
-                if cleared:
-                    import logging
-
-                    logging.getLogger(__name__).warning(
-                        "image %s updated: cleared %s machine version record(s)", image_id, cleared
-                    )
+            # 这里刻意**不动** machine_image：换代由派发时的配方指纹判定完成
+            # （`resolve_image_build_tag`）。改名/改描述不动配方 → 缓存仍有效，不必重建；
+            # 改内容或平台注入 → 指纹不同 → 同一 (machine_id, image_id) 行就地更换。
+            # 在这里删行或清缓存会把"没改配方的编辑"也变成一次全量重建，且删行后
+            # 无法再判断"上一版是什么时候"，秒级标签碰撞就没法避免了。
     except Exception as exc:
         log_failure(operator_user_id=operator_user_id,
             operation=OperationType.UPDATE_IMAGE,

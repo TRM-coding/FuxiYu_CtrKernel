@@ -2,7 +2,7 @@
 
 ## Purpose
 
-平台用户身份、登录凭据哈希和毕业年份。本规格按表结构记录当前持久化与生命周期契约，字段声明以模型与服务为依据。未完成问题见 [Global QUESTIONS](../../../../FuxiYu_Global/QUESTIONS.md)。
+定义用户身份字段、权限快照及账号生命周期的当前契约。权限快照分别表达生效方法权限与真实镜像资源能力，用户删除遵守关联资源约束和认证记录事务清理边界。
 
 ## Requirements
 
@@ -41,6 +41,18 @@
 #### Scenario: 删除事务失败
 - **WHEN** 最终删除用户的数据库事务失败
 - **THEN** 同事务 Token 清理回滚，不将非容器异常统一归因为 wild_container
+
+### Requirement: 权限快照区分方法能力与镜像资源通配
+
+身份权限响应 SHALL 以 entities 表达生效方法权限，以布尔字段 image_resource_unrestricted 表达真实镜像资源通配能力。客户端 MUST NOT 仅凭方法通配展开出的 image:manage 推断用户有全部镜像资源范围；资源能力 SHALL 与后端实际资源门和列表范围使用同一判定。
+
+#### Scenario: 只有方法实体通配
+- **WHEN** 用户只有 bypass_auth_entity，没有直接镜像管理或全局资源通配
+- **THEN** 即使方法权限列表包含 image:manage，快照也不将其表述为全部镜像资源可管理
+
+#### Scenario: 具备全局资源通配
+- **WHEN** 用户具备 bypass_resource
+- **THEN** 快照如实表达镜像资源通配能力，相应方法权限仍按方法规则表达
 
 ## Data model appendix
 
