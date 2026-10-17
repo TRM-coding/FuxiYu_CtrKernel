@@ -35,6 +35,9 @@ def check_all_containers_disk_usage_once(page_size: int = 200) -> None:
                 user_id=None,
                 session=session,
             )
+            # Evaluation runs after this session closes; load the machine limit now.
+            for container in containers:
+                _ = container.machine
         if not containers:
             break
 

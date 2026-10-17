@@ -295,6 +295,30 @@ def _usage_below_soft_limit():
 class TestEvaluateLimitsLongTerm:
     """持久容器（LongTermContainer）：应接受容量响应。"""
 
+    def test_scheduled_check_reads_machine_limit_after_query_session_closes(
+        self, app, db_session, monkeypatch,
+    ):
+        """The scheduler must evaluate a detached container against its machine limit."""
+        _root, machine, container = create_container_graph()
+        machine.max_disk_size_gb = 512
+        container.disk_total_bytes = 600 * 1024**3
+        container.disk_overlay_rw_bytes = 600 * 1024**3
+        long_term_container_repo.add(container.id, session=db_session)
+        db_session.commit()
+
+        hard_calls = []
+        monkeypatch.setattr(container_disk_check_task, "machine_in_scope", lambda _id: True)
+        monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_check_enabled", lambda: True)
+        monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_response_enabled", lambda: True)
+        monkeypatch.setattr(
+            container_disk_check_task, "_handle_hard_limit_with_escalation",
+            lambda c, _usage, _cache: hard_calls.append(c.id),
+        )
+
+        container_disk_check_task.check_all_containers_disk_usage_once()
+
+        assert hard_calls == [container.id]
+
     def test_soft_limit_triggers_handler(self, app, db_session, monkeypatch):
         """持久容器超过 soft limit → 触发 _handle_soft_limit。"""
         _root, machine, container = create_container_graph()
