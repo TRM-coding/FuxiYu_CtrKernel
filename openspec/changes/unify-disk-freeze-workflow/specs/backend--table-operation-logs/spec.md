@@ -47,7 +47,7 @@
 
 ### Requirement: 触发来源与暂停确认事件可追溯
 
-冻结审计 SHALL 带 `trigger`（`scheduler` / `manual`）和 `operator_user_id`；调度触发时 operator 为空，手工触发时记录操作者。WSS 状态确认 SHALL 仅在暂停阶段发生实际转换时写一条确认审计，带 `trigger=wss_confirmation`、当前 `link_generation` 和请求序号，MUST NOT 每帧重复写。策略范畴外静默跳过 MUST NOT 伪造审计；手工触发的策略跳过 SHALL 留下具体原因。
+冻结审计 SHALL 带 `trigger`（`scheduler` / `manual`）和 `operator_user_id`；调度触发时 operator 为空，手工触发时记录操作者。暂停阶段 SHALL 在存在时记录 `action_ref` 与 `last_phase`，但不把它们当作删除授权。WSS 状态确认 SHALL 仅在暂停阶段发生实际转换时写一条确认审计，带 `trigger=wss_confirmation`、当前 `link_generation`、请求序号和匹配的 action_ref/last_phase，MUST NOT 每帧重复写。策略范畴外静默跳过 MUST NOT 伪造审计；手工触发的策略跳过 SHALL 留下具体原因。
 
 #### Scenario: 手工仅冻结
 

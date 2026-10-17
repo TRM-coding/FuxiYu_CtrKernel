@@ -52,14 +52,19 @@
 - **WHEN** 容器不满足资格或样本不可信
 - **THEN** 返回具体跳过原因，不暂停、不写锚点、不发送磁盘通知、不升级
 
-### Requirement: 磁盘冻结资格与可信样本门禁
+### Requirement: 磁盘冻结资格与有效测量门禁
 
-入口 SHALL 在任何锚点写入、暂停、通知或升级前验证：容器有效、机器在管辖范围、长期容器、磁盘检查与响应开关、机器磁盘限额、可信样本门禁、硬限额及有效人工宽限。样本错位、未知或过期时 MUST 跳过全部磁盘处置；Q71 的按实际对象计量与允许冻结扩展 MUST NOT 在首版启用。
+入口 SHALL 在任何锚点写入、暂停、通知或升级前验证：容器有效、机器在管辖范围、长期容器、磁盘检查与响应开关、机器磁盘限额、业务路径上的有效测量、硬限额及有效宽限（人工 `grace_until` 与容器行 `restore_grace` 一起判断）。测量未验证、状态非 ok、真实时间过期、路径与样本不一致或采样乱序时 MUST 跳过全部磁盘处置；明确 `no_bind` 的 overlay-only 测量路径可为 null，但不得混入旧 bind bytes/旧路径样本。`mount_path_status=unresolved` 本身 MUST NOT 阻断同一业务路径上的有效测量，也不检查 dev/inode；Node 只校正业务路径，不新增 actual 对象计量或清理对象身份门禁。
 
-#### Scenario: 样本错位或未验证
+#### Scenario: 测量无效或未验证
 
-- **WHEN** 挂载身份为 mismatch、unknown，测量状态非 ok，或测量已过期
+- **WHEN** 测量状态非 ok、缺真实 measured_at、测量过期，或 measurement_mount_path 与当前 bind_mount_path 不一致
 - **THEN** 返回 disk_sample_untrusted 及原因，不重置周期、不建立锚点、不暂停、不通知、不升级
+
+#### Scenario: 路径 unresolved 但同路径测量有效
+
+- **WHEN** mount_path_status=unresolved，但已有业务路径、measurement_mount_path 与之一致，测量成功且真实时间有效
+- **THEN** 允许按该测量继续资格判断，不以路径诊断拒绝，也不把诊断失败伪装成 measurement_error
 
 #### Scenario: 非长期或开关关闭
 
@@ -76,44 +81,74 @@
 - **WHEN** 周期存在且有效 grace_until（含机器不可用 deferral 平移）尚未到期
 - **THEN** 保留原锚点和宽限，不暂停、不通知、不升级；手工触发也不能绕过
 
+#### Scenario: 恢复宽限有效
+
+- **WHEN** 恢复长期快照的容器已有未到期 restore_grace，且新实例测量超过硬限额
+- **THEN** 返回 grace_active，不暂停、不通知超限/升级、不删除；不创建或伪造冻结行，已有 first_frozen_at/累计原样保留；到期后按新实例有效测量标准处理
+
 #### Scenario: 动作前状态已变化
 
-- **WHEN** 入口评估合格后、真正调用 pause 或 remove 前重读发现用量已低于 reset、样本失效或宽限生效
-- **THEN** 返回 stale_decision，不调用暂停/删除并释放租约；不得凭评估时的旧状态执行动作
+- **WHEN** 入口评估合格后、真正调用 pause 或 remove 前重读发现用量已低于 reset、测量失效/路径不一致或宽限生效
+- **THEN** 返回 stale_decision，不调用暂停/删除并释放租约；不得凭评估时的旧状态或旧路径样本执行动作
 
 ### Requirement: 暂停请求受理与 WSS 确认分离
 
-系统 SHALL 区分暂停请求已受理、暂停失败、结果未知和 WSS 确认的实际暂停。Node 的 accepted/pausing 回执 MUST NOT 直接写 containers.container_status=PAUSED；仅 WSS 报告 paused 或入口确认当前已暂停时，才 SHALL 记录暂停确认。入口 SHALL 为每次暂停尝试分配单调持久化序号，旧尝试的晚到结果 MUST NOT 覆盖较新的阶段；WSS 确认 SHALL 只接受当前机器链路代际的有效快照，退役链路的晚到帧 MUST NOT 确认暂停。WSS 实际状态优先，但该序号和链路代际 MUST NOT 被宣称为 Q70 的动作 ID 或端到端代际协议。
+系统 SHALL 区分暂停请求已受理、动作失败、结果未知和实际 WSS 暂停。Node accepted/pausing 回执 MUST NOT 直接写 containers.container_status=PAUSED；仅实际 WSS paused 或入口确认当前已暂停时，才 SHALL 记录暂停确认。入口 SHALL 为每次尝试分配单调序号，并把可选 `action_ref` 绑定到该序号；只有精确 ref 的 failed/superseded、方向相符的 confirmed/idempotent_confirmed 或实际方向成功才结束对应动作尝试，unconfirmed/timed_out 不结束；failed 写失败，superseded 写 unconfirmed/pause_superseded；旧尝试、旧链路和旧 accepted 不得覆盖新阶段。该序号、ref 和链路代际 MUST NOT 被宣称为 Q70 的全局动作 ID 或端到端删除协议；具体失败、未确认和旧 Node 语义见场景。
 
 #### Scenario: 受理后由 WSS 确认
 
 - **WHEN** Node 返回 pausing 且后续 WSS 快照报告 paused
 - **THEN** 先记录 pause_state=requested、accepted，再由状态同步写 confirmed 和确认审计，通知这时才可使用“已冻结”
 
-#### Scenario: 受理后 WSS 报告失败
+#### Scenario: 精确 ref 的动作失败但仍 online
 
-- **WHEN** 暂停请求已受理且 Node 状态随后变为 failed 并带 pause_failed
-- **THEN** 按请求序号条件更新 pause_state=failed，保留锚点，通知如实说明暂停失败
+- **WHEN** 当前 `pause_request_seq` 已绑定 action_ref，`last_action` 精确匹配且 phase=failed，WSS 当前为 online
+- **THEN** 按序号条件更新 pause_state=failed 和错误原因，保留锚点；不写 containers.container_status=failed，容器保持 online，通知说明动作失败
+
+#### Scenario: 缺 ref 的 WSS failed/online
+
+- **WHEN** Node 没有 action_ref/last_action，只有 WSS failed 或 online；或只收到 online
+- **THEN** 不得推断 pause_failed；超时后只写 unconfirmed/pause_confirmation_timeout，保留锚点并允许后续重试，不伪造确认也不写成确定失败
 
 #### Scenario: 受理后超时未确认
 
-- **WHEN** 请求已受理但超过确认超时仍未收到 paused/failed，且容器状态不是已暂停
-- **THEN** 标记 pause_state=unconfirmed、pause_confirmation_timeout，保留锚点，返回未完成并允许后续重试，不伪造确认也不写成确定失败
+- **WHEN** 请求已受理但超过确认超时仍未收到 paused、匹配的 failed 或方向成功
+- **THEN** 标记 pause_state=unconfirmed、pause_confirmation_timeout，保留锚点，返回未完成并允许后续重试，不按 TTL 释放
 
 #### Scenario: 传输异常但结果未知
 
 - **WHEN** 暂停请求因超时或连接错误没有得到 Node 的有效回执
-- **THEN** 记录 unconfirmed 和传输原因，等待 WSS 确认或后续重试；没有明确失败证据时不得写成 failed
+- **THEN** 记录 unconfirmed 和传输原因，等待方向成功、精确 ref 终结或后续重试；没有明确失败证据时不得写成 failed
+
+#### Scenario: 同 ref 旧 accepted 不覆盖终结
+
+- **WHEN** 已记录匹配 ref 的 failed/confirmed 后，又收到相同 ref 的旧 accepted
+- **THEN** 旧 accepted 被忽略，pause_state 与终结 phase 不回退
+
+#### Scenario: 旧动作被新动作取代
+
+- **WHEN** 当前 `pause_request_seq` 的精确 ref 收到 superseded，且实际状态不是 paused
+- **THEN** 不写 failed 或容器 failed，按序号写 unconfirmed/pause_superseded，等待新请求或实际方向状态
+
+#### Scenario: WSS 早于 HTTP 受理
+
+- **WHEN** WSS 的匹配 last_action 终结先于 HTTP action_ref 回执到达，且当前 link_generation 有效
+- **THEN** 进程内有界暂存该终结记录，回执到达且精确匹配后应用；回执丢失或进程重启保持 unconfirmed，不伪造完成
+
+#### Scenario: Node epoch 或旧链路变化
+
+- **WHEN** Node epoch 已变化使旧 ref 永不匹配，或机器旧链路晚到终结帧
+- **THEN** 旧 ref/旧链路帧不结束当前暂停；只有新鲜运行态、就绪门禁和无在途当前动作时才可受控标 superseded，按实际状态重评，不写 confirmed
 
 #### Scenario: 已暂停但无周期
 
 - **WHEN** 容器实际已暂停，现又满足磁盘冻结资格且尚无周期
 - **THEN** 建立以当前时刻为起点的周期，直接记录 confirmed 并补齐该周期通知，不重复发送 pause 请求
 
-#### Scenario: 旧请求结果晚到
+#### Scenario: 旧请求/旧 ref 结果晚到
 
-- **WHEN** 旧序号请求的失败回执或阶段写入在新序号请求之后到达
-- **THEN** 条件更新因序号不匹配而不生效，新阶段保持；WSS 的真实 paused 仍可确认实际状态
+- **WHEN** 旧序号或旧 action_ref 的失败/终结记录在新请求之后到达
+- **THEN** 条件更新因序号或三元组不匹配而不生效，新阶段保持；WSS 的真实 paused 仍可确认实际状态，旧 ref 不结束新过渡
 
 #### Scenario: 旧链路晚到 paused 帧
 
@@ -194,13 +229,13 @@
 
 #### Scenario: 删除前用量已回落
 
-- **WHEN** 完整策略评估时已到期，但真正删除前重读发现用量已低于 reset、样本失效或宽限生效
-- **THEN** 放弃本轮删除并释放租约，让恢复清除或下一轮重新判断；不得凭过期样本删除
+- **WHEN** 完整策略评估时已到期，但真正删除前重读发现用量已低于 reset、测量失效/路径不一致或宽限生效
+- **THEN** 放弃本轮删除并释放租约，让恢复清除或下一轮重新判断；不得凭过期/错配样本删除
 
 #### Scenario: 采集异常期间
 
-- **WHEN** 样本错位、未知或过期
-- **THEN** 不依据无效样本暂停、通知或删除，锚点和既有 deferral/grace 保留
+- **WHEN** 测量未验证、状态非 ok、真实时间过期或路径与样本不一致
+- **THEN** 不依据无效测量暂停、通知或删除，锚点和既有 deferral/grace 保留；路径 unresolved 本身不构成该场景
 
 #### Scenario: 人工解冻宽限内
 
@@ -209,7 +244,7 @@
 
 ### Requirement: 冻结阶段、租约与通知结果持久化
 
-本表 SHALL 持久化 pause_state、请求/受理/确认时间、暂停请求序号、工作流租约、notification_state/fact/generation/attempt/lease/next_attempt/updated_at 和 notification_payload。notification_payload SHALL 只保存生成通知所需事实与收件人结果，MUST NOT 保存正文、凭据或 SMTP 配置。新增列 SHALL 对旧行提供安全默认值，迁移 MUST 可重复执行；字段定义见本变更数据附录增量，归档时同步主 spec 的 Data model appendix。
+本表 SHALL 持久化 pause_state、请求/受理/确认时间、暂停请求序号、可空 pause_action_ref JSON、工作流租约、notification_state/fact/generation/attempt/lease/next_attempt/updated_at 和 notification_payload。pause_action_ref SHALL 集中保存精确 Node ref、链路代际、phase 与时间，不拆成多个业务列，也不进入长期资格 DTO。notification_payload SHALL 只保存生成通知所需事实与收件人结果，MUST NOT 保存正文、凭据或 SMTP 配置。新增列 SHALL 对旧行提供安全默认值，迁移 MUST 可重复执行；字段定义见本变更数据附录增量，归档时同步主 spec 的 Data model appendix。
 
 #### Scenario: 阶段认领
 
@@ -243,6 +278,7 @@
 | `pause_confirmed_at` | DATETIME NULL | NULL | WSS 或当前状态确认暂停的时间 |
 | `pause_request_seq` | INTEGER NOT NULL | 0 | 单调尝试序号，用于拒绝旧回执覆盖 |
 | `pause_error_reason` | VARCHAR(255) NULL | NULL | 最近暂停失败、超时或结果未知原因 |
+| `pause_action_ref` | JSON NULL | NULL | 集中保存精确 action_ref、link_generation、bound_at、last_phase、last_phase_at、error_reason；不拆成多列，不进入长期资格 DTO |
 | `workflow_lease_owner` | VARCHAR(64) NULL | NULL | 冻结业务条件租约持有者令牌 |
 | `workflow_lease_until` | DATETIME NULL | NULL | 租约到期时间，过期可接管 |
 | `notification_state` | VARCHAR(24) NOT NULL | `idle` | idle / pending / sending / accepted / partial / failed / no_recipient |

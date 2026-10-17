@@ -7,9 +7,11 @@
 - [services/container_tasks.py](../../../services/container_tasks.py) 的 `pause_container`（第 312-325 行）只做守卫、请求 Node、落库和审计；它没有冻结周期、资格、通知或升级概念。
 - [services/container_module/actions.py](../../../services/container_module/actions.py) 的 `_request_pause_action`（第 60-93 行）在 Node 返回 `success=1` 后即视为成功，`_persist_paused_status`（第 96-103 行）立刻把 `containers.container_status` 写成 `PAUSED`。Node 的 `/pause_container`（`FuxiYu_NodeKernel/network/api.py` 第 468-500 行）实际是启动后台线程后立即返回 `container_status=pausing`；真正暂停/失败由 `status_cache` 推进，再由 Ctrl 的 WSS 状态快照落到 `container_status`（[snapshots.py](../../../services/container_module/node_comms_modules/snapshots.py) 第 16-27、109-131 行）。因此当前 Ctrl 把 accepted 当成了 confirmed。
 - 调度器的 hard limit 响应（[container_disk_check_task.py](../../../schedulers/container_disk_check_task.py) 第 268-358 行）先发“已冻结”邮件、再检查在线并 pause；冻结锚点由调度器自己 `upsert_first_frozen`，宽限和升级也在调度器里。`_DISK_CHECK_CACHE` 是进程内去重，`upsert_first_frozen`（[repo](../../../repositories/container_disk_freeze_state_repo.py) 第 38-52 行）是 get-then-insert，两个进程会竞争同一主键。
-- WSS 的旧连接处理还有一个窄窗口：`_consume_link` 断开时会取消消费者，但已经进入 `asyncio.to_thread(apply_snapshot_batch)` 的帧仍可能晚于新连接的帧落库。暂停确认不能把这种旧链路晚到 paused 当成当前事实；Ctrl 接收层需要按机器维护 `link_generation`，并让状态确认与磁盘门禁共用它，不新增 Node 字段。
+- WSS 的旧连接处理还有一个窄窗口：`_consume_link` 断开时会取消消费者，但已经进入 `asyncio.to_thread(apply_snapshot_batch)` 的帧仍可能晚于新连接的帧落库。暂停确认不能把这种旧链路晚到 paused 当成当前事实；Ctrl 接收层需要按机器维护 `link_generation`，并让状态确认与磁盘门禁共用它；该代际本身不要求 Node 新增线路字段，动作引用 action_ref 另行可选。
 
-挂载可信门禁由配套 Ctrl 变更 `gate-disk-check-on-mount-identity` 提供；本设计只消费其验证事实，不修改其字段或 Node 协议。Node 配套变更 [verify-bind-mount-identity design](../../../../FuxiYu_NodeKernel/openspec/changes/verify-bind-mount-identity/design.md) 已定义 version 1 的 `disk_protocol_version`、`bind_identity`、`measurement_status`、`measured_at` 和 WSS 连接/观测代际；本变更不新增或改名这些线路字段。
+路径回填与测量有效门禁由配套 Ctrl 变更 `gate-disk-check-on-mount-identity` 提供；本设计只消费其业务路径、测量状态/真实时间/路径一致与连接/采样排序规则，不修改字段，也不比较 dev/inode 或要求 `mount_path_status=resolved`。Node 路径/测量协议沿用 `verify-bind-mount-identity` 名称，但只返回校正后的业务 `bind_mount_path`、`measurement_mount_path`、`measurement_status`、`measured_at` 与采样排序；不再传 `bind_identity`/`measurement_identity` 作为 Ctrl 业务门禁。
+
+暂停动作引用由 `guard-long-term-container-transitions` 定义、Node `guard-runtime-state-reconciliation` 实现：动作受理响应可选 `action_ref={node_epoch,generation,seq}`，HTTP 状态/WSS 容器条目可选 `last_action={ref,action,phase,error_reason}`。本变更把 ref 绑定到 `pause_request_seq`，只消费精确匹配的终结 phase；旧 Ctrl 可忽略，旧 Node 缺字段按本设计第 3 节的 unconfirmed 降级。action_ref 是 pause/unpause 局部关联，不是 Q70 的全局删除身份。
 
 ## Goals / Non-Goals
 
@@ -22,8 +24,8 @@
 
 **Non-Goals:**
 
-- 不实现 Q70 的动作 ID/严格代际协议；不承诺 Node 后台动作与后续 unpause 的端到端顺序。
-- 不启用 Q71 的“按 actual 对象计量并允许冻结”；首版错位/未知/过期一律跳过。
+- 不把 action_ref 当作 Q70 的全局动作 ID/删除身份；不承诺 Node 后台动作与后续 unpause 的端到端顺序。
+- 不新增 actual 对象计量或清理对象身份门禁；测量无效、路径与样本不一致或过期时跳过动作。
 - 不新增独立通知表、动作请求表或调度器；不改变软限额的 24 小时提醒语义。
 - 不修生产数据，不改变机器限额，不把普通 pause 写成磁盘冻结。
 
@@ -52,7 +54,9 @@ def run_disk_freeze(
 ) -> DiskFreezeResult: ...
 
 def evaluate_disk_freeze_policy(container, usage, *, now) -> DiskPolicyDecision: ...
-def reconcile_pause_status(container_id, raw_status, failed_reason, observed_at) -> None: ...
+def reconcile_pause_status(
+    container_id, raw_status, failed_reason, last_action, link_generation, observed_at,
+) -> None: ...
 def retry_due_notifications(limit: int = 50) -> int: ...
 ```
 
@@ -63,11 +67,11 @@ def retry_due_notifications(limit: int = 50) -> int: ...
 
 ```text
 status: frozen | already_paused | pause_requested | pause_unconfirmed |
-        pause_failed | not_actionable | skipped | stale_decision | busy |
+        pause_failed | not_actionable | skipped | grace_active | stale_decision | busy |
         escalation_due | escalated | error
 policy: eligible, skip_reason, usage_percent, hard_limit, trusted_sample
 cycle: created, first_frozen_at, days_frozen, grace_active, escalation_due
-pause: state, request_seq, requested_at, accepted_at, confirmed_at, error
+pause: state, request_seq, requested_at, accepted_at, confirmed_at, action_ref, last_phase, error
 notification: state, fact, attempt, accepted_count, failed_count, next_attempt_at
 escalation: due, executed, error
 ```
@@ -82,14 +86,16 @@ escalation: due, executed, error
 4. `container.disk_response_enabled`；
 5. 长期容器；
 6. `machine.max_disk_size_gb > 0`；
-7. 可信样本门禁：`disk_identity_status in (match, no_bind)`、`disk_measurement_status == ok`、`disk_measured_at` 未超过门禁允许年龄、无时钟异常；字段缺失按未验证处理；
-8. 用量组成完整（total/overlay/bind）；
+7. 有效测量：`disk_measurement_status == ok`、`disk_measured_at` 真实未过期/无时钟异常、`measurement_mount_path` 与当前 `bind_mount_path` 一致（明确 no_bind 的 overlay-only 可为 null）、采样排序未失效；字段缺失/未验证按无效处理；`mount_path_status=unresolved` 不单独拒绝；
+8. 用量组成完整（total/overlay/bind；明确 no_bind 时仅 overlay，不混入旧 bind bytes）；
 9. `usage_percent >= hard_limit`；
-10. 有效人工宽限（`effective_grace_until(freeze_state)`，含已结算 deferral 平移）。
+10. 有效宽限：`max(effective_grace_until(freeze_state), effective_restore_grace_until(container))`；恢复宽限来自容器行 `restore_grace`，不要求冻结行、不使用旧冻结累计。任一未到期返回 `grace_active`，不暂停/通知/升级；到期后重新评估标准策略。
 
 `FREEZE_ONLY` 不执行“用量低于 reset 即删除周期”的维护动作；低于 reset 时返回 `below_reset` 并保留原行。调度器的 reset 仍保留在完整策略路径中，但按 gate 变更的要求，门禁必须早于 reset；本变更不复制门禁实现，联合测试覆盖“无效样本不 reset”。
 
 在真正调用 Node pause 或 remove 之前，入口重读一次容器、用量、门禁和宽限；若已低于 reset、样本失效或宽限生效，返回 `stale_decision`，不调用网络并释放租约。该重读缩小但不消除采样后状态变化的竞态，不能当作删除路径的原子授权。
+
+**恢复宽限**：恢复长期快照在容器行写入一次 `restore_grace`，本入口只把它作为有效宽限来源，不创建/伪造冻结行，也不写 `first_frozen_at`。若已有冻结行，其锚点/累计/旧 deferral 原样保留；恢复宽限的机器不可用补偿由 `restore_grace.deferral_seconds` 只计授予后窗口。宽限有效期间入口返回 `grace_active`，不暂停、不发超限/升级通知、不删除；到期后按新实例有效测量和正常硬限额/Q72 累计处理。
 
 软限额提醒不在本入口内，仍是调度器的独立提醒；它不创建周期，也不参与升级。
 
@@ -99,10 +105,11 @@ escalation: due, executed, error
 
 ```text
 PauseRequestResult(state=requested|not_pauseable|failed|unconfirmed,
-                   accepted: bool, response: dict|None, error_reason: str|None)
+                   accepted: bool, action_ref: dict|None,
+                   last_phase: str|None, response: dict|None, error_reason: str|None)
 ```
 
-`container_tasks.pause_container` 的普通门面据此写自己的审计，不写 `PAUSED`；是否真正暂停只由 WSS 决定。
+`container_tasks.pause_container` 的普通门面据此写自己的审计，不写 `PAUSED`；是否真正暂停只由 WSS/实际状态决定。动作 `failed` 不是容器 `failed`。
 
 持久化状态：
 
@@ -110,21 +117,25 @@ PauseRequestResult(state=requested|not_pauseable|failed|unconfirmed,
 | --- | --- |
 | `not_requested` | 当前周期未请求暂停 |
 | `requested` | 已发出请求，可能已受理，尚无 confirmed |
-| `confirmed` | WSS 报告 paused，或入口确认当前已暂停 |
-| `failed` | Node 明确失败 |
-| `unconfirmed` | 传输异常或确认超时，结果未知 |
+| `confirmed` | 实际 WSS paused，或入口确认当前已暂停 |
+| `failed` | 同步 HTTP 明确失败，或精确 ref 的 `last_action.failed`；不覆盖容器状态 |
+| `unconfirmed` | 缺 ref/缺回执、超时、`unconfirmed`/`timed_out`，结果未知 |
 | `not_pauseable` | 当前容器状态不允许发起暂停 |
+
+**动作绑定**：在 `ContainerDiskFreezeState` 增加可空 JSON `pause_action_ref`，保存 `{ref, link_generation, bound_at, last_phase, last_phase_at, error_reason}`。它绑定当前 `pause_request_seq`，不新增 `node_epoch/generation/seq` 多列，也不进入长期资格 DTO。同一 ref 一旦记录终结 phase，后续 accepted/其他 phase 只作诊断，不再改写暂停阶段；实际 paused 仍可按状态确认。
 
 关键转换：
 
-1. **认领请求**：条件 UPDATE 把 `pause_state` 置 `requested`，`pause_request_seq = pause_request_seq + 1`，写 `pause_requested_at`，清空 accepted/confirmed/error。条件允许 `not_requested/failed/unconfirmed/not_pauseable`；`confirmed` 仅当当前 `container_status` 不是 paused（例如人工解冻后）才允许；`requested` 仅在超过重试间隔后允许。
-2. **Node 受理**：条件 `WHERE pause_request_seq=:seq` 写 `pause_accepted_at` 和 `pause_state=requested`。`success=1, container_status=pausing` 只代表 accepted。
-3. **WSS 确认**：状态快照落到 paused 后，条件 UPDATE 写 `pause_state=confirmed`、`pause_confirmed_at=observed_at`。只在该转换实际发生时写一条确认审计。
-4. **WSS/Node 明确失败**：仅当 `pause_state in (requested, unconfirmed)` 且回执是明确的 `pause_failed` 时，按当前阶段写 `failed` 和错误原因；没有明确失败证据的传输异常保持 `unconfirmed`。
-5. **超时/传输未知**：入口在下一轮开始时，如果 `requested` 已超过确认超时（初值 120 秒）且当前 `container_status` 不是 paused，按 `pause_request_seq` 条件写 `unconfirmed`、`pause_error_reason=pause_confirmation_timeout`；发送超时/连接错误且没有有效回执也写 `unconfirmed`，保留锚点并进入待确认通知/重试。
+1. **认领请求**：条件 UPDATE 把 `pause_state` 置 `requested`，`pause_request_seq = pause_request_seq + 1`，写 `pause_requested_at`，清空 accepted/confirmed/error 与 `pause_action_ref`。条件允许 `not_requested/failed/unconfirmed/not_pauseable`；`confirmed` 仅当当前 `container_status` 不是 paused（例如人工解冻后）才允许；`requested` 仅在超过重试间隔后允许。
+2. **Node 受理**：条件 `WHERE pause_request_seq=:seq` 写 `pause_accepted_at` 和 `pause_state=requested`。响应若带 `action_ref`，只在 seq 仍匹配且 `last_phase` 尚未 terminal 时写入 `pause_action_ref.ref`，phase=accepted；相同 ref 的旧 accepted 不覆盖 failed/confirmed 等终结。`success=1, container_status=pausing` 只代表 accepted，不代表 paused。
+3. **实际确认**：WSS 当前链路快照实际为 paused 时，条件 UPDATE 写 `pause_state=confirmed`、`pause_confirmed_at=observed_at`。只在该转换实际发生时写一条确认审计。`last_action.confirmed`/`idempotent_confirmed` 是动作成功证据，但在实际 WSS 仍为 online 时不得把 pause_state 写成 confirmed，也不得写容器 PAUSED。
+4. **明确失败与取代**：仅同步 HTTP 明确失败，或当前 `pause_action_ref.ref` 与 `last_action.ref` 精确相等且 action/phase 匹配 `failed` 时，按 `pause_request_seq` 条件写 `pause_state=failed` 和错误原因；**不得**把 `containers.container_status` 写成 failed，运行态继续由 WSS/Docker 决定。若实际 WSS 已 paused，实际确认优先，不把暂停成功改写成失败。`superseded` 是旧动作被新动作取代，不写 failed；无实际 paused 时按序号写 `unconfirmed`/`pause_superseded`，等待新请求或实际状态。
+5. **未确认**：缺 ref/缺回执、只收到 `unconfirmed`/`timed_out`、超时、连接异常，均按 `pause_request_seq` 写 `unconfirmed`、`pause_error_reason=pause_confirmation_timeout` 或传输原因；保留锚点并允许重试。WSS `online` 只表示当前未暂停，不得推断 `pause_failed`；反过来 `paused` 也不得推断 unpause 成功。没有方向成功或同步明确失败时不按 TTL 释放。
 6. **已暂停补齐**：入口看到 `container_status=paused` 且无周期时，先原子建立锚点（`first_frozen_at=now`），直接写 `confirmed`，不重复请求；通知事实为 `pause_confirmed`，`confirmation_source=already_paused`。
 
-**旧请求晚到**：每次请求递增 `pause_request_seq`；Node 同步回执、失败回写和超时回写都带 `WHERE pause_request_seq=:seq`，旧尝试不能覆盖新阶段。WSS 没有动作 ID，只代表“当前实际状态”，因此实际 paused 可以确认当前阶段；但确认 SHALL 只接受当前机器链路代际的快照。Ctrl 侧在 `link.py`/`websocket.py` 为每台机器的每次成功认证连接递增一个进程内 `link_generation`，由 `apply_snapshot_batch` 传入状态落库和 `reconcile_pause_status`；旧链路或旧代际的晚到帧直接丢弃，不写 confirmed、不发通知。磁盘样本门禁复用同一个 generation，不新增 Node 字段，也不把 generation 持久化为 Q70 的动作 ID。Node 后台线程在后续 unpause 之后才落地旧 pause 的极端交错仍由 Q70 处理，本变更不声称解决。
+**旧请求/旧链路/过期 ref**：每次请求递增 `pause_request_seq`；同步回执、失败回写、超时回写都带 `WHERE pause_request_seq=:seq`，旧尝试不能覆盖新阶段。WSS/HTTP `last_action` 必须精确匹配 `pause_action_ref.ref` 且 action 方向一致；相同 ref 的旧 accepted 不得覆盖 terminal phase。WSS 只接受当前机器 `link_generation`，旧链路或旧代际的帧直接丢弃；该代际是进程内接收排序，不是 Q70 动作 ID。Node epoch 变化后旧 ref 永不匹配；只有当前链路新鲜运行态、机器在线且非维护/无采集异常、无在途当前动作/更新请求时，才允许把旧绑定受控标为 `superseded`/`stale_node_epoch`，按实际 paused 确认或保持 unconfirmed，不伪造成功。早到 WSS 终结可在进程内按 ref 有界暂存，HTTP 回执匹配后应用；回执丢失/进程重启保持 unconfirmed。
+
+**旧 Node**：没有 `action_ref`/`last_action` 时，只有实际 paused 成功或同步 HTTP 明确失败能结束 requested；WSS `failed`/`online` 不能反推 `pause_failed`，超时只记 unconfirmed 并安全阻断。部署说明必须列出旧 Node 覆盖率和该限制。
 
 **普通 pause**：低层请求返回 accepted 后，`containers.container_status` 仍由 WSS 推进；接口/调用方只能报告 `pause_requested` 或 `pause_request_accepted`，不能报告 paused。由于当前没有普通 pause 的公开 API，本次只改服务契约和调度调用，不扩大生命周期动作范围。
 
@@ -212,13 +223,13 @@ WHERE container_id=:id
 - 删除成功后写 `notification_fact=escalation_removed`，再发通知；删除失败写 `escalation_failed`，保留锚点，下一轮重试。mount 清理仍是删除后的尽力而为，失败单独记录 `mount_cleanup_error`，不回滚删除结果。通知与删除结果分开，不再在删除前宣称“已清除”。
 - 删除前仍检查宽限、gate、长期、开关和机器范畴；Q72 下恢复可信高用量不重设锚点、不新增顺延、不设 invalid/review，达到原累计有效天数即可升级。
 - 删除使用现有软删和 `remove_container` 的 not_found 幂等语义；租约降低并发删除概率，但进程在 Node 删除成功、本地软删/通知回写之间崩溃仍是可见的 at-least-once 窗口，不声称 exactly-once。
-- 删除前在同一进程重读容器的当前用量、可信门禁、宽限和累计天数：若已低于 reset、样本失效或宽限生效，则放弃本轮删除并释放租约，让恢复清除/下一轮重新判断；只有重读仍满足硬限额和升级条件才调用 remove。该重读缩小但不消除“采样后目录/用量变化”的竞态，不宣称删除路径的原子身份保证。
+- 删除前在同一进程重读容器的当前用量、有效测量、宽限和累计天数：若已低于 reset、测量失效/路径不一致或宽限生效，则放弃本轮删除并释放租约，让恢复清除/下一轮重新判断；只有重读仍满足硬限额和升级条件才调用 remove。该重读缩小但不消除“采样后目录/用量变化”的竞态，不宣称删除路径的原子身份保证。
 
 ### 7. 数据模型与迁移
 
 在 `ContainerDiskFreezeState` 增加以下列（完整类型/默认值见 delta spec 的 data model appendix）：
 
-- 暂停阶段：`pause_state`、`pause_requested_at`、`pause_accepted_at`、`pause_confirmed_at`、`pause_request_seq`、`pause_error_reason`；
+- 暂停阶段：`pause_state`、`pause_requested_at`、`pause_accepted_at`、`pause_confirmed_at`、`pause_request_seq`、`pause_error_reason`、`pause_action_ref`（可空 JSON，集中保存 ref/link_generation/last_phase/时间/error）；
 - 工作流租约：`workflow_lease_owner`、`workflow_lease_until`；
 - 通知：`notification_state`、`notification_fact`、`notification_generation`、`notification_attempt`、`notification_lease_until`、`notification_next_attempt_at`、`notification_updated_at`、`notification_payload`；
 - 索引：`(notification_state, notification_next_attempt_at)`。
@@ -238,7 +249,7 @@ WHERE container_id=:id
   "mode": "full_policy|freeze_only",
   "policy": {"eligible": true, "skip_reason": null},
   "cycle": {"created": true, "first_frozen_at": "...", "days_frozen": 2},
-  "pause": {"state": "requested", "request_seq": 1, "accepted": true, "confirmed": false},
+  "pause": {"state": "requested", "request_seq": 1, "accepted": true, "confirmed": false, "action_ref": {"node_epoch": "...", "generation": 0, "seq": 1}, "last_phase": "accepted"},
   "notification": {"state": "pending", "fact": null, "generation": 0, "attempt": 0},
   "escalation": {"due": false, "executed": false},
   "partial": false
@@ -246,7 +257,7 @@ WHERE container_id=:id
 ```
 
 - `success=true` 仅当本次运行的目标动作完成：本应升级删除的完整策略须删除完成；其余模式须暂停已确认或当前已暂停。仅受理、超时、跳过、暂停失败、应升级但删除失败均为 false，并带具体 `error_reason`；通知失败不翻转已完成的冻结成功，用 `partial=true` 表达。
-- WSS 的 requested→confirmed 转换另写一条确认审计（`trigger=wss_confirmation`、`operator_user_id=NULL`、当前 `link_generation` 和请求序号），不每帧重复。
+- WSS 的 requested→confirmed 转换另写一条确认审计（`trigger=wss_confirmation`、`operator_user_id=NULL`、当前 `link_generation`、请求序号，以及匹配的 action_ref/last_phase），不每帧重复。
 - 通知失败不把已确认冻结改成失败；用 `partial=true`、`notification.state=failed/partial/no_recipient` 表达，`send_mail` 的既有行继续记录真实邮件结果。
 - 汇总行不复制邮件正文、地址列表或 SMTP 配置；收件人明细保留在既有 `send_mail` 审计和 `notification_payload` 的计数/状态中。
 
@@ -269,30 +280,32 @@ WHERE container_id=:id
 - **`SELECT ... FOR UPDATE` 后跨 SMTP 发送**：把数据库锁跨网络持有，连接池和超时不可控；改用短租约 + 条件认领。
 - **进程内锁或 `_DISK_CHECK_CACHE`**：多 worker/多进程下无效，正是当前重复邮件和锚点竞争来源。
 - **严格 exactly-once / 事务性 outbox**：本轮不引入独立投递器；网络副作用只能做到 at-least-once + 可重试幂等，设计明确不宣称更强保证。
-- **用 Node 动作 ID 做阶段关联**：属于 Q70 的跨进程协议，超出本变更；本变更只用 Ctrl 侧单调请求序号保护阶段回写。
+- **把 Node action_ref 当成 Q70 全局删除身份**：action_ref 只关联 pause/unpause 的 node_epoch/generation/seq，不能授权跨进程删除；本变更只用它精确关联暂停阶段，删除仍保持既有软删与租约边界。完全不使用 action_ref、只靠时间戳/方向猜动作失败同样被否决。
 
 ## Risks / Trade-offs
 
-- [WSS 延迟或丢帧导致确认超时] → 保留 requested，超时后标记待确认并可重试；不把超时当成功，也不在超时后直接改容器状态。
-- [Node 后台旧 pause 在后续 unpause 后落地] → WSS 以实际状态为准并如实展示；端到端动作代际留给 Q70，本变更不宣称解决。
-- [旧链路晚到 paused 帧] → Ctrl 侧 `link_generation` 在每次认证连接递增，状态落库和确认只接受当前代际；旧代际帧丢弃。该代际是进程内接收排序，不持久化、不进入 Node 协议，也不替代 Q70。
+- [WSS 延迟或丢帧导致确认超时] → 保留 requested/unconfirmed，超时后标记待确认并可重试；不把超时当成功，也不在超时后直接改容器状态。WSS `online` 不推断 pause_failed。
+- [pause 动作失败但容器实际 online] → 精确 ref 的 `last_action.failed` 写 pause_state=failed、保留锚点，但不写容器 failed；长设门禁按实际 online 解除过渡。旧 Node 缺 ref 时只能 unconfirmed 安全阻断，部署说明明确该限制。
+- [Node 后台旧 pause 在后续 unpause 后落地] → WSS 以实际状态为准并如实展示；action_ref 不是端到端动作代际，本变更不宣称解决 Q70。
+- [旧链路晚到 paused/failed 帧] → Ctrl 侧 `link_generation` 在每次认证连接递增，状态落库、last_action 与确认只接受当前代际；旧代际帧丢弃。该代际是进程内接收排序，不持久化、不替代 Q70。
+- [早到 WSS 或 ack 丢失] → 早到终结按 ref 有界暂存，回执匹配后应用；ack 丢失/重启保持 unconfirmed，不伪造成功。Node epoch 变化只在新鲜就绪/无在途当前动作时受控标 superseded；若没有可观察的新 epoch/终结记录，不按时间推断，保持 unconfirmed 安全阻断。
 - [租约过期后接管造成重复 pause/邮件/删除] → 条件认领与尝试序号降低范围，明确 at-least-once；审计保留每次尝试，不承诺 exactly-once。
 - [通知服务不可用或没有收件人] → 持久化 failed/partial/no_recipient 和退避，不阻塞暂停、不补偿天数；最终送达不作保证。
 - [升级删除后进程在通知回写前崩溃] → 软删/删除审计已落，通知可能缺失；通过到期通知扫描可补发已持久化事实，但崩溃窗口仍是已知边界。
-- [gate 字段未部署] → 可信门禁 fail closed，所有样本按未验证跳过；部署顺序必须先完成 Ctrl gate/Node 协议，否则自动冻结会停摆而不是误动作。
+- [gate 测量字段未部署] → 缺真实测量/协议按未验证跳过，自动冻结停摆但不误动作；部署顺序必须先完成 Ctrl 测量接收/Node 路径测量协议。
 - [普通 unpause 仍是 accepted 后立即授宽限] → 这是既有边界，本变更不扩大；人工解冻宽限的确认语义需另行决策，不能在本文假装已修。
 - [主规格 data model appendix 不会随 delta 自动合并] → archive 时需把本 delta 的附录列合并进 `openspec/specs/backend--table-container-disk-freeze-state/spec.md`；本变更只写 change 目录。
 
 ## Migration Plan
 
 1. 先执行 `migrations/2026-10_disk_freeze_workflow.sql`（或确认应用启动补列已执行），验证重复执行不报错、旧行默认值正确、索引存在；只在隔离库演练。
-2. 先部署 `gate-disk-check-on-mount-identity` 的 Ctrl 字段/门禁并核对旧样本显示 unverified；再逐机部署 Node `verify-bind-mount-identity`，核对 match 覆盖率、真实测量年龄和异常原因；最后部署本冻结业务变更。若因排期提前部署本变更，它会对未验证样本 fail closed（自动冻结停摆），不能当作已完成上线。
-3. 用模拟 Node/WSS/邮件和隔离 SQLite 回放：accepted→paused、accepted→failed、超时、已暂停补齐、并发锚点/租约、通知部分失败、Q72 恢复升级、仅冻结不删除。
+2. 先部署 `gate-disk-check-on-mount-identity` 的 Ctrl 测量/路径字段和有效谓词，核对旧样本显示测量 unverified；再逐机部署 Node 路径/测量协议与 action_ref/last_action，核对路径回填覆盖率、真实测量年龄、路径样本一致、旧 Node 缺口和 action_ref 覆盖；最后部署本冻结业务变更。若因排期提前部署本变更，它会对未验证测量 fail closed（自动冻结停摆），不能当作已完成上线。
+3. 用模拟 Node/WSS/邮件和隔离 SQLite 回放：accepted→paused、精确 failed+online、confirmed+online 保留屏障、同 ref 旧 accepted、超时/unconfirmed、早到 WSS、epoch 变化/旧链路、已暂停补齐、并发锚点/租约、通知部分失败、Q72 恢复升级、仅冻结不删除。
 4. 回滚：保留新增列（旧代码忽略它们）；回滚 Ctrl 会恢复“即时 PAUSED”和调度器旧邮件顺序的风险，不能在未核对 gate/冻结策略时直接撤销防护。Node 回滚只降级样本为未验证，不应删除列或绕过门禁。
 
 ## Dependencies / Follow-ups
 
-- 依赖 `gate-disk-check-on-mount-identity` 的 `disk_identity_status/disk_measurement_status/disk_measured_at` 等字段和接收规则；依赖 Node `verify-bind-mount-identity` 的 version 1 线路字段与连接/观测代际。本变更不修改这些字段，也不修改 Node 协议。
-- Q71 的“按 actual 计量并允许冻结”未启用；如后续采用，必须同时扩展两端契约和清理目标身份，不能只在本入口放行。
+- 依赖 `gate-disk-check-on-mount-identity` 的 `disk_measurement_status/disk_measured_at/disk_received_at/disk_observation`、业务路径回填与统一测量有效谓词；依赖 Node 路径/测量协议（原 `verify-bind-mount-identity` 名称保留）的测量状态/真实时间/测量路径/采样排序；依赖 `guard-long-term-container-transitions` 定义的 Node 可选 `action_ref`/`last_action` 契约及共享 `link_generation`。本变更只消费这些字段，不修改 Node 协议；不比较 dev/inode、不要求 mount_path_status=resolved，旧 Node 缺 ref 时按 unconfirmed 降级。
+- Node 只负责内部定位并回填业务路径；冻结/清理按该路径与既有权限执行，不新增 actual 对象计量或清理对象身份门禁。
 - 普通 unpause 的 accepted→宽限确认、软限额提醒的跨进程去重不在本变更范围，需由父代理决定是否另立变更。
 - archive 时把 data model appendix 合并进主规格；本变更的写范围只到 change 目录。

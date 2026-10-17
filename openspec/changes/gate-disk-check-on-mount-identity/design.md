@@ -2,105 +2,120 @@
 
 ## Context
 
-动机见 [proposal.md](proposal.md)。`_apply_disk_usage_entry` 遇到不完整样本直接跳过，完整样本则以接收时刻刷新 `disk_checked_at`。调度只读数字，不检查真实测量年龄。`repositories/containers_repo.py` 默认跳过多数 None 更新，不能通过推送 null 安全地废止旧正常值。`api/container_api.py` 的手动刷新也写 disk 字段，并把缺失值 `int(... or 0)` 成零，必须纳入相同规则。
+动机见 [proposal.md](proposal.md)。当前 `_apply_disk_usage_entry` 只检查字节是否齐全，完整即以接收时刻刷新 `disk_checked_at`；`bind_mount_path` 可能仍是旧 Docker Source。调度和清理只读数字/路径，不检查真实测量年龄或路径是否与样本一致。`api/container_api.py` 的手动刷新也会写 disk 字段，并把缺失字节 `int(... or 0)` 成零。
 
-Node 配套协议详见 [Node design](../../../../FuxiYu_NodeKernel/openspec/changes/verify-bind-mount-identity/design.md)。新增规格落在既有 `backend--table-containers`，遵守 Ctrl 按表组织能力的规范。
+Node 可以在内部用 Docker/宿主进程/dev/inode 事实定位实际目录，并把结果收窄为**业务路径修正**；Ctrl 不获取也不比较这些对象编号。本设计把“Node 定位路径”和“Ctrl 校验测量”分阶段，路径核对状态只作诊断，不作为业务门禁。
 
 ## Goals / Non-Goals
 
-**Goals:** 保留可追溯的最后数字，让最新异常和证据过期真实影响磁盘调度；恢复可信测量后遵循用户已确定的累计删除规则。
+**Goals:** 让 Ctrl 持久化 Node 确认真实路径后的业务路径；只在测量成功、完整、真实时间未过期、与当前业务路径一致且响应不乱序时认可样本；无法定位时不猜路径、不把缺失写成零；保留 Q72 累计与既有补偿/宽限。
 
-**Non-Goals:** 不自动修复 daity 历史挂载业务记录，不在此补丁修改机器 512 GiB 限额，不以 inode 替代数据库资源身份，不自动按 inode 查找目录，不把磁盘样本验证当成清理路径的原子授权，不实现 Q71 的清理前身份验证或实际对象计量。
+**Non-Goals:** 不在 Ctrl 比较 dev/inode/PID，不用目录对象编号授权冻结、删除、清理、恢复或长期资格；不把 `/proc` 临时路径当业务路径；不新增清理前对象身份门禁；不建立 Q70 跨进程操作代际；不实现恢复或长期业务政策。
 
 ## Decisions
 
-### 1. 当前验证事实与最后成功数字分开持久化
+### 1. 业务路径与路径诊断
 
-在 containers 增加下列字段；迁移需显式 ALTER 存量表及测试，不能只依赖 create_all。身份 JSON 保存无损十进制字符串。旧行默认为 unverified，不能以最近一次 disk_checked_at 回填真实测量时间。
+`bind_mount_path` 是唯一业务路径（用户通称 `mount_path`）。Node 在内部能唯一确定实际宿主目录时，返回校正后的 `bind_mount_path`；成功 Docker 明确 `no_bind` 是“当前没有 bind”的确定事实，Node 返回 `bind_mount_path=null`、`measurement_mount_path=null`、overlay-only。`unresolved`/`not_running`/字段缺失/不可读不是 no_bind：这些情况保留原有/最后已确认路径并标记诊断，无已有路径才是 null；不猜目录、不返回 `/proc/...` 临时路径。
+
+Node `usage` version 1 的可选路径诊断字段：
+
+| 字段 | 类型 | 语义 |
+| --- | --- | --- |
+| `configured_mount_path` | `str \| null` | Docker Source 诊断；不直接当业务路径 |
+| `mount_path_status` | `resolved / unresolved / not_running / no_bind`，缺省 `unresolved` | 路径核对诊断，不是业务门禁 |
+| `mount_path_observed_at` | UTC 字符串或 null | 本次路径核对时间 |
+
+- `resolved` 只表示 Node 内部已唯一确认路径；Ctrl 不要求提供 dev/inode/PID，也不保存这些值。
+- `unresolved`/`not_running`/字段缺失/不可读：只保留已有/最后确认路径，MUST NOT 清空，也不能当 no_bind；同一路径的成功测量不受该诊断阻断。
+- 成功 Docker 明确 `no_bind`：Node 返回业务路径与 measurement_mount_path 均为 null；Ctrl 在当前认证机器/活跃容器/有效排序下同步清空 `containers.bind_mount_path`，不得保留旧路径再豁免同路径检查。清空后以 overlay-only 组成判断测量，旧 bind bytes/旧路径样本只作历史诊断，不得写入有效测量。
+- 路径修正只持久化到当前认证机器上的活跃 `containers.bind_mount_path`。不按 inode/对象编号批量改写历史恢复快照、旧清理记录或其他机器记录；后续新记录读取新路径。
+- 路径修正不是删除/清理授权。既有路径/权限检查与失败审计保留，不新增 inode 清理门禁。
+
+### 2. Ctrl 持久化字段
+
+在 `containers` 增加/使用以下字段，迁移需显式 ALTER 存量表：
 
 | 字段 | 建议类型及语义 |
 | --- | --- |
-| `disk_identity_status` | String(24)，默认 `unknown`，最新挂载验证结果 |
-| `disk_measurement_status` | String(24)，默认 `unverified`，最新测量资格 |
-| `disk_identity` | 可空 JSON，版本、Docker ID、双方对象、进程、测量对象、原因、epoch/seq 等结构化证据 |
-| `disk_identity_checked_at` | 可空 UTC DateTime，Node 身份观测完成时间 |
-| `disk_measured_at` | 可空 UTC DateTime，最后成功有效测量真正发生的时间 |
-| `disk_received_at` | 可空 UTC DateTime，Ctrl 本地收到磁盘事实的时间 |
+| `disk_measurement_status` | String(24)，默认 `unverified`；`ok/measuring/stale/error/unverified` |
+| `disk_measured_at` | 可空 UTC DateTime；合计真实测量发生时间 |
+| `disk_received_at` | 可空 UTC DateTime；Ctrl 接收该事实时间，只用于排序/排障 |
+| `disk_observation` | 可空 JSON；`protocol_version/collector_epoch/observation_seq/measurement_mount_path/mount_path_status/configured_mount_path/mount_path_observed_at/reason` |
 
-下表左列逐字采用 Node design 的 version 1 线路名，Ctrl 不重命名线路字段；右列只是本地持久化位置，不改变线路契约。若 Node 后续改名字段，先改 Node 契约再同步 Ctrl，本补丁不自行造名。
+**不新增** `disk_identity_status`、`disk_identity_checked_at`、`disk_identity`，也不新增 dev/inode/PID/目录对象列。既有 `disk_*_bytes` 保留最近一次有效数值；`disk_checked_at` 只作兼容字段，MUST NOT 充当 `disk_measured_at` 或路径核对时间。
 
-| Node `usage` version 1 字段 | Ctrl 持久化位置 |
-| --- | --- |
-| `disk_protocol_version` | `disk_identity.protocol_version`；缺失或非 1 按未验证 |
-| `docker_id` | `disk_identity.docker_id` |
-| `collector_epoch` / `observation_seq` | `disk_identity.collector_epoch` / `.observation_seq` |
-| `bind_identity.status` | `disk_identity_status`，并保留在 `disk_identity.bind_identity.status` |
-| `bind_identity.source_path` | `disk_identity.bind_identity.source_path`；现有 `bind_mount_path` 语义不变，不写入 proc 路径 |
-| `bind_identity.source` / `bind_identity.actual` | `disk_identity.bind_identity.source` / `.actual`，device 与 inode 存十进制字符串 |
-| `bind_identity.process` | `disk_identity.bind_identity.process`，pid、start_ticks、boot_id 原样保存 |
-| `bind_identity.mount_id` | `disk_identity.bind_identity.mount_id`，仅诊断，不作永久身份 |
-| `bind_identity.checked_at` / `bind_identity.reason` | `disk_identity_checked_at` / `disk_identity.bind_identity.reason` |
-| `measurement_status` | `disk_measurement_status` |
-| `measured_at` | `disk_measured_at` |
-| `measurement_identity` / `measurement_reason` | `disk_identity.measurement_identity` / `.measurement_reason` |
-| `total_bytes` / `overlay_rw_bytes` / `bind_mount_bytes` | 既有 `disk_total_bytes` / `disk_overlay_rw_bytes` / `disk_bind_mount_bytes`，只在有效测量时更新 |
-| `bind_mount_path` | 既有 `bind_mount_path`，语义不变 |
+`disk_observation` 可保存路径修正证据（恢复后的业务路径、来源、状态、时间），但不保存 proc 路径为清理目标，也不作为业务授权。
 
-原有 disk_* bytes 保留最近一次可信数值，供查询历史展示。disk_checked_at 作为兼容字段只随成功有效的新测量更新为 measured_at；新增 received_at 专门表示接收时间。迁移后旧数值仍可看见，但在首个新协议有效测量前不具备处置资格。查询层同时返回当前资格、当前可信用量和最后正常数值/时间，避免把历史值展示成新测量。
+### 3. 统一接收、路径修正与乱序规则
 
-### 2. 所有写入口共用接收规则
+WSS、HTTP 手动刷新及其他写入口共用同一接收入口：
 
-同一次事务先保存经过校验的最新状态、证据与接收时间，再按测量资格决定是否更新 bytes 和 measured_at。合法的错误样本也必须落库，不能因 total 为 null 就整帧跳过；形状损坏、版本缺失或版本不支持时保存 unverified 及原因，不放行已有正常状态。
+1. 校验当前机器链路/HTTP 响应是否为当前观测；退役连接、旧连接代际和旧 HTTP 响应不得回填。
+2. 若本次提供 `bind_mount_path` 且为该机器活跃容器、`mount_path_status=resolved`，先把校正路径持久化到 `containers.bind_mount_path`；若成功 Docker 明确 `mount_path_status=no_bind`，先把 `bind_mount_path` 清空为 null（仅当前认证机器/活跃容器/有效排序）；`unresolved`/`not_running`/字段缺失/不可读时保留已有/最后确认路径，MUST NOT 清空或推断 no_bind，不猜、不写 `/proc`。
+3. 路径更新后，bind 测量只有 `measurement_mount_path == 当前 bind_mount_path` 才可写入；明确 no_bind/overlay-only 时两边都为 null，按 overlay 组成判断，不要求 bind 路径相等；不得把旧路径样本改贴到新路径或清空后的 null。旧 bind bytes/旧路径样本只保留历史诊断，不进入有效测量。路径修正与测量同帧时先定路径，再判断样本；unresolved 但已有路径与样本一致时仍有效。
+4. `collector_epoch/observation_seq` 只用于采样会话排序；同一 epoch 内拒绝较小 seq，等于当前 seq 只允许内容一致的心跳，不刷新测量时间；Node 重启/新 epoch 要求新的完整观测，不复用旧数字。
+5. 形状损坏、协议缺失/不支持、真实测量时间缺失、组成不完整或测量状态非 `ok` 的样本必须落库状态/观测/接收时间，但不得刷新有效 bytes 或 `disk_measured_at`；不得把缺失值写成 0。
+6. 新链路在收到首个完整新协议观测前，旧连接遗留数值只作历史展示，不驱动动作；磁盘样本排序不宣称 Q70 的跨进程操作授权。
 
-仓储更新白名单和显式 nullable/clear 规则必须同时覆盖新增状态、证据、原因和时间字段；错误样本的 `total_bytes=None` 不能触发通用 None 过滤而丢掉整帧状态。bytes 与 measured_at 只在有效测量时更新，不能用空值清空历史展示值，也不能把缺失写成 0。
+手动刷新不得用当前接收时间冒充测量时间，也不得因为返回的是 HTTP 就绕过同一路径/乱序规则。
 
-WSS 按已认证机器链路处理；连接建立时生成连接代际，apply 在写入事务内校验当前连接。退役连接不得回填新连接的事实；新连接在收到首个完整新协议观测前，不把旧连接遗留的磁盘状态当作当前可信，旧值只保留历史展示、不驱动动作。同 collector_epoch 内拒绝较小 observation_seq，等于当前 seq 只允许字段完全一致的心跳，不刷新 measured_at，内容不同则拒绝覆盖。Node 重启后新 epoch 要求完整有效测量，不能复用旧 epoch 字节数。此机制用于磁盘样本排序，不宣称解决 Q70 中旧操作帧与新数据库资源的跨进程身份授权。
+### 4. 测量有效谓词
 
-`api/container_api.py` 手动磁盘刷新、WSS apply 及其它写入路径统一调用该规则；手动刷新不得把缺失/错误字节强制转成零，也不得用当前接收时间恢复可信。HTTP 结果携带其采集身份并与当前 WSS 状态比较，旧于当前观测的响应不得覆盖新状态。核查查询回填、序列化和仓储 allowed/nullable 列表，防止遗漏入口。
+样本有效必须同时满足：
 
-### 3. 统一有效性谓词放在任何响应之前
+- 协议已识别；当前按 version 1 处理（尚未实现时可收窄，但旧缺失协议按 unverified）；
+- `measurement_status=ok`；
+- `total_bytes` 已知；overlay 完整；有 bind 时 bind bytes 完整；overlay-only 必须由 Docker 明确 `no_bind`，缺失/异常不得推断为 no_bind；
+- `measured_at` 存在、可解析、未超过测量最大年龄（初值 900 秒），且不在未来超过允许时钟偏差（初值 30 秒）；
+- `measurement_mount_path` 与当前业务路径一致；成功 Docker 明确 `no_bind` 时当前 `bind_mount_path` 已清空、measurement_mount_path 也为 null，按 overlay-only 有效，不要求 bind 路径相等，但不得携带旧 bind bytes/旧路径样本；
+- 样本来自当前连接/当前响应，未违反 collector_epoch/observation_seq 排序；
+- 没有路径/样本错配或退役链路回填。
 
-有效条件：协议已识别且为 version 1；身份为 match 或经成功 Docker 观测确认 no_bind；measurement_status=ok；用量各组成完整；测量身份与当前身份/进程代际一致；身份和测量未过期；没有来自退役连接或旧 HTTP 响应的回填。no_bind 只要求 overlay 完整，bind bytes 缺失不构成无效；但 no_bind 必须由成功的 Docker 观测确认，不能由异常时 bind_path 缺失推断。
+谓词 MUST NOT 检查 `mount_path_status=resolved`、dev/inode、PID、proc 可读性或 Docker 对象编号。路径核对失败只是诊断；同一路径的成功测量仍可使用。
 
-初始默认身份最大年龄 30 秒，测量最大年龄 900 秒，与 Node 相同；允许配置但两端不一致时按较严格限制处理。Node 时钟偏离 Ctrl 超过允许偏差（初值 30 秒）或时间在未来时降级并记录 clock_skew，不能只用接收时间遮蔽偏差。实现测试覆盖边界、时钟变化及配置缺省。
+### 5. 调度、恢复与长期入口的边界
 
-门禁在 `_usage_from_db` 和真正动作前共用，早于 reset/upsert/mail/pause/remove。检查失败不写零、不重置冻结记录、不创建冻结锚点、不发送超限邮件、不调用暂停接口、不执行解冻重置或升级清理。高用量恢复有效后可执行正常首次冻结或维持暂停；不自动 unpause。
+磁盘调度的自动冻结、重置、通知、升级删除和挂载清理只在上述有效测量存在时执行；无效样本不写零、不重置冻结记录、不创建冻结锚点、不发超限邮件、不暂停、不删除。Q72 已决：采集中断不新增冻结顺延，恢复可信高用量后按原累计有效天数继续；机器不可用补偿和人工宽限不变。
 
-### 4. 冻结期中断维持累计口径（Q72 已决）
+本变更不定义恢复长期标记、长期启用/取消或清理目标政策。路径修正和测量有效性可供其他变更消费，但不能反过来用 inode 或 `mount_path_status` 授权这些业务。
 
-用户已明确选择：采集/身份异常不产生额外补偿。异常期间跳过处置，保留 `first_frozen_at`；恢复有效高用量后按原累计有效天数继续，达到阈值即可在该轮升级删除。不添加 invalid/review 状态阻止恢复后的删除，也不在恢复时重设冻结起点；本变更不引入 `review_required` 分支或字段。
+### 6. 查询与可观测性
 
-现有机器离线/维护的 `deferral_seconds` 与人工解冻宽限继续适用，不能把本次决定理解成全部改为自然日。有效低用量仍按既有低于 95% 规则 reset。用户的“冻结后理应已通知”是业务依据，不等于现有代码已保证：当前实现是在请求 pause 前就发送“已冻结”邮件；Node 异步 accepted/success 只表示请求被受理，不保证容器此刻已 pause；邮件被 SMTP 接受也不保证送达。完整业务入口由 `unify-disk-freeze-workflow` 配套解决，分别记录策略、暂停与通知结果；本门禁只保证采集异常不重开周期、不额外顺延。
+查询/详情/列表 SHALL 返回业务路径、测量状态、真实测量时间、接收时间、最后已知数值和路径诊断（configured/source、mount path status、observed_at）。历史数值必须标注为历史/不可处置，不能显示成当前正常样本；`unresolved` 与测量错误分开呈现，不能把诊断失败伪装成 `measurement_error`。日志/证据保留被拒原因和排序信息，不保存 proc 临时路径。
 
-### 5. 严格错位门禁作为首版边界
+### 7. 被否决的替代方案
 
-本变更按 source mismatch 跳过全部磁盘自动处置响应，但仍保存异常状态与证据供查询，防止在还未解决清理目标身份时，用实际目录触发冻结后按错误 Source 删除。首版不实现清理前身份验证，也不把清理保护当作已完成；验证后到删除之间仍可能有人替换目录，端到端清理对象保护仍是明确剩余风险。
-
-若 Q71 选择实际对象计量且允许冻结，需同步扩展两端契约与清理入口，明确预期清理对象、所有手动/自动清理入口及动作时验证；不能只在本调度层放行，也不能仅把 du 改成 proc 路径后沿用路径字符串删除。
+- **Ctrl 比较 dev/inode/Docker ID 决定测量或业务授权**：跨对象/跨阶段错用；Node 内部定位已足够，Ctrl 只用路径。
+- **路径 `unresolved` 作为冻结/恢复/长期/清理门禁**：会把诊断失败扩大成业务拒绝，且同一业务路径的成功测量仍可信。
+- **`configured_mount_path` 直接当业务路径**：Docker Source 可能是旧配置；只作诊断，业务路径由 Node 唯一确认。
+- **缺失 `measured_at` 按当前接收时间补**：伪装新鲜，旧样本会驱动动作。
+- **把目录对象编号写进 Ctrl 或用于删除清理**：引入第二身份与越权路径；Node 校正业务路径后，删除/清理仍只按路径与既有权限，不新增对象身份门禁。
 
 ## Risks / Trade-offs
 
-- [旧 Node 升级过渡期间磁盘自动响应暂停] → 以可见 unverified 状态暴露；先 Ctrl 后 Node，逐机验收，不静默兼容为 ok。
-- [当前值保留容易被旧 UI 当成正常] → 查询明确 current/last-known/status/timestamps；核对 Web 消费方，必要变更单独列入 Q71。
-- [扫描耗时或探测不及时导致响应跳过] → 展示测量时刻与原因，记录覆盖率；这是保守停用自动动作，不代表问题已修复。
-- [未知期恢复时冻结天数已超阈值] → 按 Q72 可立即升级；必须使用恢复后的可信样本，并继续遵守机器范围及人工宽限。
-- [旧连接或旧 HTTP 响应晚到] → 连接代际、collector_epoch 与 observation_seq 排序；同 seq 内容不同拒绝覆盖，旧响应不刷新 measured_at。
-- [手动刷新把缺失写成零] → 保留错误状态和原始空值，不用 0 冒充未知，也不清除既有 mismatch。
-- [样本有效到动作之间仍有竞态] → 限定本补丁声明为采样有效性门禁；不能声称是删除路径的原子身份保证，Q70/Q71 后续约束操作端。
+- [Node 内部无法唯一定位路径] → unresolved/not_running/字段缺失/不可读只保留已有/最后确认路径，不清空；若该路径测量成功仍可用，若无路径则不能编造。诊断状态不阻断业务。
+- [成功明确 no_bind] → 同步清空当前活跃容器的 bind_mount_path，measurement_mount_path 也为 null，按 overlay-only 判断；旧 bind bytes/旧路径样本只作历史诊断，旧 HTTP/旧链路不得把路径恢复。未明确 no_bind 不得清空。
+- [路径修正与样本同帧] → 先落路径，再要求 `measurement_mount_path` 匹配；旧路径样本拒绝贴到新路径，避免错配。
+- [旧 Node 缺 `measured_at`/协议] → 标 `unverified`，保留数字供展示但不驱动自动处置；这是测量版本限制，不是目录身份缺失。
+- [路径修正回填历史] → 只更新当前认证机器活跃容器的 `bind_mount_path`，不批量改旧快照/清理记录；旧记录后续按各自路径处理。
+- [新链路/手动刷新乱序] → 连接代际、epoch/seq、HTTP 响应比较共同拒绝旧结果；不宣称 Q70 全序。
+- [样本有效到动作之间仍有竞态] → 本变更是采样有效性门禁，不构成删除路径原子身份保证；删除/清理仍按路径与既有权限，不宣称 Q70 跨进程原子。
+- [Q72 恢复后立即升级] → 按用户已决累计口径执行，不用无效样本删除，也不新增 deferral。
 
 ## Migration Plan
 
-1. 在隔离库检验可重复升级、旧行默认状态与 JSON/时间字段；先部署 Ctrl，检查旧 Node 被标未验证且没有误动作。
-2. 逐机部署 Node 新协议，检查 match 覆盖率、无效原因、真实测量年龄和查询输出。Node 无法访问宿主 proc 的部署保持 unknown，先修部署权限边界。
-3. 完成两端模拟联合验收；Q71 使用保守基线，Q72 验证恢复高用量可按累计升级、恢复低用量正常重置。生产不以真实删目录作为测试。
-4. 回滚 Node 时保留 Ctrl 门禁与新增列，旧样本降级 unverified；回滚 Ctrl 可能恢复旧值驱动动作的风险，不能在未核对策略时直接撤销防护。
+1. 在隔离库验证新增字段/迁移可重复执行、旧行 `unverified`、`disk_identity*` 不新增/不回填、`disk_checked_at` 不冒充测量时间。
+2. 先部署 Ctrl 接收路径修正和测量规则，再逐机部署 Node 路径/测量协议；旧 Node 样本显示测量未验证，自动处置暂停但不误删。
+3. 回放 resolved/unresolved/not_running/no_bind、路径变更后旧样本、乱序、手动刷新、旧连接和 Q72 恢复；生产不使用真实目录删除/冻结演练。
+4. 回滚 Node 时保留 Ctrl 字段，旧样本降级 unverified；回滚 Ctrl 会恢复旧数字驱动动作的风险，需先核对测量覆盖。
 
 ## Source references
 
-- `services/container_module/node_comms_modules/snapshots.py`：`_apply_disk_usage_entry`。
-- `services/container_module/node_comms.py`：`apply_disk_usage_snapshot` 及快照入口。
-- `services/container_module/node_comms_modules/websocket.py`：连接消费顺序与断线丢弃。
-- `api/container_api.py`：手动磁盘检查及 disk 字段回写。
-- `repositories/containers_repo.py`：更新字段白名单与 nullable 清空规则。
-- `schedulers/container_disk_check_task.py`：完整性检查、冻结记录重置、首次冻结与升级删除。
-- `services/container_module/information.py`：磁盘信息查询；`services/container_module/mount_cleanup.py`：当前清理路径选择。
+- [services/container_module/node_comms_modules/snapshots.py](../../../services/container_module/node_comms_modules/snapshots.py)：`_apply_disk_usage_entry` 与状态快照。
+- [services/container_module/node_comms.py](../../../services/container_module/node_comms.py)：磁盘/状态快照入口。
+- [api/container_api.py](../../../api/container_api.py)：手动磁盘刷新与回写。
+- [repositories/containers_repo.py](../../../repositories/containers_repo.py)：更新白名单/显式空值。
+- [schedulers/container_disk_check_task.py](../../../schedulers/container_disk_check_task.py)：有效测量门禁与 Q72 累计。
+- [services/container_module/information.py](../../../services/container_module/information.py)：路径/测量查询展示。
+- Node 配套：`verify-bind-mount-identity`（名称保留）改为路径定位/回填与测量协议；本变更不修改 Node 仓库。
