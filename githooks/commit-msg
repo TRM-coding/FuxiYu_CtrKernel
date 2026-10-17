@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+#
+# 提交信息校验
+#
+# ═══════════════════════════════════════════════════════════════
+# 【启用】每个克隆各做一次：
+#
+#     git config core.hooksPath githooks
+#
+# ⚠️ 设了 core.hooksPath 之后，`.git/hooks/` 就【完全不再被读】——
+#    是替换不是叠加。所以本文件必须入库（就是这个目录），
+#    否则每人手里一份副本，改了一处别人拿不到。
+#
+# ⚠️ Windows 上 git 不跟踪执行位（core.filemode=false）。新增或改动
+#    本文件后必须显式补：
+#
+#     git update-index --chmod=+x githooks/commit-msg
+#
+#    漏了的症状：本地好好的，别人克隆后报 Permission denied（exit 126）。
+#    核对：git ls-files -s githooks/commit-msg 应为 100755。
+#
+# 约定见 本仓库 openspec/specs 中的工作流程规范
+#
+# 绕过（仅在确有理由时）：
+#     git commit --no-verify
+# ═══════════════════════════════════════════════════════════════
+
+set -u
+msg_file="${1:-}"
+if [ -z "$msg_file" ] || [ ! -f "$msg_file" ]; then
+  echo "✗ 提交信息文件不存在" >&2
+  exit 1
+fi
+
+# ── 合并提交豁免 ──────────────────────────────────────────────
+# 合并信息由 git 生成，不适用本约定。
+if [ -f "$(git rev-parse --git-dir)/MERGE_HEAD" ]; then
+  exit 0
+fi
+
+fail=0
+
+# ── ① 禁止署名尾注 ────────────────────────────────────────────
+# 工具参与编写不改变提交的作者归属。
+if grep -qiE 'co-authored-by|generated with|🤖' "$msg_file"; then
+  echo "✗ 提交信息不得包含署名尾注或生成标记：" >&2
+  grep -inE 'co-authored-by|generated with|🤖' "$msg_file" | sed 's/^/    /' >&2
+  fail=1
+fi
+
+# ── ② 每行须为「- 空格 关键字 空格 中文」 ──────────────────────
+#
+# 关键字限定为 NEW / AMEND / FIX 三者之一 —— 规格
+# 提交关键字仅允许 NEW / AMEND / FIX 三者之一。
+#
+# ⚠️ 这里曾写作 `^- [A-Z]+ .+$`，任何大写词都放行，于是
+#    `- GITIGINORE 添加了 ignore 内容` 这类拼写错误能一路提交进去。
+#    收紧成白名单是为了让 hook 兑现规格，而不只是兑现它的提示文字。
+#
+# 跳过空行与注释行（git 会插入以 # 开头的说明文字）。
+lineno=0
+items=0
+while IFS= read -r line || [ -n "$line" ]; do
+  line=${line%$'\r'}
+  lineno=$((lineno + 1))
+  case "$line" in
+    ''|'#'*) continue ;;
+  esac
+  items=$((items + 1))
+  if ! printf '%s' "$line" | grep -qE '^- (NEW|AMEND|FIX) .+$'; then
+    echo "✗ 第 ${lineno} 行不符合条目格式：" >&2
+    echo "      $line" >&2
+    fail=1
+  fi
+done < "$msg_file"
+
+if [ "$items" -eq 0 ]; then
+  echo "✗ 提交信息至少需要一条实际变更" >&2
+  fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+  cat >&2 <<'HINT'
+
+提交信息格式：
+
+    - <关键字> <中文短句>
+
+    关键字   NEW（新增） / AMEND（修改既有行为或结构） / FIX（修复缺陷）
+             三者之一，不可自造
+    一行一条，不写段落
+    每条自足，脱离上下文也能读懂改了什么
+    连字符后必须有空格 —— 写成 -NEW 不合规
+
+示例：
+
+    - FIX 修复了 log 页详情弹窗展示不全的问题
+
+HINT
+  exit 1
+fi
+
+exit 0

@@ -14,6 +14,7 @@ class ContainerMountCleanup(db.Model):
     __tablename__ = "container_mount_cleanup"
 
     id = db.Column(db.Integer, primary_key=True)
+    deleted_id = db.Column(db.Integer, nullable=True, index=True)
     container_id = db.Column(db.Integer, nullable=False)
     container_name = db.Column(db.String(120), nullable=False)
     machine_id = db.Column(db.Integer, nullable=False)

@@ -3,10 +3,12 @@
 import json
 
 import pytest
+from sqlalchemy import inspect
 from sqlalchemy.exc import IntegrityError
 
 from ...constant import AnnouncementStatus, AnnouncementTemplateCategory
 from ...models.announcement import Announcement, AnnouncementDraft, AnnouncementTemplate
+from ...repositories import announcement_repo
 from ..factories import create_user
 
 
@@ -49,7 +51,6 @@ def test_m02_draft_create_full_fields(db_session):
         raw_content="{{greeting}} 正文",
         created_by=user.id,
         targets='[{"type":"user","id":1}]',
-        template_id=None,
     )
     db_session.add(draft)
     db_session.commit()
@@ -58,7 +59,9 @@ def test_m02_draft_create_full_fields(db_session):
     assert draft.title == "草稿标题"
     assert draft.content == "正文内容"
     assert draft.created_by == user.id
-    assert draft.creator == user
+    assert draft.creator.id == user.id
+    # Q06/Q07：草稿不再有模板关联列
+    assert not hasattr(draft, "template_id")
 
 
 # ── M-03: AnnouncementTemplate 唯一名 ───────────────────────────────────
@@ -165,9 +168,9 @@ def test_m06_template_source_announcement_id(db_session):
     assert t2.source_announcement_id == 42
 
 
-# ── M-07: Draft ↔ Template 关联 ────────────────────────────────────────
+# ── M-07: 草稿不持久关联模板（Q06/Q07） ─────────────────────────────────
 
-def test_m07_draft_template_relation(db_session):
+def test_m07_draft_has_no_template_association(db_session):
     user = create_user()
     template = AnnouncementTemplate(
         name="模板",
@@ -182,13 +185,20 @@ def test_m07_draft_template_relation(db_session):
         title="草稿",
         content="正文",
         created_by=user.id,
-        template_id=template.id,
     )
     db_session.add(draft)
     db_session.commit()
 
-    assert draft.template is not None
-    assert draft.template.name == "模板"
+    # 选择模板只是编辑器侧复制初值；草稿模型既没有关联列也没有关联关系。
+    assert not hasattr(draft, "template_id")
+    assert not hasattr(draft, "template")
+    columns = {column["name"] for column in inspect(db_session.get_bind()).get_columns("announcement_drafts")}
+    assert "template_id" not in columns
+
+    # 删除模板不受草稿影响，草稿内容也不受影响
+    assert announcement_repo.delete_template(template.id, session=db_session) is True
+    db_session.refresh(draft)
+    assert draft.content == "正文"
 
 
 # ── M-08: Announcement.source_draft_id ─────────────────────────────────
