@@ -16,7 +16,7 @@ from ..models.containers import Container
 from ..models.machine import Machine
 from ..models.user import User
 from ..utils.Container import Container_info
-from . import machine_repo, user_repo, usercontainer_repo
+from . import container_disk_freeze_state_repo, machine_repo, user_repo, usercontainer_repo
 
 
 #####################
@@ -298,6 +298,10 @@ def delete_container(
         container.deleted_reason = deleted_reason
     if deleted_by_user_id is not None:
         container.deleted_by_user_id = int(deleted_by_user_id)
+    # Q74：真正删除终止冻结周期。复用既有 reset，在同一事务内删除该容器的
+    # container_disk_freeze_state；无行返回 False 是正常情况。删除失败时由外层
+    # session_scope 回滚，容器软删与冻结行不会只提交一半。
+    container_disk_freeze_state_repo.reset(container_id, session=session)
     session.flush()
     return True
 

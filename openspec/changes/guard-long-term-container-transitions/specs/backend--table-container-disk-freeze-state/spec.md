@@ -8,7 +8,7 @@
 
 #### Scenario: 成功删除清空冻结状态
 
-- **WHEN** 一个带有冻结记录（含 `first_frozen_at`、`grace_until`、`deferral_seconds`）的容器经 API/清理删除或 Node 消失删除成功
+- **WHEN** 一个带有冻结记录（含 `first_frozen_at`、`grace_until`、`deferral_seconds`）的容器经 API/清理等实际软删除路径成功
 - **THEN** 同一事务提交后该容器的 `container_disk_freeze_state` 记录不存在，所有冻结类字段随记录清除，容器行按既有语义软删
 
 #### Scenario: 无冻结记录正常完成

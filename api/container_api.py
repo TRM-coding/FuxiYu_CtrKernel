@@ -86,6 +86,7 @@ REASON_STATUS_MAP = {
     "container_permission_denied": 403,
     "insufficient_permission": 403,
     "long_term_limit_reached": 409,
+    "disk_usage_over_limit": 409,
     "data_not_recoverable": 409,
 }
 

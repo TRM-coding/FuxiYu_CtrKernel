@@ -85,8 +85,8 @@ from .container_module.restore import (      # 恢复族（复活软删容器）
 )
 from .container_module.mount_cleanup import clean_mount_path  # 挂载清理动作（手动/定时/升级共用）
 from .container_module.long_term import (    # 长期容器族
-    _load_long_term_target,
-    _ensure_long_term_capacity,
+    _read_long_term_target,
+    ensure_long_term_switch_allowed,
     _persist_long_term_state,
     _audit_long_term,
 )
@@ -188,13 +188,24 @@ def get_long_term_container_limit() -> int:
 def set_long_term_container(
     container_id: int, is_long_term: bool, operator_user_id: int | None = None,
 ) -> dict:
-    container, bindings, existing = _load_long_term_target(container_id)
-    if is_long_term and not existing:
-        _ensure_long_term_capacity(bindings)
-    _persist_long_term_state(container.id, is_long_term, existing, operator_user_id)
-    state = build_long_term_container_state(container.id, bindings)
-    _audit_long_term(container.id, is_long_term, operator_user_id)
-    return {"container_id": container.id, **state}
+    """手工设置长期标记：同一会话重读事实、守卫裁决、写入与提交。"""
+    changed = False
+    with session_scope() as session:
+        container, bindings, existing, machine = _read_long_term_target(session, container_id)
+        ensure_long_term_switch_allowed(
+            container, bindings, existing, is_long_term, machine, session=session,
+        )
+        if bool(existing) != bool(is_long_term):
+            _persist_long_term_state(
+                container.id, is_long_term, existing, operator_user_id, session=session,
+            )
+            changed = True
+        resolved_container_id = container.id
+
+    state = build_long_term_container_state(resolved_container_id, bindings)
+    if changed:
+        _audit_long_term(resolved_container_id, is_long_term, operator_user_id)
+    return {"container_id": resolved_container_id, **state}
 
 
 ####################################################
