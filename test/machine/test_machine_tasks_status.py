@@ -611,26 +611,50 @@ def test_apply_container_status_snapshot_transition_states_kept_last_known(db_se
 
 
 def test_node_emittable_statuses_covered_by_ctrl_mapping():
-    """契约 C8：Node 可发状态枚举 ⊆ Ctrl 映射表 ∪ 显式跳过集（防静默漏配）。
+    """契约 C8：当前 Node 生产路径实际发出的状态 ⊆ Ctrl 映射表 ∪ 显式跳过集。
 
-    Node 侧全集 = docker 终态映射值 ∪ 事件映射值 ∪ begin_action 转换态 ∪ failed/unknown。
-    任一新增状态未覆盖 → 测试失败，迫使 Ctrl 侧显式处置。
+    使用 Node 当前公共缓存/快照生产方法生成 creating/building/stopping/pausing/
+    unpausing/online 状态，再取 Node `build_status_snapshot` 的真实 payload；
+    同时覆盖 Node 当前 docker 状态映射与状态枚举。新增状态未处置会明确失败。
     """
-    pytest.importorskip("FuxiYu_NodeKernel", reason="NodeKernel 仓库不在本机")
-    from FuxiYu_NodeKernel.constant import ContainerStatus as NodeContainerStatus
-    from FuxiYu_NodeKernel.docker_operates import status_cache as node_status_cache
+    old_dont_write_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        pytest.importorskip("FuxiYu_NodeKernel", reason="NodeKernel 仓库不在本机")
+        from FuxiYu_NodeKernel import extensions as node_extensions
+        from FuxiYu_NodeKernel.constant import ContainerStatus as NodeContainerStatus
+        from FuxiYu_NodeKernel.docker_operates import status_cache as node_status_cache
+        from FuxiYu_NodeKernel.docker_operates.docker_fact import DockerFact
+        from FuxiYu_NodeKernel.network import wss as node_wss
+    finally:
+        sys.dont_write_bytecode = old_dont_write_bytecode
 
-    emittable = set(node_status_cache._DOCKER_STATUS_TO_APP.values())
-    emittable |= set(node_status_cache._EVENT_STATUS_MAP.values())
-    emittable |= {
-        NodeContainerStatus.CREATING.value,   # begin_action create（api.py）
-        NodeContainerStatus.BUILDING.value,   # begin_build（api.py）
-        NodeContainerStatus.STOPPING.value,   # begin_action stop
-        "pausing",                            # begin_action pause（api.py 字面量）
-        "unpausing",                          # begin_action unpause（api.py 字面量）
-        NodeContainerStatus.FAILED.value,     # finish_action failed / pending TTL 超时
-        NodeContainerStatus.UNKNOWN.value,    # c.status 兜底（契约 C2 后理论不可达）
-    }
+    cache = node_status_cache.ContainerStatusCache()
+    cache.accept_action("node_building", "create", "building", create=True)
+    cache.accept_action("node_creating", "create", "creating", create=True)
+    cache.accept_action("node_stopping", "stop", "stopping")
+    cache.accept_action("node_pausing", "pause", "pausing")
+    cache.accept_action("node_unpausing", "unpause", "unpausing")
+    ticket = cache.issue_observation("node_online", "probe")
+    fact = DockerFact(
+        docker_id="id-node-online",
+        status="running",
+        running=True,
+        paused=False,
+        restarting=False,
+        dead=False,
+        started_at="2026-10-18T00:00:00Z",
+        pid=123,
+    )
+    assert cache.publish_observed("node_online", ticket, fact, mark_ready=True)
+
+    node_extensions.status_cache = cache
+    snapshot = node_wss.build_status_snapshot()
+    emitted = {entry["status"] for entry in snapshot["payload"].values()}
+
+    emittable = {item.value for item in NodeContainerStatus}
+    emittable |= set(node_status_cache._DOCKER_STATUS_TO_APP.values())
+    emittable |= emitted
     covered = set(node_comms._NODE_STATUS_TO_CTRL) | set(node_comms._NODE_STATUS_SKIP)
     uncovered = emittable - covered
     assert not uncovered, f"Node 可发状态未覆盖: {uncovered}"

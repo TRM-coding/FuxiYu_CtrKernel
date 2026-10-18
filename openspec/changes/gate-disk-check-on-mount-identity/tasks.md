@@ -17,7 +17,7 @@
 
 ## 3. 联合验收
 
-- [ ] 3.1 与 Node `verify-bind-mount-identity` 回放 resolved/unresolved/not_running/no_bind、Source 改变、路径 A→B 与在途旧样本、失败/缺组成、重复帧、手动刷新、旧 Node 路径一致/不一致；确认 Ctrl 不比较 dev/inode/PID，不以 `resolved` 作业务门禁。
+- [x] 3.1 与 Node `verify-bind-mount-identity` 回放 resolved/unresolved/not_running/no_bind、Source 改变、路径 A→B 与在途旧样本、失败/缺组成、重复帧、手动刷新、旧 Node 路径一致/不一致；确认 Ctrl 不比较 dev/inode/PID，不以 `resolved` 作业务门禁。验证：本地用 Node HEAD 965511e 的当前生产磁盘 payload 经 Ctrl 接收与隔离 SQLite 回放通过，payload 不含 dev/inode/PID；不是生产部署。
 - [x] 3.2 确认无 schema 变更：不新增四列，不新增迁移，不改模型；`disk_checked_at` 仍为既有列，只改变写入语义。验证：隔离库旧结构可直接运行，旧行无需回填。
 - [x] 3.3 运行 `openspec validate gate-disk-check-on-mount-identity --strict` 与 `git diff --check`；核对与 `guard-long-term-container-transitions` 只共享既有路径/测量字段，不交叉修改其对象代际、资格或 Q72 文档。
 
