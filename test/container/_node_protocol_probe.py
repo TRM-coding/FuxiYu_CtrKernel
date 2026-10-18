@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -183,7 +182,6 @@ def _delete_and_snapshot_frames():
 
 def main() -> None:
     result = {
-        "node_head": os.getenv("NODE_HEAD", ""),
         "status": _status_payloads(),
         "disk": _disk_payloads(),
         "wss": _delete_and_snapshot_frames(),

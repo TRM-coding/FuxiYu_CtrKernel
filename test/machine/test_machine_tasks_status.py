@@ -610,7 +610,7 @@ def test_apply_container_status_snapshot_transition_states_kept_last_known(db_se
     assert db_session.get(Container, c2.id).container_status == ContainerStatus.PAUSED
 
 
-def test_node_emittable_statuses_covered_by_ctrl_mapping():
+def test_node_emittable_statuses_covered_by_ctrl_mapping(monkeypatch):
     """契约 C8：当前 Node 生产路径实际发出的状态 ⊆ Ctrl 映射表 ∪ 显式跳过集。
 
     使用 Node 当前公共缓存/快照生产方法生成 creating/building/stopping/pausing/
@@ -648,7 +648,7 @@ def test_node_emittable_statuses_covered_by_ctrl_mapping():
     )
     assert cache.publish_observed("node_online", ticket, fact, mark_ready=True)
 
-    node_extensions.status_cache = cache
+    monkeypatch.setattr(node_extensions, "status_cache", cache)
     snapshot = node_wss.build_status_snapshot()
     emitted = {entry["status"] for entry in snapshot["payload"].values()}
 

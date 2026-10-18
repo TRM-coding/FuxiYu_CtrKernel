@@ -26,7 +26,7 @@
 
 - [x] 4.1 运行定向删除+恢复+冻结/长期测试与 `openspec validate guard-long-term-container-transitions --strict`，确认 strict 无错误；本阶段只改文档时只跑 strict 与 diffcheck，不跑应用测试。验证：命令输出与测试结果留档。
 - [x] 4.2 运行 `git diff --check`，并检查变更只涉及长期守卫/删除冻结相关服务/仓储/测试与 change 文档；确认没有新增模型、数据库结构或响应模型改动，没有新增删除旁路、恢复补偿、迁移或后台任务。验证：`git status`、`git diff --stat` 与源码检索结果一致。
-- [x] 4.3 与 Web 变更核对：Web 只使用既有 `is_long_term`、`long_term_container_can_enable`、磁盘百分比和 `effective_status`，不依赖新增响应字段；后端 409/403 仍是最终裁决。验证：只读核对 Web HEAD 2c7838d 的 `containerActions` 消费字段与 Ctrl 现有输出一致，无新增 DTO/API；跨仓字段清单对照仅本地执行，不是生产部署。
+- [x] 4.3 与 Web 变更核对：Web 只使用既有 `is_long_term`、`long_term_container_can_enable`、磁盘百分比和 `effective_status`，不依赖新增响应字段；后端 409/403 仍是最终裁决。验证：只读核对 Web 当前 `containerActions` 消费字段与 Ctrl 现有输出一致，无新增 DTO/API；跨仓字段清单对照仅本地执行，不锁定跨仓版本，不是生产部署。
 
 ## Workflow follow-up
 

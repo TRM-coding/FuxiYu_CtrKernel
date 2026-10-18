@@ -13,7 +13,7 @@
 
 ## 3. 联合验收
 
-- [x] 3.1 按“先 Ctrl 后 Node”顺序，与 Node `prevent-false-container-vanished` 的受理、慢速对账、删帧、快照交错用例联合验证：正在创建或仍运行的容器不会被软删，Node 明确采集错误也不会删除；若 Node 文档顺序不同，先统一再验收；运行 Ctrl 安全测试并记录结果。验证：本地用 Node HEAD 965511e 的当前生产 WSS payload（creating/collect_error/delete/snapshot）经 Ctrl 接收与隔离 SQLite 回放通过；不是生产部署。
+- [x] 3.1 按“先 Ctrl 后 Node”顺序，与 Node `prevent-false-container-vanished` 的受理、慢速对账、删帧、快照交错用例联合验证：正在创建或仍运行的容器不会被软删，Node 明确采集错误也不会删除；若 Node 文档顺序不同，先统一再验收；运行 Ctrl 安全测试并记录结果。验证：本地用 Node 当前生产 WSS payload（creating/collect_error/delete/snapshot）经 Ctrl 接收与隔离 SQLite 回放通过；不锁定跨仓版本，不是生产部署。
 
 ## Workflow follow-up
 

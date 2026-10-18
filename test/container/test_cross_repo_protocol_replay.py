@@ -46,7 +46,6 @@ def node_payloads():
         [str(NODE_ROOT.parent), env.get("PYTHONPATH", "")]
     ).rstrip(os.pathsep)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    env["NODE_HEAD"] = "965511e"
     env.pop("DATABASE_URL", None)
     proc = subprocess.run(
         [sys.executable, str(PROBE)],
