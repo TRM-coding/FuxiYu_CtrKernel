@@ -15,19 +15,21 @@
 
 ## 3. 回归与边界
 
-- [ ] 3.1 增加 Sylvan 事故回放：长期容器 `paused` 时取消返回 409；实际恢复 `online` 后允许取消，遗留冻结行和 `first_frozen_at`/`grace_until`/`deferral_seconds` 不变；冻结字段不被重置（Q72 累计不清零）。验证：隔离 SQLite + mock，不触达真实 Docker/Node/生产库。
-- [ ] 3.2 增加恢复长期快照回归：快照为长期时仍在 `Create_container` 前做 root 配额预检，成功后按既有 `_persist_long_term_state` 恢复标记；恢复宽限政策保留，但其承载缺口见 3.4，本变更不新增宽限存储或额外创建冻结行。验证：现有恢复配额/幂等/普通快照用例通过，测试中 `container_disk_freeze_state` 行数不因恢复长期标记而增加。
+- [ ] 3.1 增加 Sylvan 事故回放：长期容器 `paused` 时取消返回 409；实际恢复 `online` 后允许取消，遗留冻结行和 `first_frozen_at`/`grace_until`/`deferral_seconds` 不变；这是取消长期标记，不是删除容器，不触发删除重置（Q72 累计不清零）。验证：隔离 SQLite + mock，不触达真实 Docker/Node/生产库。
+- [ ] 3.2 增加恢复长期快照回归：快照为长期时仍在 `Create_container` 前做 root 配额预检，成功后按既有 `_persist_long_term_state` 恢复标记；恢复等同新建，不复制旧冻结状态、不授予恢复宽限、不新建冻结行，删除已清行的容器恢复后仍无冻结记录。验证：现有恢复配额/幂等/普通快照用例通过，测试中 `container_disk_freeze_state` 行数不因恢复或长期标记而增加。
 - [ ] 3.3 增加边界测试：用量未知/上限未配置不误拒；已知硬超限拒绝；`failed`/不稳定/主机离线/维护/状态未知仍按原矩阵拒绝；`paused` 下启用仍按原矩阵允许（本次只禁止冻结时取消）。验证：单测逐项断言原因与状态码，并记录这是静态现有数据判断。
-- [ ] 3.4 记录恢复宽限的表示缺口：在变更文档或交付说明中引用现有冻结仓储只对已有冻结行 `set_grace`、`first_frozen_at` 非空的事实，说明无冻结行时无法在不伪造冻结行、不新增结构的前提下表达恢复宽限；不改代码、不新增字段。验证：交付说明含具体源码位置与原文，且本变更任务不把该缺口当成静态守卫前置。
+- [ ] 3.4 在 `repositories/containers_repo.py:delete_container` 内、设置软删字段后的同一 session 中调用既有 `container_disk_freeze_state_repo.reset(container_id, session=session)`；无行返回 `False` 视为正常，不新增删除 wrapper、restore 旁路、恢复补偿清理、字段/表/JSON、迁移或后台修复。验证：源码核对 API/清理删除（`_persist_container_deletion`，含 cleanup/磁盘升级调用）与 Node 消失删除（`_handle_container_deleted`）都经过该函数，且都在 `session_scope` 内共用事务。
+- [ ] 3.5 增加最少有意义的本地隔离 SQLite 删除/恢复测试：成功删除后冻结整行（含 `first_frozen_at`、`grace_until`、`deferral_seconds`）不存在；无冻结行正常完成；删除失败/事务 rollback 保留容器与冻结行；重复调用通用软删函数幂等；删除后恢复不继承、不授宽限；其他容器冻结行与 Q72 累计不受影响；同一未删除容器经长期设置/取消时累计不变。验证：只跑 test/ 下定向隔离用例，不读 `.env` 秘密、不连真实 Docker/Node/生产库。
+- [ ] 3.6 清理旧政策表述并核对文档：proposal/design/tasks/spec/Global 不得再保留恢复授予宽限的旧说法；明确恢复等同新建、删除重置冻结、历史遗留行不回填且不新增恢复补偿。验证：检索旧政策关键词，确认 change 与 Global 的 Q74 记录一致，所有实现任务仍未勾选。
 
 ## 4. 验证
 
-- [ ] 4.1 运行定向长期/恢复/磁盘测试与 `openspec validate guard-long-term-container-transitions --strict`，确认 strict 无错误。验证：命令输出与测试结果留档。
-- [ ] 4.2 运行 `git diff --check`，并检查变更只涉及长期守卫相关服务/API/测试与 change 文档；确认没有新增模型、数据库结构或响应模型改动，没有新增资格对象或 Node 字段。验证：`git status`、`git diff --stat` 与源码检索结果一致。
+- [ ] 4.1 运行定向删除+恢复+冻结/长期测试与 `openspec validate guard-long-term-container-transitions --strict`，确认 strict 无错误；本阶段只改文档时只跑 strict 与 diffcheck，不跑应用测试。验证：命令输出与测试结果留档。
+- [ ] 4.2 运行 `git diff --check`，并检查变更只涉及长期守卫/删除冻结相关服务/仓储/测试与 change 文档；确认没有新增模型、数据库结构或响应模型改动，没有新增删除旁路、恢复补偿、迁移或后台任务。验证：`git status`、`git diff --stat` 与源码检索结果一致。
 - [ ] 4.3 与 Web 变更核对：Web 只使用既有 `is_long_term`、`long_term_container_can_enable`、磁盘百分比和 `effective_status`，不依赖新增响应字段；后端 409/403 仍是最终裁决。验证：跨仓字段清单对照，无新增字段/API。
 
 ## Workflow follow-up
 
-- 评审通过后按仓库流程归档，把本 delta 合并进 `backend--table-long-term-containers` 主规格。
-- 恢复宽限的承载缺口单列于 Global `QUESTIONS.md` 的 Q74；在另行决策前不添加新列、不伪造冻结行，也不宣称恢复宽限已完成。
+- 评审通过后按仓库流程归档，把两个 delta 分别合并进 `backend--table-long-term-containers` 与 `backend--table-container-disk-freeze-state` 主规格。
+- Q74 已决：恢复等同新建，删除重置冻结状态；本变更承接该边界，不再保留恢复宽限待决项。历史已软删记录的遗留冻结行不回填，不新增恢复补偿或后台修复。
 - Web 变更使用既有字段独立上线；本变更不修改 Node、Web、正式 `openspec/specs/` 或 archive。

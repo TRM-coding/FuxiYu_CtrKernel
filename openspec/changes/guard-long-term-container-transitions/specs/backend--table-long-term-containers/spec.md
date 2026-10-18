@@ -56,7 +56,7 @@
 
 ### Requirement: 取消长期按实际状态拦截冻结
 
-实际在手工设置入口从长期改为非长期时，系统 SHALL 在实际状态为 `paused`（冻结中）时拒绝；`online`/`offline` 且通过既有状态矩阵时允许。系统 MUST NOT 以 `container_disk_freeze_state` 行的存在作为永久拒绝条件，MUST NOT 删除或重置该行；取消前后 `first_frozen_at`、`grace_until`、`deferral_seconds` 保持不变。
+实际在手工设置入口从长期改为非长期时，系统 SHALL 在实际状态为 `paused`（冻结中）时拒绝；`online`/`offline` 且通过既有状态矩阵时允许。系统 MUST NOT 以 `container_disk_freeze_state` 行的存在作为永久拒绝条件，MUST NOT 删除或重置该行；取消前后 `first_frozen_at`、`grace_until`、`deferral_seconds` 保持不变。该规则只约束取消长期标记，不约束删除容器；删除容器的冻结重置按 `backend--table-container-disk-freeze-state` 的删除要求执行。
 
 #### Scenario: 冻结中取消被拒绝
 
@@ -67,6 +67,11 @@
 
 - **WHEN** 旧冻结行仍存在，但实际状态已为 `online` 或 `offline`，且通过既有状态矩阵
 - **THEN** 取消长期允许执行，不因冻结行存在而永久阻断，也不删除或重置该行
+
+#### Scenario: 取消长期不等于删除容器
+
+- **WHEN** 用户只取消长期标记，没有删除容器
+- **THEN** 冻结行与 Q72 累计保持不变；只有真正删除容器才按删除要求清空冻结状态
 
 #### Scenario: 状态矩阵优先于方向规则
 
