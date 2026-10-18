@@ -173,26 +173,216 @@ def _apply_last_ssh_entry(entry, container, session) -> bool:
 
 
 def _apply_disk_usage_entry(name, usage, container, machine_id, session) -> bool:
+    """接收一条磁盘样本：先落业务路径，再判断测量是否完整可信。
+
+    `mount_path_status` 只在线路上用于“更新/保留/清空”，不落库、不参与资格判断。
+    `measured_at` 是真实测量时间；缺失时只对旧 Node 兼容写入接收时间。失败/缺组成/
+    路径不一致/时间无效都不写 0，也不刷新 `disk_checked_at`。
+    """
     if not isinstance(usage, dict) or container is None:
         return False
+
+    has_path_status = "mount_path_status" in usage
+    path_status = None
+    if has_path_status:
+        raw_status = usage.get("mount_path_status")
+        path_status = str(raw_status).strip().lower() if raw_status not in (None, "") else "unresolved"
+        if path_status not in _DISK_PATH_STATUSES:
+            logger.warning(
+                "apply disk snapshot: unknown mount_path_status=%r machine_id=%s container=%s; preserve path",
+                raw_status, machine_id, name,
+            )
+            path_status = "unresolved"
+
+    frame_path = _normalize_disk_path(usage.get("bind_mount_path"))
+    current_path = _normalize_disk_path(getattr(container, "bind_mount_path", None))
+    no_bind_key = int(container.id)
+    checked_at = getattr(container, "disk_checked_at", None)
+    measured_at, measured_error = _parse_disk_measured_at(usage.get("measured_at"))
+
+    # 已知旧帧不回退：先拒绝，再处理路径。真实测量时间相同但路径声明冲突的帧
+    # 也不能改路径（路径修正必须先于测量，但冲突时宁可不改）。
+    if measured_error == "invalid":
+        pass  # 只拒绝测量，同帧合法路径仍可落库
+    elif measured_at is not None and checked_at is not None and measured_at < checked_at:
+        _log_disk_sample_rejected(
+            machine_id, name, "measured_at_older_than_checkpoint", usage,
+        )
+        return False
+    elif measured_at is not None and checked_at is not None and measured_at == checked_at:
+        path_conflict = (
+            (path_status == "resolved" and frame_path and frame_path != current_path)
+            or (path_status == "no_bind" and current_path is not None)
+        )
+        if path_conflict:
+            _log_disk_sample_rejected(
+                machine_id, name, "same_measured_at_path_conflict", usage,
+            )
+            return False
+
+    # 1) 路径：新协议按 status 更新/保留/清空；旧 Node 帧不得改写已校正路径。
+    path_updates: dict = {}
+    clear_fields: set[str] = set()
+    measurement_path_ok = True
+    if has_path_status:
+        if path_status == "resolved" and frame_path:
+            if frame_path != current_path:
+                path_updates["bind_mount_path"] = frame_path
+                clear_fields.update(_DISK_MEASUREMENT_FIELDS)
+                logger.info(
+                    "apply disk snapshot: path updated machine_id=%s container=%s %r -> %r",
+                    machine_id, name, current_path, frame_path,
+                )
+            current_path = frame_path
+            _NO_BIND_CONTAINERS.discard(no_bind_key)
+        elif path_status == "no_bind":
+            if current_path is not None:
+                clear_fields.add("bind_mount_path")
+                logger.info(
+                    "apply disk snapshot: no_bind clears path machine_id=%s container=%s previous=%r",
+                    machine_id, name, current_path,
+                )
+            current_path = None
+            clear_fields.update(_DISK_MEASUREMENT_FIELDS)
+            _NO_BIND_CONTAINERS.add(no_bind_key)
+        # unresolved / not_running / resolved 但路径为空：保留当前路径，不清空。
+    else:
+        if current_path is None:
+            if no_bind_key in _NO_BIND_CONTAINERS:
+                if frame_path:
+                    measurement_path_ok = False
+                    _log_disk_sample_rejected(
+                        machine_id, name, "legacy_frame_after_no_bind", usage,
+                    )
+            elif frame_path:
+                # 旧协议兼容：仅当前无路径时允许建立（不是 Node 校正）。
+                path_updates["bind_mount_path"] = frame_path
+                clear_fields.update(_DISK_MEASUREMENT_FIELDS)
+                current_path = frame_path
+                logger.info(
+                    "apply disk snapshot: legacy path established machine_id=%s container=%s path=%r",
+                    machine_id, name, frame_path,
+                )
+        elif frame_path != current_path:
+            measurement_path_ok = False
+            _log_disk_sample_rejected(
+                machine_id, name, "legacy_frame_path_mismatch", usage,
+            )
+
+    # 2) 测量：完整组成 + 路径一致 + 时间可解析。当前路径为空时只有明确 no_bind
+    # 才允许 overlay-only。
     total_bytes = usage.get("total_bytes")
     overlay_rw_bytes = usage.get("overlay_rw_bytes")
     overlay_rw_source = usage.get("overlay_rw_source")
-    bind_mount_path = usage.get("bind_mount_path")
     bind_mount_bytes = usage.get("bind_mount_bytes")
-    overlay_incomplete = overlay_rw_bytes is None or overlay_rw_source in {"error", "missing", "not_found"}
-    if total_bytes is None or overlay_incomplete or (bind_mount_path and bind_mount_bytes is None):
-        logger.warning(
-            "apply disk snapshot skipped incomplete measurement: machine_id=%s container=%s total=%s overlay=%s overlay_source=%s bind=%s path=%s",
-            machine_id, name, total_bytes, overlay_rw_bytes, overlay_rw_source, bind_mount_bytes, bind_mount_path,
-        )
+    overlay_incomplete = (
+        overlay_rw_bytes is None
+        or overlay_rw_source in {"error", "missing", "not_found"}
+    )
+    measurement_accepted = False
+    reject_reason = None
+    if not measurement_path_ok:
+        reject_reason = "path_inconsistent"
+    elif measured_error == "invalid":
+        reject_reason = "invalid_measured_at"
+    elif total_bytes is None:
+        reject_reason = "total_bytes_missing"
+    elif overlay_incomplete:
+        reject_reason = "overlay_incomplete"
+    elif current_path is not None:
+        if bind_mount_bytes is None:
+            reject_reason = "bind_bytes_missing"
+        elif frame_path != current_path:
+            reject_reason = "path_inconsistent"
+        else:
+            measurement_accepted = True
+    elif path_status != "no_bind":
+        # 旧协议两者皆空无法证明 no_bind；新协议非 no_bind 也不允许 overlay-only。
+        reject_reason = "no_bind_not_confirmed"
+    elif frame_path is not None:
+        # no_bind 与帧内非空路径自相矛盾，拒绝测量（路径已按 no_bind 清空）。
+        reject_reason = "no_bind_with_path"
+    else:
+        measurement_accepted = True
+
+    measurement_updates: dict = {}
+    if measurement_accepted:
+        measurement_updates = {
+            "disk_overlay_rw_bytes": overlay_rw_bytes,
+            "disk_bind_mount_bytes": bind_mount_bytes if current_path is not None else None,
+            "disk_total_bytes": total_bytes,
+            "disk_checked_at": measured_at or datetime.datetime.utcnow(),
+        }
+    else:
+        _log_disk_sample_rejected(machine_id, name, reject_reason, usage)
+
+    if not measurement_updates and not path_updates and not clear_fields:
         return False
+
+    updates = {**measurement_updates, **path_updates}
     containers_repo.update_container(
-        container.id, disk_overlay_rw_bytes=overlay_rw_bytes, disk_bind_mount_bytes=bind_mount_bytes,
-        disk_total_bytes=total_bytes, bind_mount_path=bind_mount_path,
-        disk_checked_at=datetime.datetime.utcnow(), session=session,
+        container.id,
+        session=session,
+        clear_fields=clear_fields or None,
+        **updates,
     )
     return True
+
+
+_DISK_PATH_STATUSES = {"resolved", "unresolved", "not_running", "no_bind"}
+_DISK_MEASUREMENT_FIELDS = {
+    "disk_overlay_rw_bytes",
+    "disk_bind_mount_bytes",
+    "disk_total_bytes",
+    "disk_checked_at",
+}
+# 进程内 no_bind 标记：只用于拒绝旧 Node 帧把已明确清空的路径重建。不持久化；
+# Ctrl 重启后丢失是已写明的兼容边界（不为此新增列）。
+_NO_BIND_CONTAINERS: set[int] = set()
+_MEASURED_AT_FUTURE_TOLERANCE = datetime.timedelta(minutes=5)
+
+
+def _clear_no_bind_disk_markers() -> None:
+    """测试用：清空进程内 no_bind 标记；生产路径不调用。"""
+
+    _NO_BIND_CONTAINERS.clear()
+
+
+def _normalize_disk_path(value) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _parse_disk_measured_at(value) -> tuple[datetime.datetime | None, str | None]:
+    """返回 (UTC naive 时间, 缺失/无效标记)。缺失 = None，无效 = 'invalid'。"""
+
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None, "missing"
+    try:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None, "invalid"
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    if parsed > datetime.datetime.utcnow() + _MEASURED_AT_FUTURE_TOLERANCE:
+        return None, "invalid"
+    return parsed, None
+
+
+def _log_disk_sample_rejected(machine_id, name, reason, usage: dict) -> None:
+    logger.warning(
+        "apply disk snapshot rejected: machine_id=%s container=%s reason=%s "
+        "total=%s overlay=%s overlay_source=%s bind_bytes=%s path=%r status=%r measured_at=%r",
+        machine_id, name, reason,
+        usage.get("total_bytes"), usage.get("overlay_rw_bytes"), usage.get("overlay_rw_source"),
+        usage.get("bind_mount_bytes"), usage.get("bind_mount_path"),
+        usage.get("mount_path_status"), usage.get("measured_at"),
+    )
 
 
 def _load_snapshot_machine(machine_id: int):

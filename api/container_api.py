@@ -1,9 +1,7 @@
-﻿"""容器系统 API 路由。"""
+"""容器系统 API 路由。"""
 
 from __future__ import annotations
 
-import threading
-from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Request
@@ -131,38 +129,6 @@ def _user_id_or_none(value: Any) -> int | None:
         return int(value)
     except Exception:
         return None
-
-
-def _refresh_disk_async(container_id: int) -> None:
-    """异步刷新单个容器磁盘用量。"""
-
-    try:
-        du = container_service.get_container_disk_usage(container_id, timeout=20.0)
-        if isinstance(du, dict) and du.get("container"):
-            from ..repositories import containers_repo as repo
-
-            with session_scope(commit=False) as session:
-                c = repo.get_by_id(container_id, session=session)
-                if not c:
-                    return
-                container_pk = c.id
-            cd = du["container"]
-            overlay = int(cd.get("overlay_rw_bytes") or 0)
-            bind = int(cd.get("bind_mount_bytes") or 0)
-            total = int(cd.get("total_bytes") or 0)
-            # 容器磁盘上限统一以 machine.max_disk_size_gb 现算派生（2026-09-01 决策），
-            # 不再落库 disk_limit_bytes 机器级拷贝。
-            with session_scope() as session:
-                repo.update_container(
-                    container_pk,
-                    disk_overlay_rw_bytes=overlay,
-                    disk_bind_mount_bytes=bind,
-                    disk_total_bytes=total,
-                    disk_checked_at=datetime.utcnow(),
-                    session=session,
-                )
-    except Exception as e:
-        print(f"[ssh-refresh] async disk refresh failed for container {container_id}: {e}")
 
 
 @router.post("/create_container", response_model=CreateContainerResponse)
@@ -930,11 +896,6 @@ def refresh_last_ssh_login_time_api(
         # 与详情/提醒/清理的口径不一致。
         cleanup_info = container_service.get_container_cleanup_state(container)
         last_time = cleanup_info.get("last_ssh_login_time")
-        threading.Thread(
-            target=_refresh_disk_async,
-            args=(container.id,),
-            daemon=True,
-        ).start()
     except container_service.NodeServiceError as e:
         reason = getattr(e, "reason", None)
         return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)

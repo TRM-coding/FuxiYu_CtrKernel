@@ -14,6 +14,11 @@ logger = logging.getLogger(__name__)
 _SCHEDULER_STATE: dict[str, object] = {}
 _DISK_CHECK_CACHE: dict[str, float] = {}
 
+# 评估只使用“最后被接受的测量时间”。3600 秒是初值，且必须覆盖 Node 既有
+# BIND_CACHE_TTL_SEC=900 与 BIND_DU_TIMEOUT_SEC=600 之和（1500 秒）；这是评估策略，
+# 不是数据列，也不是版本门禁。
+CONTAINER_DISK_MEASUREMENT_MAX_AGE_SECONDS = 3600
+
 
 def _disk_check_cache(cache: dict[str, float] | None = None) -> dict[str, float]:
     return cache if isinstance(cache, dict) else _DISK_CHECK_CACHE
@@ -73,6 +78,22 @@ def _usage_from_db(container) -> dict | None:
             "[disk-check] skip container_id=%s: incomplete bind mount disk usage path=%s",
             getattr(container, 'id', '?'),
             bind_mount_path,
+        )
+        return None
+    checked_at = getattr(container, 'disk_checked_at', None)
+    if checked_at is None:
+        logger.warning(
+            "[disk-check] skip container_id=%s: disk measurement time missing",
+            getattr(container, 'id', '?'),
+        )
+        return None
+    age_seconds = (datetime.utcnow() - checked_at).total_seconds()
+    if age_seconds > CONTAINER_DISK_MEASUREMENT_MAX_AGE_SECONDS:
+        logger.warning(
+            "[disk-check] skip container_id=%s: disk measurement stale age_seconds=%s max_age=%s",
+            getattr(container, 'id', '?'),
+            round(age_seconds, 1),
+            CONTAINER_DISK_MEASUREMENT_MAX_AGE_SECONDS,
         )
         return None
     return {"container": {

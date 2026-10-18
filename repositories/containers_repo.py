@@ -204,7 +204,13 @@ def create_container(
     return container
 
 
-def update_container(container_id: int, *, session: Session, **fields) -> Container | None:
+def update_container(
+    container_id: int,
+    *,
+    session: Session,
+    clear_fields: set[str] | None = None,
+    **fields,
+) -> Container | None:
     include_invalid = bool(fields.pop("include_invalid", False))
     container = get_by_id(container_id, session=session, include_invalid=include_invalid)
     if not container:
@@ -234,6 +240,23 @@ def update_container(container_id: int, *, session: Session, **fields) -> Contai
         "port_mappings",
     }
     dirty = False
+    # 磁盘测量/业务路径的“显式清空”只能由专用参数触发。普通调用传 None 仍按既有
+    # 语义忽略，避免 update_container(... failed_reason=None) 这类调用误清磁盘事实。
+    clearable = {
+        "disk_overlay_rw_bytes",
+        "disk_bind_mount_bytes",
+        "disk_total_bytes",
+        "disk_checked_at",
+        "bind_mount_path",
+    }
+    clear = set(clear_fields or ())
+    unsupported = clear - clearable
+    if unsupported:
+        raise ValueError(f"unsupported clear_fields for container: {sorted(unsupported)}")
+    for key in clear:
+        if getattr(container, key) is not None:
+            setattr(container, key, None)
+            dirty = True
     nullable_clear_fields = {
         "failed_reason",
         "failed_detail",

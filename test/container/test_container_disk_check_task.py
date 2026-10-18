@@ -303,6 +303,7 @@ class TestEvaluateLimitsLongTerm:
         machine.max_disk_size_gb = 512
         container.disk_total_bytes = 600 * 1024**3
         container.disk_overlay_rw_bytes = 600 * 1024**3
+        container.disk_checked_at = datetime.utcnow()
         long_term_container_repo.add(container.id, session=db_session)
         db_session.commit()
 

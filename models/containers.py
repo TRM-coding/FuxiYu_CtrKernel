@@ -97,6 +97,8 @@ class Container(db.Model):
     disk_overlay_rw_bytes: int = db.Column(db.BigInteger, nullable=True)
     disk_bind_mount_bytes: int = db.Column(db.BigInteger, nullable=True)
     disk_total_bytes: int = db.Column(db.BigInteger, nullable=True)
+    # 最后被接受的磁盘测量时间：新 Node 写真实 measured_at，旧 Node 缺该字段时
+    # 写接收时间作为兼容值。重复缓存帧同值不推进；失败样本不刷新。
     disk_checked_at = db.Column(db.DateTime, nullable=True)
 
     # 宿主机 bind mount 路径，磁盘检测时由 NodeKernel 返回并持久化
