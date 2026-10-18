@@ -78,7 +78,7 @@ def get_full_url(host: str, endpoint: str, port: int) -> str:
     return f"{node_api_base(host, port)}{endpoint}"
 
 
-def send(url: str, payload: dict, timeout: float = 5.0, *, cert=None, verify=None) -> dict:
+def send(url: str, payload: dict, timeout: float = 30.0, *, cert=None, verify=None) -> dict:
     """Send JSON over mTLS, retaining Node error bodies and transport failures."""
     cert, verify = _resolve_tls(url, cert=cert, verify=verify)
     try:
