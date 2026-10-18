@@ -2,20 +2,17 @@
 
 ## Why
 
-2026-10-17 的 Sylvan（`containers.id=201`）事故暴露了长期容器的服务端门禁缺口：容器因磁盘硬超限被冻结后，用户于 18:43 将其转为非长期；该操作在冻结态下被放行，随后磁盘调度按“非长期”跳过响应，长期保护被解除。19:33 的两次 unpause 又暴露出 Node 缓存旧快照覆盖、失败 pending 长期优先的问题；Ctrl 曾以单行 CAS 复位，但被 WSS 快照在 15 秒内覆盖，最终只能靠 Node 重启清除 pending。当前代码仍未修复，且长期设置入口只校验配额和状态矩阵：暂停态可以取消长期，恢复长期快照只校验配额，详情/列表的磁盘超限判断仍依赖前端自行拼装。必须在更多 UI 入口接入前，把“能否启用/取消长期”统一为服务端权威判断。
+2026-10-17 的 Sylvan 事故（`containers.id=201`）暴露了长期容器的服务端缺口：容器因磁盘硬超限被冻结后，用户把长期容器改为非长期；磁盘调度随后按“非长期”跳过响应，长期保护被解除。当前设置入口只做数量配额和既有状态矩阵，取消长期没有按实际冻结状态拦截，启用长期也没有比较磁盘用量与机器上限。
 
 ## What Changes
 
-- 新增一个服务端长期资格评估器，所有手工设置、恢复长期快照及后续同类新增标记入口共用；读取面统一返回只读 DTO `long_term_eligibility`，字段固定为 `can_enable`、`can_disable`、`enable_reason`、`disable_reason`、`evaluated_at`、`disk_total_bytes`、`disk_limit_bytes`、`disk_measured_at`，在容器 detail 与 brief 中同源返回。
-- 实际启用长期（非长期 → 长期）MUST 同时通过：当前状态为已确认的稳定 `online`/`offline`、无未确认运行过渡、长期配额未满、机器 `max_disk_size_gb` 已配置、业务路径上的磁盘测量有效且未过期、`disk_total_bytes` 已知且低于磁盘硬阈值。测量缺失、未验证、过期、路径与样本不一致或限额缺失 MUST 明确拒绝，不得以 0 用量或 `disk_checked_at` 冒充可信样本。软阈值只提醒，不阻断启用。
-- 实际取消长期（长期 → 非长期）MUST 只在已确认未冻结且状态守卫允许时执行：`paused`、`pausing`/`unpausing` 未确认、`failed`、`status_unknown`、主机离线/维护及其他不稳定状态 MUST NOT 取消。取消不新增磁盘超限或配额拒绝条件；`freeze_state` 行仍存在本身不是拒绝理由，已确认恢复 `online` 后不得被永久阻挡。
-- 为 `pausing`/`unpausing` 增加本地动作绑定，消费 Node 可选 `action_ref` 与 `last_action`。只有精确 ref 的终结记录、或实际运行态方向成功才能结束过渡；`failed` 只结束动作、不把容器写成 failed，`unconfirmed`/`timed_out` 不按 TTL 放行。旧 Node 缺 ref 时只能依赖方向成功或同步明确失败，反向状态不能推断动作失败；明确此混合版本限制。
-- 恢复长期快照执行与手工新启用相同的硬超限规则，但实际恢复时自动静默授予一次现有 `container.disk_freeze_grace_days` 时长的磁盘宽限并恢复原长期标记：不增加超限确认框、宽恕按钮、确认 token 或前端状态机，`requires_choice` 等只读阶段不消耗宽限。恢复仍按保留路径创建，不因旧 Docker/inode/缓存拒绝；新实例路径/测量走正常磁盘链路，宽限有效时不得立即暂停或升级，结束后按标准策略处理。宽限与长期标记必须在同一事务中先持久化再对调度可见；以 `deleted_id` 为稳定来源幂等，重复请求/轮询/重试不刷新 `restore_grace.until`；失败未恢复不消耗宽限。手工新启用仍无恢复特例。
-- 同目标值的重复请求为纯幂等 no-op：不新增/删除标记、不新增审计、不改变冻结锚点 `first_frozen_at`、宽限 `grace_until`、`deferral_seconds` 或累计计时；实际切换仍必须阻断冻结态和磁盘超限。
-- 事务内重读容器行、长期标记、状态、配额与可信样本，并用条件插入/条件删除缩小本地竞态；不宣称修复 Q67 的跨容器配额并发，也不宣称获得 Q70 的跨进程/跨 Node 原子性。
-- 与 `unify-disk-freeze-workflow` 共享同一动作引用契约：冻结状态只把精确 ref 的失败/终结绑定到当前 `pause_request_seq`，WSS `online` 不等于 `pause_failed`；旧链路帧按当前 `link_generation` 丢弃。
-
-**BREAKING**：手工新启用从此依赖路径/测量字段与统一有效谓词；缺少真实测量时间、机器限额或新鲜可信测量时返回 409，旧 Node 样本标测量未验证，不是“缺目录身份”。恢复长期快照会执行硬超限规则，但在真实恢复时自动静默授予一次宽限并恢复原长期标记；不因 inode/旧缓存拒绝，也不强制临时短期。旧 Node 缺 action_ref/last_action 时不能反推动作失败，只能安全阻断；依赖未部署期间旧自动化可能被拒绝。该拒绝是保守停用，不是“已经修复”。
+- 在既有手工长期设置入口内增加一个窄的、按方向判断的服务端静态守卫，复用现有权限、既有 `set_long_term` 状态矩阵、root 用户长期配额、容器当前状态、`disk_total_bytes`、`machine.max_disk_size_gb` 与既有硬限制百分比。
+- 实际启用长期时，root 用户配额已满则拒绝；机器配置了磁盘上限且已知用量达到硬限制时拒绝。磁盘用量未知或机器未配置上限本身不构成新的拒绝理由，软阈值不阻断。
+- 实际取消长期时，仅当实际状态为 `paused`（冻结中）拒绝；`online`/`offline` 且通过既有状态矩阵时允许。`container_disk_freeze_state` 行是否存在不是永久门禁，成功取消也不删除、重置该行或 Q72 累计字段。
+- 实际写入前在同一会话/事务内重读容器、账号绑定、长期标记、机器磁盘配置和当前状态，再判断并用既有长期仓储原语写入。同目标值请求返回当前状态，不新增/删除标记、不写成功审计、不修改冻结锚点/宽限/累计字段。
+- 上一版新增的持久化结构、资格响应对象与动作关联已直接删除，不保留兼容层；本变更只改现有服务逻辑，不引入新的状态机或 Node 协议前置。
+- 恢复长期快照继续走既有 root 配额预检和长期标记恢复路径。用户已确认的“恢复原长期资格时静默授予一次既有时长宽限”政策保留；但既有冻结仓储只在冻结行上保存 `grace_until`，无冻结行时没有承载位置，详见 design 的表示缺口。该缺口独立上报，不与静态切换守卫捆绑，也不作为本变更的前置。
+- Web 变更继续使用既有 `is_long_term`、`long_term_container_can_enable`、`disk_usage_percent`/`disk_usage.usage_percent` 与 `effective_status` 做静态展示，后端仍是最终裁决；不要求新增资格响应对象。
 
 ## Capabilities
 
@@ -25,13 +22,10 @@
 
 ### Modified Capabilities
 
-- `backend--table-long-term-containers`：长期容器新增服务端资格策略、冻结态取消守卫、磁盘/配额启用门禁、恢复路径/配额/长期标记与静默恢复宽限、幂等 DTO 契约。
-- `backend--table-containers`：新增 Ctrl 动作绑定字段、恢复宽限字段与可选 `action_ref`/`last_action` 消费规则；不改变固定资格 DTO、磁盘字段或冻结累计语义。
+- `backend--table-long-term-containers`：新增手工启用/取消长期的静态守卫、同目标值幂等和既有权限/状态/错误契约保持。
 
 ## Impact
 
-涉及 `services/container_tasks.py`、`services/container_module/long_term.py`、`actions.py`、`restore.py`、`queries.py`、`information.py`、`pydantic_models.py`、`node_comms_modules/snapshots.py`、`repositories/long_term_container_repo.py`、`repositories/containers_repo.py`、`schemas/container.py`、`api/container_api.py`、`models/containers.py`、迁移与隔离测试。
+涉及 `services/container_module/long_term.py`、`services/container_tasks.py`、`api/container_api.py` 的原因映射与失败审计，以及对应隔离测试。
 
-配套但不属于本仓库写范围：Web 变更 `align-container-action-eligibility-and-recovery` 必须消费完全相同的 `long_term_eligibility` 契约；Node 变更 `guard-runtime-state-reconciliation` 负责实现可选 `action_ref`/`last_action` 并修复 failed pending 与旧快照覆盖。本变更在 Ctrl 侧定义并消费该跨仓契约，不修改 Node 仓库、不自动修复线上 Sylvan 行，不执行 SSH、生产操作、业务代码提交或 push。
-
-依赖顺序：先落地 `gate-disk-check-on-mount-identity` 的 Ctrl 字段/路径接收/测量谓词，再逐机部署 Node 路径/测量协议与 action_ref/last_action，然后部署本变更；本变更不得把旧样本或旧 Node 缺 ref 当可用。`unify-disk-freeze-workflow` 同步消费同一 action_ref、路径测量与恢复宽限。Web 可先按契约渲染但服务端拒绝仍是最终裁决。Q67 的跨容器数量并发、Q70 的跨进程动作代际、Node `guard-runtime-state-reconciliation` 的缓存修复均不在本变更内。
+不改 `models/`、数据库结构、响应模型、Node 仓库、Web 仓库或正式 `openspec/specs/`。恢复宽限的承载方式不在本变更内；本变更只上报现有仓储无法表达该边界的证据，不据此新增结构，也不把它变成静态守卫的前置。

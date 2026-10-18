@@ -4,140 +4,124 @@
 
 ### Requirement: containers 持久化结构
 
-系统 SHALL 使用数据附录的字段声明持久化 `Container`，遵守模型声明的主键、非空、唯一键、外键及默认值；Python 默认值与数据库 server_default 必须分别理解。磁盘事实 SHALL 以 `disk_measurement_status`、`disk_measured_at`、`disk_received_at` 和 `disk_observation` 保存测量状态、真实测量时间、接收时间与观测 JSON；路径使用既有 `bind_mount_path` 作为业务路径。MUST NOT 新增或依赖 `disk_identity_status`、`disk_identity_checked_at`、`disk_identity` 或 dev/inode/PID 目录身份列；旧行默认测量未验证，不得以 `disk_checked_at` 回填真实测量时间。字段定义见本变更数据附录增量，归档时同步主 spec 的 Data model appendix。
+系统 SHALL 使用数据附录的字段声明持久化 `Container`，遵守模型声明的主键、非空、唯一键、外键及默认值；Python 默认值与数据库 server_default 必须分别理解。磁盘事实 SHALL 仅使用既有 `disk_overlay_rw_bytes`、`disk_bind_mount_bytes`、`disk_total_bytes`、`disk_checked_at` 和 `bind_mount_path` 表达；本变更 MUST NOT 新增 `disk_measurement_status`、`disk_measured_at`、`disk_received_at`、`disk_observation` 或 `disk_identity_*` 列，也 MUST NOT 以 JSON、日志或其他表替代磁盘业务状态。`bind_mount_path` 是唯一业务路径（用户通称 `mount_path`）。`disk_checked_at` 表示最后被接受的磁盘测量时间：Node 提供真实 `measured_at` 时写该值；旧 Node 未提供时，既有 `disk_checked_at` 保存接收时间作为兼容值。除该兼容值外，收到时间、拒绝原因和路径诊断只用于日志/进程内，不新增表列或业务状态存储。字段定义见主 spec 数据附录。
 
 #### Scenario: 读取有效记录
 
 - **WHEN** 服务按该表主键读取一条已经持久化的有效记录
 - **THEN** 返回字段 SHALL 遵守上述类型及空值语义，不把关联展示名替代稳定主键
 
+#### Scenario: 不新增观测列
+
+- **WHEN** 实现本变更
+- **THEN** 不为测量状态、测量时间、接收时间或观测 JSON 新增列；路径修正只使用既有 `bind_mount_path`，测量时间只使用既有 `disk_checked_at`，且不新增迁移
+
 ## ADDED Requirements
 
 ### Requirement: Node 路径修正与业务路径
 
-Node SHALL 在内部唯一确定实际目录后，通过 `bind_mount_path` 返回校正业务路径；成功 Docker 明确 no_bind 时返回 `bind_mount_path=null`、`measurement_mount_path=null`、overlay-only，其余诊断状态 MUST NOT 清空或当 no_bind。Ctrl SHALL 只对当前认证机器/活跃容器/有效排序下的修正与 no_bind 清空持久化；unresolved/not_running/缺字段/不可读保留已有路径；不猜目录、不返回 proc、不按 inode 批量改历史，也不把路径状态当业务门禁。
+Ctrl SHALL 只消费 Node 校正后的 `bind_mount_path` 作为业务路径；dev/inode/PID MUST NOT 进入 Ctrl 持久化、比较或业务门禁。Ctrl SHALL 仅对当前认证机器上的活跃容器应用修正：`resolved` 且路径非空时更新；`no_bind` 时清空并允许同帧 overlay-only；`unresolved`/`not_running`/路径空/字段缺失时保留已有或最后确认路径，不清空、不猜测、不写 `/proc`。`mount_path_status` 只用于更新/保留/清空，不是测量或业务门禁。不带 `mount_path_status` 的旧 Node 帧 MUST NOT 改写或清空已有路径；当前路径为空且帧内路径非空时可建立该路径并按接收时间接收测量（新 Node 已明确 no_bind 的容器除外），这是旧协议兼容而非 Node 校正。路径修正 MUST NOT 按 inode 批量改写历史恢复快照、旧清理记录或其他机器记录。
 
 #### Scenario: resolved 路径修正
 
-- **WHEN** 当前认证机器上的活跃容器本次路径核对为 resolved，Node 返回校正后的 bind_mount_path
-- **THEN** Ctrl 将该业务路径持久化到当前容器；不保存也不比较 dev/inode/PID
+- **WHEN** 当前认证机器上的活跃容器本次路径核对为 resolved，Node 返回校正后的 `bind_mount_path`
+- **THEN** Ctrl 将该业务路径持久化到当前容器；不保存、不比较 dev/inode/PID，也不因该状态单独授权任何业务动作
 
 #### Scenario: 原有 bind 路径转为明确 no_bind
 
-- **WHEN** 当前活跃容器原有 bind_mount_path，随后成功 Docker 观测明确 no_bind，Node 返回 bind_mount_path=null、measurement_mount_path=null
-- **THEN** Ctrl 同步清空 containers.bind_mount_path；overlay-only 组成完整且测量有效时允许有效测量；旧 bind bytes/旧路径样本只保留历史诊断，不进入有效测量，也不保留旧路径后以 no_bind 豁免同路径检查
+- **WHEN** 当前活跃容器原有 `bind_mount_path`，随后成功 Docker 观测明确 no_bind，Node 返回 `bind_mount_path=null`、`mount_path_status=no_bind`
+- **THEN** Ctrl 同步清空 `containers.bind_mount_path`；overlay 组成完整且测量时间有效时允许按 overlay-only 写入新测量；旧 bind 字节/旧路径样本不进入新测量
 
 #### Scenario: unresolved 只保留路径不清空
 
-- **WHEN** 路径核对为 unresolved，Node 保留已有/最后确认路径，且 measurement_mount_path 与该路径一致并测量成功
-- **THEN** 测量仍按有效谓词判断，不得因 mount_path_status=unresolved 阻断业务；Ctrl 不得清空 bind_mount_path，不得把 unresolved/not_running/字段缺失/不可读当成 no_bind，也不得把诊断失败写成 measurement_error
+- **WHEN** 路径核对为 unresolved，Node 保留已有/最后确认路径，且该路径测量成功、组成完整
+- **THEN** Ctrl 保留 `bind_mount_path`，按测量事实判断是否接收；不得因 `mount_path_status=unresolved` 阻断同路径有效测量，也不得清空或把诊断失败写成测量失败
 
-#### Scenario: 无已有路径时不猜
+#### Scenario: 旧 Node 不改写已校正路径
 
-- **WHEN** 路径无法唯一定位且当前没有已确认/原有业务路径
-- **THEN** bind_mount_path 保持 null，不猜测目录、不返回 proc 临时路径，等待后续可确认观测
+- **WHEN** 当前业务路径已由新 Node 校正为 B，随后收到不带 `mount_path_status` 的旧 Node 帧，其 `bind_mount_path` 为 A
+- **THEN** Ctrl 保留 B，不用 A 覆盖路径，也不把 A 的字节贴到 B；该路径不一致帧的测量被拒绝，旧帧的兼容接收条件仍按本规格其他场景执行
+
+#### Scenario: 旧 Node 首次建立路径
+
+- **WHEN** 当前 `bind_mount_path` 为空，旧 Node 帧带来非空路径 A 和完整测量
+- **THEN** Ctrl 可建立 A 并按接收时间语义接收测量，用于兼容旧 Node 新建容器；这是旧协议兼容而非 Node 校正，后续新 Node 的 `resolved` 修正仍可覆盖，旧帧不得再改写 A
+
+#### Scenario: no_bind 后旧 Node 不得重建路径
+
+- **WHEN** 新 Node 已明确 no_bind 清空路径，随后收到旧 Node 帧带非空路径 A
+- **THEN** 进程内 no_bind 保护拒绝重建 A，保留空路径并拒绝该帧测量；不得因此新增持久化列
 
 #### Scenario: 路径修正不批量改历史
 
 - **WHEN** 某容器路径从旧 Source 修正为新业务路径
 - **THEN** 只更新该活跃容器；既有恢复快照、旧清理记录和其他机器记录保持各自路径，不按 inode 追溯改写
 
-### Requirement: 磁盘测量事实与路径一致性
+### Requirement: 磁盘测量接收与路径一致性
 
-Ctrl SHALL 持久化协议、`collector_epoch/observation_seq`、测量状态、`measured_at`、`measurement_mount_path` 和路径诊断。样本仅在 `measurement_mount_path` 与当前业务路径一致时更新有效 bytes/时间；明确 no_bind 时当前路径与测量路径都为 null，按 overlay-only 判断，不得携带旧 bind bytes/旧路径样本，旧值仅作历史诊断。异常/缺失 MUST NOT 写 0；错误/过期/未验证只落状态，不刷新有效测量。
-
-#### Scenario: 路径改变后旧样本晚到
-
-- **WHEN** 当前业务路径已修正为新路径，随后收到 measurement_mount_path 仍为旧路径的样本
-- **THEN** 拒绝该样本更新 bytes/测量时间，保留路径与诊断；不得把旧路径数字标成新路径测量
-
-#### Scenario: 明确 no_bind 的 overlay 测量
-
-- **WHEN** Docker 明确返回 no_bind，overlay 组成完整且测量状态 ok、时间有效，Node 返回 bind_mount_path=null、measurement_mount_path=null
-- **THEN** Ctrl 清空当前 bind_mount_path 后允许按 overlay 总量作为有效测量；不得把探测失败、路径缺失、不可读或字段缺失推断为 no_bind，也不得混入旧 bind bytes/旧路径样本
+Ctrl SHALL 在更新有效字节和测量时间前同时确认：样本来自当前认证机器/当前活跃容器；`total_bytes` 非空、overlay 非空、当前路径非空时 bind 字节非空，当前路径为空时只有 `mount_path_status=no_bind` 才允许 overlay-only；帧内业务路径与当前业务路径一致（路径修正帧先落路径，再判断测量）；`measured_at` 存在时格式有效且不在未来超过允许时钟偏差；缺少 `measured_at` 的旧 Node 帧只在当前路径为空且帧内路径非空（兼容建立）或当前路径非空且帧内路径一致时按接收时间兼容。失败、缺组成、路径不一致或时间无效 MUST NOT 刷新 `disk_checked_at`、MUST NOT 写入 0 或把旧值标成新测量。
 
 #### Scenario: 错误样本不伪造零
 
-- **WHEN** measurement_status=error 且 total_bytes 为 null，或组成缺失
-- **THEN** 保存 error/unverified 状态、原因和接收时间；历史数字仅作展示，不把缺失写成 0，不刷新真实测量时间
+- **WHEN** `total_bytes` 为空、overlay 缺失，或 bind 路径存在但 bind 字节为空
+- **THEN** 不把该样本的字节或接收时间写成有效测量，不写 0，不把旧值标成当前测量；若同帧路径发生变化，仍按路径规则先落路径并清空旧测量；日志记录拒绝原因
 
-### Requirement: 测量有效谓词不带目录身份
+#### Scenario: 重复缓存帧不刷新测量时间
 
-有效测量 SHALL 只要求：协议已识别（当前 version 1；旧缺失按未验证）、measurement_status=ok、用量组成完整、measured_at 存在且未过期/不在未来超时钟偏差、measurement_mount_path 与当前业务路径一致、样本未违反当前连接/HTTP 与 collector_epoch/observation_seq 排序。MUST NOT 检查 mount_path_status=resolved、dev/inode、PID、proc 可读性或 Docker 对象编号；路径诊断失败不得单独使同一路径的成功测量失效。
+- **WHEN** Node 在一个测量周期内多次推送同一 `measured_at` 的缓存结果
+- **THEN** `disk_checked_at` 保持该真实测量时间；新的发送/接收时间不得把它推进，重复帧也不得改写路径
+
+#### Scenario: 已知旧测量不回退
+
+- **WHEN** 帧内真实 `measured_at` 早于现有 `disk_checked_at`，或时间相同但路径冲突
+- **THEN** 不回写旧测量，不以冲突帧改路径；先拒绝旧帧再执行路径更新，不新增排序列，也不宣称无时间的路径纠正具备跨进程隔离
+
+#### Scenario: 明确 no_bind 的 overlay 测量
+
+- **WHEN** Node 明确返回 `mount_path_status=no_bind`、`bind_mount_path=null`，overlay 组成完整且 `measured_at` 有效
+- **THEN** Ctrl 清空当前 `bind_mount_path` 后按 overlay 总量写入有效测量；不得把探测失败、路径不可读或字段缺失推断为 no_bind，也不得混入旧 bind 字节
+
+#### Scenario: 无效 measured_at 只拒绝测量
+
+- **WHEN** 新 Node 帧的 `measured_at` 无法解析或超出现在允许时钟偏差
+- **THEN** 不更新字节和 `disk_checked_at`，但同帧的合法路径修正仍可落库并按路径规则清空旧测量；不得把该帧解释成旧 Node，也不得用接收时间替代
+
+### Requirement: 路径变化清空旧测量
+
+路径变化或明确 no_bind 清空时，接收链路 SHALL 使用既有更新能力显式清空旧路径相关 `disk_overlay_rw_bytes`、`disk_bind_mount_bytes`、`disk_total_bytes` 和 `disk_checked_at`，再按新路径的完整样本回填；MUST NOT 把旧路径字节/总量贴到新路径。显式清空 MUST 使用专用清除语义，MUST NOT 把普通 `None` 一律当清空，且只作用于当前活跃容器。
+
+#### Scenario: 路径改变后旧样本晚到
+
+- **WHEN** 当前业务路径已修正为新路径 B，随后收到 `bind_mount_path=A` 且总量对应旧路径的样本
+- **THEN** 拒绝该样本更新字节和 `disk_checked_at`，保留 B；不对 A 的数字做新路径标注，也不清空 B
+
+#### Scenario: 路径变化先清空再回填
+
+- **WHEN** 当前容器路径从 A 修正为 B，或明确转为 no_bind
+- **THEN** 先用既有更新链路显式清空旧路径相关 `disk_*` 与 `disk_checked_at`；同帧只有 B（或 overlay-only）的完整新样本才可回填，旧 A 的字节不进入新路径
+
+### Requirement: 评估只使用当前可信测量
+
+磁盘调度和动作前检查 SHALL 使用与接收相同的完整性、路径一致性条件，并要求 `disk_checked_at` 非空且未超过允许最大年龄（初值 3600 秒，且 MUST NOT 小于 Node 既有缓存 TTL 900 秒与 du 超时 600 秒之和 1500 秒）。不满足时 MUST NOT pause、重置冻结、发超限邮件、升级删除或清理挂载；仍保留既有冻结记录、机器不可用补偿与人工宽限。
+
+`mount_path_status=unresolved` 本身 MUST NOT 阻断同路径有效测量；`mount_path_status=resolved` 本身 MUST NOT 使失败测量有效。本变更 MUST NOT 改变恢复、冻结、长期、删除或清理资格，MUST NOT 重写 Q72 累计，MUST NOT 新增 review/invalid 保护，也 MUST NOT 把路径修正当删除/清理授权。
+
+#### Scenario: 测量过期不动作
+
+- **WHEN** `disk_total_bytes` 仍存在，但 `now - disk_checked_at` 超过允许最大年龄
+- **THEN** 调度跳过 pause、冻结重置、邮件、升级删除和挂载清理；保留最后已知值作历史，不写 0，不重开或顺延冻结周期
 
 #### Scenario: unresolved 路径上的有效测量
 
-- **WHEN** mount_path_status=unresolved，但已有业务路径、measurement_mount_path 与之一致，测量成功且时间在有效期内
-- **THEN** 样本有效，可用于磁盘自动处置；日志保留 unresolved 诊断但不阻断
+- **WHEN** `mount_path_status=unresolved`，但已有业务路径、该路径测量成功、组成完整且 `disk_checked_at` 在允许年龄内
+- **THEN** 样本可用于磁盘评估；日志保留 unresolved 诊断但不阻断，`resolved` 不是额外前置
 
-#### Scenario: 身份不可读但测量成功
+#### Scenario: resolved 但测量失败
 
-- **WHEN** Node 无法读取某目录对象编号/进程信息，但已确定业务路径且测量成功、组成完整
-- **THEN** 仍按测量有效性判断，不因 dev/inode/proc 不可读拒绝样本
-
-#### Scenario: 旧 Node 缺真实测量时间
-
-- **WHEN** 旧 Node 只给字节数或缺少 measured_at，但没有目录身份字段
-- **THEN** 标记测量 unverified，说明缺真实测量时间；不得解释成缺目录身份，也不得放行自动处置
-
-### Requirement: 统一接收与乱序/新鲜性
-
-WSS、HTTP 手动刷新及其他磁盘写入口 SHALL 共用同一路径修正、测量接收和排序规则。退役连接、旧连接代际、旧于当前观测的 HTTP 响应、同 epoch 较小 seq 或同 seq 内容不同的样本 MUST NOT 覆盖当前状态；新链路在首个完整新协议观测前不恢复自动处置资格。路径修正也受同一顺序约束，旧响应不得把已修正路径改回旧 Source。手动刷新 MUST NOT 把缺失/错误字节转成零，也不得用当前接收时间冒充 measured_at。
-
-#### Scenario: 旧 HTTP 刷新晚到
-
-- **WHEN** 当前已接受较新的路径/测量后，较早发起的手动刷新响应才返回
-- **THEN** 拒绝其覆盖路径或刷新测量时间，记录被拒原因；不得回退到旧 configured_mount_path
-
-#### Scenario: 同 epoch 倒序样本
-
-- **WHEN** 同 collector_epoch 内收到较小 observation_seq，或同 seq 内容不同的样本
-- **THEN** 拒绝覆盖当前测量；等于当前 seq 且内容一致的心跳不刷新 measured_at
-
-#### Scenario: 手动刷新缺字段
-
-- **WHEN** 手动刷新返回只有数字的旧格式，或缺失字段被解析为空
-- **THEN** 按测量未验证保存，不写零、不用接收时间冒充测量时间、不解除已有异常
-
-### Requirement: 验证中断不额外顺延冻结倒计时
-
-按照 Q72 用户决策，已经冻结的周期出现路径/测量无效观测时 SHALL 保留原冻结锚点，MUST NOT 仅因采集、路径诊断或测量中断增加倒计时补偿，也不新增 review/invalid 状态阻止恢复后的累计删除。恢复可信高用量后 SHALL 按原累计有效天数判断升级删除；机器不可用窗口补偿及人工宽限 SHALL 继续遵守现有规则。无效观测本身 MUST NOT 触发删除，也不得重开冻结周期。
-
-#### Scenario: 超过升级阈值的采集盲区后恢复
-
-- **WHEN** 冻结后失去可信测量，数日后恢复且用量仍超限
-- **THEN** 若累计有效冻结天数达到阈值、机器可管辖且不在人工宽限期，允许本轮按既有规则升级删除；采集异常期不另行扣除
-
-#### Scenario: 路径 unresolved 中断
-
-- **WHEN** 冻结期间路径诊断长期 unresolved，但已有业务路径和有效高用量测量
-- **THEN** 仍按有效测量与 Q72 累计处理，不因诊断状态额外跳过或顺延
-
-### Requirement: 路径/测量可观测且不越权
-
-查询及诊断 SHALL 分开呈现业务路径、configured_mount_path、mount_path_status、mount_path_observed_at、测量状态、真实测量时间、接收时间和最后已知数值；历史值必须标注不可处置，路径诊断 unresolved 与 measurement_error 分开。路径修正和测量日志 SHALL 可检索、节流。Ctrl MUST NOT 依据 inode 或路径修正执行自动删除/清理授权；既有路径/权限检查和失败审计保留，不新增 inode 清理门禁，也不宣称 Q70 的跨进程删除原子性。
-
-#### Scenario: 历史数字与路径诊断并存
-
-- **WHEN** 最新测量为 error/stale，但数据库保留最后成功数字和 unresolved 路径诊断
-- **THEN** 查询显示历史值标签、测量状态与独立路径诊断，不显示为当前正常用量
+- **WHEN** `mount_path_status=resolved`，但 du 失败、组成缺失或 `measured_at` 无效
+- **THEN** 不因路径已确认而接受该失败帧的数字，不刷新既有成功时间；同路径最后成功样本仍按原有效年龄判断，路径变化清空或旧样本过期后按无当前可信测量跳过动作，不持久化最新尝试状态
 
 #### Scenario: 路径修正不等于删除授权
 
-- **WHEN** Node 修正了 bind_mount_path
-- **THEN** 后续删除/清理仍走既有权限、路径和业务检查；不得仅凭路径/目录编号修正调用删除
-
-## Data model appendix (delta)
-
-### containers 磁盘测量增量
-
-以下列在实现迁移时加入 `containers`；归档时同步主 spec 的 Data model appendix。不新增目录身份列。
-
-| 字段 | 建议类型及默认 | 语义 |
-| --- | --- | --- |
-| `disk_measurement_status` | `String(24)`，默认 `unverified` | `ok / measuring / stale / error / unverified` |
-| `disk_measured_at` | 可空 UTC DateTime | 合计真实测量发生时间 |
-| `disk_received_at` | 可空 UTC DateTime | Ctrl 接收该事实时间，只用于排序/排障 |
-| `disk_observation` | 可空 JSON | `protocol_version`、`collector_epoch`、`observation_seq`、`measurement_mount_path`、`mount_path_status`、`configured_mount_path`、`mount_path_observed_at`、原因；不保存 proc 临时路径或 dev/inode 授权 |
-
-既有 `bind_mount_path` 为业务路径；`disk_overlay_rw_bytes`、`disk_bind_mount_bytes`、`disk_total_bytes` 保留最近一次有效数值。`disk_checked_at` 只作兼容字段，MUST NOT 充当真实测量时间、路径核对时间或授权依据。
+- **WHEN** Node 修正了 `bind_mount_path`
+- **THEN** 后续删除/清理仍走既有权限、路径和业务检查；不得仅凭路径修正或目录对象编号调用删除，也不宣称 Q70 跨进程原子
