@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from ...config import CommsConfig
-from ...constant import ContainerStatus, MachineStatus, MachineTypes
+from ...constant import ContainerStatus, MachineStatus, MachineTypes, OperationType
 from ...models.containers import Container
 from ...models.machine import Machine
 from ...models.operation_log import OperationLog
@@ -354,21 +354,22 @@ def test_set_maintenance_missing_machine_returns_false(db_session):
 # 故守卫随之移除，断言本身保留。
 
 
-def test_apply_container_status_snapshot_removes_db_container_missing_on_node(db_session):
+def test_apply_container_status_snapshot_marks_db_container_missing_on_node_pending(db_session):
     machine = create_machine()
     container = create_container(machine=machine, name="missing_on_node", status=ContainerStatus.CREATING)
     container_id = container.id
 
-    # 非空快照中缺该容器 → 视为 Node 侧消失，复用删除清理
+    # 非空快照中缺该容器 → 只标待核实，保留有效记录与关联
     result = node_comms.apply_container_status_snapshot({"other_container": {"status": "online"}}, machine.id)
 
     db_session.expire_all()
     assert result["vanished"] == 1
-    assert containers_repo.get_by_id(container_id, session=db_session) is None
     retained = containers_repo.get_by_id(container_id, session=db_session, include_invalid=True)
     assert retained is not None
-    assert retained.is_valid is False
-    assert retained.deleted_trigger == "node_vanished"
+    assert retained.is_valid is True
+    assert retained.status_source == "snapshot_missing"
+    assert retained.status_unknown_since is not None
+    assert retained.deleted_trigger is None
 
 
 def test_apply_container_status_snapshot_ignores_empty_snapshot(db_session):
@@ -571,7 +572,7 @@ def test_consume_frames_applies_snapshot_and_delete(monkeypatch):
     # 契约 C7：单消费者串行处理（快照落库线程化，事件循环只 receive）
     applied = []
     monkeypatch.setattr(node_comms, "apply_snapshot_batch", lambda batch: applied.append(batch))
-    monkeypatch.setattr(websocket, "_handle_container_deleted", lambda name, machine_id=None: applied.append(("del", name)))
+    monkeypatch.setattr(websocket, "_handle_container_vanish", lambda name, machine_id=None, **kwargs: applied.append(("del", name)))
     q = asyncio.Queue()
     q.put_nowait({"type": "snapshot_batch", "payload": [1]})
     q.put_nowait({"type": "delete", "container_name": "ghost_c"})
@@ -1078,11 +1079,11 @@ def test_apply_container_status_snapshot_backfills_port_mappings(db_session):
     assert c.port_mappings is not None
 
 
-def test_handle_container_deleted_scoped_to_sending_machine(db_session):
-    """delete 帧删除限定在发送机器内：跨机器同名容器不被误删（2026-09 修复）。
+def test_handle_container_vanish_scoped_to_sending_machine(db_session):
+    """名称消失线索限定在发送机器内：跨机器同名容器不被误标或误删。
 
     容器名只在单机内唯一——机器 A 的容器 X 消失，机器 B 的 delete 帧
-    不得抹掉机器 A 的记录。
+    不得改动机器 A 的记录。两条线索都只标待核实，不软删。
     """
     from ...models.containers import Container
 
@@ -1100,26 +1101,29 @@ def test_handle_container_deleted_scoped_to_sending_machine(db_session):
         with session_scope(commit=False) as session:
             return containers_repo.get_by_id(cid, session=session, include_invalid=True)
 
-    # 机器 B 报 shared_name 消失 → 只应删机器 B 的容器
-    node_comms._handle_container_deleted("shared_name", machine_b.id)
+    # 机器 B 报 shared_name 消失 → 只标机器 B 的容器待核实
+    node_comms._handle_container_vanish("shared_name", machine_b.id)
 
-    assert _valid(ca.id), "机器 A 的容器不应被机器 B 的 delete 帧删除"
-    assert not _valid(cb.id), "机器 B 自己的容器应被标记失效"
-    assert _retained(cb.id).is_valid is False
-    vanished_log = db_session.query(OperationLog).filter_by(target_id=cb.id).one()
-    assert vanished_log.detail["name"] == "shared_name"
-    assert vanished_log.detail["container_name"] == "shared_name"
-    assert vanished_log.detail["original_container_name"] == "shared_name"
-    assert vanished_log.detail["trigger"] == "node_vanished"
+    assert _valid(ca.id), "机器 A 的容器不应被机器 B 的 delete 帧改动"
+    assert _retained(ca.id).status_source is None
+    assert _valid(cb.id)
+    assert _retained(cb.id).status_source == "delete_frame"
+    assert _retained(cb.id).status_unknown_since is not None
+    # 线索不会写成功删除审计，也不会生成删除快照
+    assert db_session.query(OperationLog).filter_by(
+        target_id=cb.id, operation=OperationType.DELETE_CONTAINER,
+    ).count() == 0
 
-    # 无 machine_id → 拒绝删除（不降级全局查找）
-    node_comms._handle_container_deleted("shared_name")
+    # 无 machine_id → 拒绝（不降级全局查找）
+    node_comms._handle_container_vanish("shared_name")
+    assert _retained(ca.id).status_source is None
+    assert _retained(cb.id).status_source == "delete_frame"
+
+    # 机器 A 自己的线索只改 A，不删除
+    node_comms._handle_container_vanish("shared_name", machine_a.id, source="snapshot_missing")
     assert _valid(ca.id)
-
-    # 机器 A 自己的 vanished 路径正常删除
-    node_comms._handle_container_deleted("shared_name", machine_a.id)
-    assert not _valid(ca.id)
-    assert _retained(ca.id).is_valid is False
+    assert _retained(ca.id).status_source == "snapshot_missing"
+    assert _retained(cb.id).status_source == "delete_frame"
 
 
 @pytest.mark.parametrize("endpoint", ["containers", "machines"])

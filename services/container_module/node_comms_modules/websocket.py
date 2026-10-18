@@ -5,7 +5,7 @@ import json
 import logging
 
 from ....config import CommsConfig
-from .deletion import _handle_container_deleted
+from .deletion import _handle_container_vanish
 from .. import node_comms
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,9 @@ async def _consume_frames(queue: asyncio.Queue, uid: str, machine_id: int) -> No
             elif ftype == "delete":
                 container_name = frame.get("container_name")
                 if container_name:
-                    await asyncio.to_thread(_handle_container_deleted, container_name, machine_id)
+                    await asyncio.to_thread(
+                        _handle_container_vanish, container_name, machine_id, source="delete_frame",
+                    )
             else:
                 logger.warning("node link: consumer unknown frame type %r", ftype)
         except Exception as e:

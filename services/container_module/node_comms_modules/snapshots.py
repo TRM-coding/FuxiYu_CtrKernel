@@ -26,6 +26,17 @@ _NODE_STATUS_TO_CTRL = {
 }
 _NODE_STATUS_SKIP = {"pausing", "unpausing", "unknown"}
 
+# 仍是过渡态时只更新最后已知状态，不解除“待核实”。缺席标记的清除条件必须是
+# Node 给出可映射的稳定状态（online/offline/paused/failed），否则“重新出现”
+# 只是又一次未完成，不能当作已恢复。
+_TRANSITIONAL_CTRL_STATUSES = {
+    ContainerStatus.BUILDING,
+    ContainerStatus.CREATING,
+    ContainerStatus.STARTING,
+    ContainerStatus.STOPPING,
+    ContainerStatus.RESTARTING,
+}
+
 def _mark_machine_collect_error(machine_id: int | None) -> None:
     if machine_id is None:
         logger.warning("apply status snapshot: collect_error without machine_id; skipped")
@@ -121,13 +132,17 @@ def _apply_container_status_entry(name, entry, container, session) -> str:
     if container is None:
         return "skipped"
     failed_reason = entry.get("failed_reason") or entry.get("error_reason")
-    containers_repo.update_container(
-        container.id, container_status=ctrl_status,
-        failed_reason=failed_reason if ctrl_status == ContainerStatus.FAILED else None,
-        failed_detail=entry.get("failed_detail") if ctrl_status == ContainerStatus.FAILED else None,
-        status_unknown_since=None, status_source=None,
-        port=entry.get("port"), port_mappings=entry.get("port_mappings"), session=session,
-    )
+    fields = {
+        "container_status": ctrl_status,
+        "failed_reason": failed_reason if ctrl_status == ContainerStatus.FAILED else None,
+        "failed_detail": entry.get("failed_detail") if ctrl_status == ContainerStatus.FAILED else None,
+        "port": entry.get("port"),
+        "port_mappings": entry.get("port_mappings"),
+    }
+    if ctrl_status not in _TRANSITIONAL_CTRL_STATUSES:
+        fields["status_unknown_since"] = None
+        fields["status_source"] = None
+    containers_repo.update_container(container.id, session=session, **fields)
     return "failed" if ctrl_status == ContainerStatus.FAILED else "updated"
 
 

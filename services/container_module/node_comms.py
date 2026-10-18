@@ -39,7 +39,7 @@ from .node_comms_modules.snapshots import (
     _resolve_snapshot_machine_id,
     _touch_machine_last_seen,
 )
-from .node_comms_modules.deletion import _handle_container_deleted
+from .node_comms_modules.deletion import _handle_container_vanish
 from .node_comms_modules.link import (
     LINK_PATH,
     build_link_ssl_context,
@@ -168,7 +168,7 @@ def apply_container_status_snapshot(data: dict, machine_id: int | None = None) -
     if runtime:
         _post_runtime_buffer("containers", {"machine_id": machine_id, "snapshot": runtime})
     for name in missing_names:
-        _handle_container_deleted(name, machine_id)
+        _handle_container_vanish(name, machine_id, source="snapshot_missing")
         result["vanished"] += 1
     _log_container_snapshot_summary(machine_id, result, len(data))
     return result

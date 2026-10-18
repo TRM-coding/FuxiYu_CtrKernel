@@ -1,95 +1,113 @@
 from __future__ import annotations
 
+import datetime
 import logging
+import time
 
-from ....constant import OperationType
 from ....extensions import session_scope
 from ....repositories import containers_repo
-from ...operation_log_tasks import log_failure, log_success
-from ..deleted_containers import record_deleted_container_artifacts
-from ..utils import _container_log_detail
 
 logger = logging.getLogger(__name__)
 
-def _handle_container_deleted(container_name: str, machine_id: int | None = None) -> None:
-    """Node 推 delete 帧：容器在 Node 侧消失 → 抹 Ctrl DB 记录（绑定 + 容器行）。
+# 名称线索只能表达“无法确认”，不能表达“确认已删除”。两条入口共用本函数：
+# - delete_frame：Node 显式 delete 帧（只带名字，没有 Docker 对象 ID）
+# - snapshot_missing：非空状态快照中缺少某个有效记录
+SOURCE_DELETE_FRAME = "delete_frame"
+SOURCE_SNAPSHOT_MISSING = "snapshot_missing"
+_VANISH_SOURCES = {SOURCE_DELETE_FRAME, SOURCE_SNAPSHOT_MISSING}
 
-    关联表（usercontainer/container_ssh_login/freeze/long_term）均 ondelete=CASCADE，
-    删容器行即级联清理。外部删除是异常路径，记录 warning。
+# 同一机器/容器/来源的线索在快照心跳下每 5 秒就会出现一次；诊断日志节流到
+# 60 秒一条，DB 标记本身仍按现状幂等更新。
+_VANISH_LOG_INTERVAL_SECONDS = 60.0
+_last_vanish_log: dict[tuple[int, int, str], float] = {}
 
-    作用域（2026-09 修复）：删除必须限定在发送机器内——容器名只在单机内唯一，
-    machine_id 由链路归属确定（apply_snapshot_batch / _consume_frames 传入）；
-    machine_id 缺失或名字不属于该机器 → 拒绝，避免跨机器重名误删他人容器记录。
+
+def _should_log_vanish(machine_id: int, container_id: int, source: str) -> bool:
+    key = (int(machine_id), int(container_id), source)
+    now = time.monotonic()
+    last = _last_vanish_log.get(key, 0.0)
+    if now - last < _VANISH_LOG_INTERVAL_SECONDS:
+        return False
+    _last_vanish_log[key] = now
+    return True
+
+
+def _clear_vanish_log_state() -> None:
+    """测试用：清空进程内节流状态；生产路径不调用。"""
+
+    _last_vanish_log.clear()
+
+
+def _handle_container_vanish(
+    container_name: str,
+    machine_id: int | None = None,
+    *,
+    source: str = SOURCE_DELETE_FRAME,
+) -> bool:
+    """把名称消失线索标成待核实，不软删、不清绑定、不写成功删除审计。
+
+    容器名在单机内才唯一，查找必须限定在发送机器内。历史已软删行（is_valid=false）
+    不会被本函数找到或修改：迟到线索不能复活/改写已失效记录，也不能给同名新代
+    贴旧代身份。返回是否实际更新了待核实标记。
     """
-    container_id = None
+
+    if source not in _VANISH_SOURCES:
+        logger.warning(
+            "container vanish clue: unknown source %r machine_id=%s container=%r (skip)",
+            source, machine_id, container_name,
+        )
+        return False
+    if machine_id is None:
+        logger.warning(
+            "container vanish clue: machine_id missing source=%s container=%r (refuse)",
+            source, container_name,
+        )
+        return False
+    if not container_name:
+        logger.warning("container vanish clue: empty container name machine_id=%s (skip)", machine_id)
+        return False
+
     try:
         with session_scope() as session:
-            if machine_id is None:
-                logger.warning("node link delete: machine_id missing for %r (refuse)", container_name)
-                log_failure(
-                    operator_user_id=None,
-                    operation=OperationType.DELETE_CONTAINER,
-                    target_type="container",
-                    target_id=0,
-                    detail={
-                        "name": container_name,
-                        "container_name": container_name,
-                        "original_container_name": container_name,
-                        "machine_id": None,
-                        "trigger": "node_vanished",
-                    },
-                    error_reason="machine_id_missing",
-                )
-                return
-            container_id = containers_repo.get_id_by_name_machine(container_name, machine_id, session=session)
+            container_id = containers_repo.get_id_by_name_machine(
+                container_name, machine_id, session=session,
+            )
             if container_id is None:
-                logger.debug("node link delete: container %r already gone or not on machine %s (skip)",
-                             container_name, machine_id)
-                return
-            record_deleted_container_artifacts(
-                container_id,
-                removed_trigger="node_vanished",
-                cleanup_context={"trigger": "node_vanished"},
-                session=session,
-            )
-            containers_repo.delete_container(
-                container_id,
-                deleted_trigger="node_vanished",
-                deleted_reason="vanished on node",
-                session=session,
-            )
-        logger.warning("node link delete: container %r (id=%s) removed from DB (vanished on node)",
-                       container_name, container_id)
-        # 审计：外部消失是删除的另一条路径（trigger=node_vanished），与 api/cleanup 一致入 op-log
-        try:
-            log_success(
-                         operator_user_id=None,
-                         operation=OperationType.DELETE_CONTAINER,
-                         target_type="container",
-                         target_id=container_id,
-                         detail={
-                             "name": container_name,
-                             "container_name": container_name,
-                             "original_container_name": container_name,
-                             "machine_id": machine_id,
-                             "trigger": "node_vanished",
-                         })
-        except Exception as le:
-            logger.warning("node link delete: op-log failed for %r: %s", container_name, le)
-    except Exception as e:
-        logger.warning("node link delete: failed to remove container %r: %s", container_name, e)
-        log_failure(
-            operator_user_id=None,
-            operation=OperationType.DELETE_CONTAINER,
-            target_type="container",
-            target_id=int(container_id or 0),
-            detail={
-                "name": container_name,
-                "container_name": container_name,
-                "original_container_name": container_name,
-                "machine_id": machine_id,
-                "trigger": "node_vanished",
-            },
-            error_reason=str(e),
-        )
+                logger.debug(
+                    "container vanish clue: no active record source=%s machine_id=%s container=%r (skip)",
+                    source, machine_id, container_name,
+                )
+                return False
+            container = containers_repo.get_by_id(container_id, session=session)
+            if container is None:
+                return False
 
+            observed_at = datetime.datetime.utcnow()
+            previous_source = container.status_source
+            previous_since = container.status_unknown_since
+            since = previous_since or observed_at
+            changed = previous_source != source or previous_since is None
+            if changed:
+                containers_repo.update_container(
+                    container.id,
+                    status_unknown_since=since,
+                    status_source=source,
+                    session=session,
+                )
+            container_id = container.id
+            container_name = container.name
+    except Exception as exc:
+        logger.warning(
+            "container vanish clue failed: source=%s machine_id=%s container=%r error=%s",
+            source, machine_id, container_name, exc,
+        )
+        return False
+
+    if _should_log_vanish(machine_id, container_id, source):
+        logger.warning(
+            "container vanish clue: source=%s machine_id=%s container_id=%s container=%s "
+            "observed_at=%s status_unknown_since=%s previous_source=%s changed=%s",
+            source, machine_id, container_id, container_name,
+            observed_at.isoformat(), since.isoformat(), previous_source, changed,
+        )
+    return changed
