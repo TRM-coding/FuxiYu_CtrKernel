@@ -296,6 +296,22 @@ def test_invalid_measured_at_rejects_measurement_but_still_applies_path(app, db_
     assert row.disk_checked_at is None
 
 
+def test_new_protocol_missing_measured_at_rejects_measurement_but_keeps_path(app, db_session):
+    _root, machine, container = create_container_graph()
+    _set_disk(db_session, container)
+
+    result = _apply(container, machine.id, _frame(
+        container, status="resolved", path="/home/u/containers/b/",
+        total=1000, overlay=400, bind=600, measured_at=None,
+    ))
+
+    row = _row(db_session, container.id)
+    assert result == {"updated": 1, "skipped": 0}
+    assert row.bind_mount_path == "/home/u/containers/b/"
+    assert row.disk_total_bytes is None
+    assert row.disk_checked_at is None
+
+
 def test_future_measured_at_is_rejected_without_touching_existing_facts(app, db_session):
     _root, machine, container = create_container_graph()
     checked = datetime.utcnow() - timedelta(minutes=5)

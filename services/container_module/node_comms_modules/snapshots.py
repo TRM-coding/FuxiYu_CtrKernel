@@ -285,6 +285,10 @@ def _apply_disk_usage_entry(name, usage, container, machine_id, session) -> bool
         reject_reason = "path_inconsistent"
     elif measured_error == "invalid":
         reject_reason = "invalid_measured_at"
+    elif has_path_status and measured_error == "missing":
+        # 新协议必须带真实 measured_at；缺失只对无 mount_path_status 的旧 Node
+        # 帧按接收时间兼容，不能把新协议的缓存心跳当成新测量。
+        reject_reason = "measured_at_missing"
     elif total_bytes is None:
         reject_reason = "total_bytes_missing"
     elif overlay_incomplete:
@@ -339,6 +343,7 @@ _DISK_MEASUREMENT_FIELDS = {
 # 进程内 no_bind 标记：只用于拒绝旧 Node 帧把已明确清空的路径重建。不持久化；
 # Ctrl 重启后丢失是已写明的兼容边界（不为此新增列）。
 _NO_BIND_CONTAINERS: set[int] = set()
+# 允许 5 分钟的 Node/Ctrl 时钟偏差；超过按无效测量处理，不刷新测量时间。
 _MEASURED_AT_FUTURE_TOLERANCE = datetime.timedelta(minutes=5)
 
 
