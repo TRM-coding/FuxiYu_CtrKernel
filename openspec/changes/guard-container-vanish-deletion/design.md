@@ -2,7 +2,7 @@
 
 ## Context
 
-Ctrl 从 Node WSS 接收显式 `delete` 帧，也把非空状态快照中缺少的数据库容器名称交给同一个 `_handle_container_deleted` 软删函数。该函数按 `(machine_id, name)` 找当前有效记录，不知道帧对应的 Docker 对象 ID。`containers` 表已有 `status_unknown_since/status_source`，可表示暂时无法确认的状态。本变更是既有 `backend--table-containers` 的增量，按数据表组织，不新增独立能力或近似 capability。
+改造前 Ctrl 从 Node WSS 接收显式 `delete` 帧，也把非空状态快照中缺少的数据库容器名称交给同一个名称软删函数。该函数按 `(machine_id, name)` 找当前有效记录，不知道帧对应的 Docker 对象 ID。`containers` 表已有 `status_unknown_since/status_source`，可表示暂时无法确认的状态。本变更是既有 `backend--table-containers` 的增量，按数据表组织，不新增独立能力或近似 capability。
 
 ## Goals / Non-Goals
 
@@ -46,5 +46,5 @@ Ctrl 从 Node WSS 接收显式 `delete` 帧，也把非空状态快照中缺少�
 
 - `services/container_module/node_comms_modules/snapshots.py`：状态快照应用与 `status_unknown_since/status_source` 清除。
 - `services/container_module/node_comms.py`：`apply_container_status_snapshot` 的缺席名称处理。
-- `services/container_module/node_comms_modules/deletion.py`：`_handle_container_deleted` 与 `node_vanished` 审计。
+- `services/container_module/node_comms_modules/deletion.py`：`_handle_container_vanish` 保守待核实入口与来源诊断（不再写删除成功审计）。
 - `services/container_module/node_comms_modules/websocket.py`：`delete` 帧消费入口。
