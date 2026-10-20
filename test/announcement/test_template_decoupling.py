@@ -9,6 +9,8 @@
 本轮只跑受控本地 SQLite，不触达真实数据库 / SMTP / 宿主操作。
 """
 
+import json
+
 import pytest
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
@@ -209,12 +211,16 @@ def test_q07_save_draft_ignores_template_id_input(client, monkeypatch, db_sessio
     assert assert_json_success(detail)["draft"]["content"] == "第二次编辑的正文"
 
 
-def test_q07_reopening_draft_never_replays_template_over_edited_content(client, monkeypatch, db_session):
-    """选模板 → 编辑 → 保存 → 改模板 → 删模板 → 重开：拿到的是用户快照。"""
+@pytest.mark.parametrize("remove_template", [False, True], ids=["edited", "deleted"])
+def test_q07_reopening_draft_never_replays_template_over_edited_content(
+    client, monkeypatch, db_session, remove_template
+):
+    """模板仍在但已修改，或已删除时重开/列出，均返回完整用户快照。"""
 
     user = create_user(operator=True)
     mock_operator_token(monkeypatch, _ANNOUNCEMENT_API, user_id=user.id)
     template = _make_template(user, subject="模板主题", body="模板初值")
+    targets = json.dumps([{"type": "user", "id": user.id}])
 
     saved = assert_json_success(client.post(
         "/api/announcements/drafts/save",
@@ -224,6 +230,7 @@ def test_q07_reopening_draft_never_replays_template_over_edited_content(client, 
             # 编辑器在模板初值之上继续编辑后的结果
             "content": "模板初值 + 用户补充的内容",
             "raw_content": "模板初值 + 用户补充的内容",
+            "targets": targets,
             "template_id": template.id,
         },
     ))
@@ -233,11 +240,25 @@ def test_q07_reopening_draft_never_replays_template_over_edited_content(client, 
         announcement_repo.update_template(
             template.id, body_template="模板被改成了别的内容", session=session
         )
-    # 再被删除
-    with session_scope() as session:
-        assert announcement_repo.delete_template(template.id, session=session) is True
+    if remove_template:
+        with session_scope() as session:
+            assert announcement_repo.delete_template(template.id, session=session) is True
 
     detail = client.get(
         f"/api/announcements/drafts/{saved['draft_id']}", headers=_OPERATOR_HEADERS
     )
-    assert assert_json_success(detail)["draft"]["content"] == "模板初值 + 用户补充的内容"
+    draft_view = assert_json_success(detail)["draft"]
+    assert draft_view["id"] == saved["draft_id"]
+    assert draft_view["title"] == "模板主题"
+    assert draft_view["content"] == "模板初值 + 用户补充的内容"
+    assert draft_view["raw_content"] == "模板初值 + 用户补充的内容"
+    assert draft_view["targets"] == targets
+    assert draft_view["created_by"] == user.id
+    assert isinstance(draft_view["created_by"], int)
+    assert "template_id" not in draft_view
+
+    listed = assert_json_success(
+        client.get("/api/announcements/drafts", headers=_OPERATOR_HEADERS)
+    )
+    assert listed["total"] == 1
+    assert listed["drafts"][0] == draft_view
