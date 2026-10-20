@@ -122,6 +122,8 @@ def _build_container_detail(container, machine, bindings, long_term, cleanup, fr
     return {
         **_build_container_common_fields(container, machine, bindings),
         "image_dockerfile": container_image_dockerfile(container),
+        # 宿主 bind 路径：只回显容器行已有值，不联系 Node、不从名称/端口推导。
+        "bind_mount_path": getattr(container, "bind_mount_path", None),
         # 启动命令：NULL 与 "" 都折成 None（= 平台默认），读侧只见两态
         "entrypoint": (getattr(container, "entrypoint", None) or "").strip() or None,
         "memory_gb": container.memory_gb,

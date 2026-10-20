@@ -72,6 +72,8 @@ class container_detail_information(BaseModel):
     disk_usage: dict | None = None
     runtime_metrics: dict | None = None
     freeze_state: dict | None = None
+    # 宿主 bind 路径：容器行已有值的只读回显，空值/旧响应均按“未记录”。
+    bind_mount_path: str | None = None
     # alloc/选择卡 派生字段（曾缺失被 extra=ignore 静默丢弃 → 响应 null，2026-09 修复）
     gpu_chosen_list: list[int] | None = None
     alloc_cpu_number: int | None = None

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 try:  # Pydantic v2
     from pydantic import ConfigDict, field_validator
@@ -34,6 +34,18 @@ class _CompatBaseModel(BaseModel):
             allow_population_by_field_name = True
             populate_by_name = True
             extra = "ignore"
+
+
+class _StrictRequestModel(_CompatBaseModel):
+    """请求模型：未声明字段必须报错，不能静默丢弃。"""
+
+    if ConfigDict is not None:
+        model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    else:  # pragma: no cover
+        class Config:
+            allow_population_by_field_name = True
+            populate_by_name = True
+            extra = "forbid"
 
 
 #####################
@@ -140,6 +152,29 @@ class CleanDeletedContainerMountRequest(_CompatBaseModel):
 class CleanDeletedContainerMountResponse(SuccessMessageResponse):
     deleted_id: int | None = None
     mount_cleanup_id: int | None = None
+
+
+class DeletedContainerMountUsageRequest(_StrictRequestModel):
+    """当前页已删容器 id；只收正整数，最多 100。
+
+    `extra="forbid"` 刻意不是 ignore：浏览器若携带 `mount_path`/`machine_id`，
+    必须按非法请求拒绝，不能静默丢弃后“看起来成功”。
+    """
+
+    deleted_ids: list[Annotated[StrictInt, Field(ge=1)]] = Field(..., max_length=100)
+
+
+class DeletedContainerMountUsageItem(_CompatBaseModel):
+    deleted_id: int
+    bytes: int | None = None
+    measured_at: str | None = None
+    pending: bool = False
+    error: str | None = None
+
+
+class DeletedContainerMountUsageResponse(_CompatBaseModel):
+    success: int = 1
+    usages: list[DeletedContainerMountUsageItem] = Field(default_factory=list)
 
 
 class ResurrectContainerRequest(_CompatBaseModel):
@@ -389,6 +424,8 @@ class ContainerDetailInformation(_CompatBaseModel):
     disk_usage: dict[str, Any] | None = None
     runtime_metrics: dict[str, Any] | None = None
     freeze_state: dict[str, Any] | None = None
+    # 宿主 bind 路径：只来自 containers.bind_mount_path；空值/旧响应按“未记录”。
+    bind_mount_path: str | None = None
 
 
 class ContainerDetailResponse(_CompatBaseModel):

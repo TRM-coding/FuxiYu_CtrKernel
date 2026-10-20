@@ -34,6 +34,40 @@ def test_get_container_detail_keeps_default_status_from_db(db_session, container
     assert info["effective_status"] == ContainerStatus.ONLINE.value
 
 
+def test_get_container_detail_returns_bind_mount_path_from_row(db_session, container_graph):
+    """详情只回显容器行已有 bind_mount_path，原值不改写。"""
+    _root, _machine, container = container_graph
+    container.bind_mount_path = "/home/alice/containers/detail_data"
+    db_session.commit()
+
+    info = container_tasks.get_container_detail_information(container.id)
+
+    assert info["bind_mount_path"] == "/home/alice/containers/detail_data"
+    db_session.expire_all()
+    assert db_session.get(Container, container.id).bind_mount_path == "/home/alice/containers/detail_data"
+
+
+def test_get_container_detail_bind_mount_path_none_without_node(monkeypatch, db_session, container_graph):
+    """空值按 null 返回，不从名称/机器/端口拼路径，也不联系 Node。"""
+    from ...services.container_module import node_comms
+
+    _root, machine, container = container_graph
+    container.bind_mount_path = None
+    db_session.commit()
+
+    def _unexpected_send(*args, **kwargs):
+        raise AssertionError("detail must not contact Node")
+
+    monkeypatch.setattr(node_comms, "send", _unexpected_send)
+
+    info = container_tasks.get_container_detail_information(container.id)
+
+    assert info["bind_mount_path"] is None
+    # 名称与机器地址都不是候选路径来源。
+    assert info["container_name"] == container.name
+    assert info["machine_ip"] == machine.machine_ip
+
+
 def test_get_container_detail_includes_cached_runtime_metrics(monkeypatch, db_session, container_graph):
     from ...services.container_module import node_comms
 

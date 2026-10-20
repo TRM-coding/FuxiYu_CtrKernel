@@ -44,6 +44,9 @@ from .container_module.deleted_containers import (  # 已删容器的快照、�
     build_deleted_container_page,
     resolve_mount_cleanup_request,
 )
+from .container_module.mount_usage import (  # 已删容器挂载用量只读查询
+    get_deleted_container_mount_usage as _query_deleted_container_mount_usage,
+)
 from .container_module.creation import (     # 创建族
     _ensure_create_target,
     _validate_create_params,
@@ -425,6 +428,15 @@ def update_role(
 
 def list_deleted_containers(page_number: int = 1, page_size: int = 20) -> dict:
     return build_deleted_container_page(page_number=page_number, page_size=page_size)
+
+
+def get_deleted_container_mount_usage(
+    deleted_ids: list[int],
+    *,
+    deadline_seconds: float | None = None,
+) -> dict:
+    """已删容器挂载用量：Ctrl 不缓存、不轮询，每次按当前页 id 只读查询。"""
+    return _query_deleted_container_mount_usage(deleted_ids, deadline_seconds=deadline_seconds)
 
 
 def get_container_disk_usage(container_id: int, timeout: float = 20.0) -> dict | None:

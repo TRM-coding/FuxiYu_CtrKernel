@@ -28,6 +28,8 @@ from ..schemas.container import (
     CreateContainerResponse,
     DeleteContainerRequest,
     DeleteContainerResponse,
+    DeletedContainerMountUsageRequest,
+    DeletedContainerMountUsageResponse,
     ListDeletedContainersRequest,
     ListDeletedContainersResponse,
     ListAllContainerBrefInformationRequest,
@@ -326,6 +328,22 @@ def list_deleted_containers_api(
     except Exception as e:
         return _error(500, f"Failed to list deleted containers: {e}", "list_failed")
     return {"success": 1, **result}
+
+
+@router.post("/get_deleted_container_mount_usage", response_model=DeletedContainerMountUsageResponse)
+def get_deleted_container_mount_usage_api(
+    payload: DeletedContainerMountUsageRequest = Body(...),
+    _: int = Depends(require_permission("container:manage")),
+):
+    """已删容器当前页挂载用量（只读；Ctrl 不缓存、不轮询）。"""
+
+    try:
+        # 契约：按原顺序去重后再逐项映射。
+        deleted_ids = list(dict.fromkeys(payload.deleted_ids))
+        result = container_service.get_deleted_container_mount_usage(deleted_ids)
+    except Exception as e:
+        return _error(500, f"Failed to query deleted container mount usage: {e}", "query_failed")
+    return {"success": 1, "usages": result.get("usages", [])}
 
 
 @router.post("/clean_deleted_container_mount", response_model=CleanDeletedContainerMountResponse)

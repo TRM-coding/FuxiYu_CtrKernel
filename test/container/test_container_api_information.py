@@ -1,8 +1,36 @@
+from contextlib import contextmanager
+
+from sqlalchemy import event
+
 from ...api import container_api, deps
 from ...constant import ContainerStatus
 from ...models.containers import Container
 from ...services import container_tasks
 from ..factories import create_container
+
+
+@contextmanager
+def _capture_sql(db_session):
+    """记录端点执行期间发出的 SQL，供只读断言使用。"""
+
+    statements = []
+    engine = db_session.get_bind()
+
+    def _before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _before_cursor_execute)
+    try:
+        yield statements
+    finally:
+        event.remove(engine, "before_cursor_execute", _before_cursor_execute)
+
+
+def _dml_statements(statements):
+    return [
+        statement for statement in statements
+        if statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))
+    ]
 
 
 def _auth(monkeypatch, *, valid=True, user_id=1):
@@ -41,6 +69,59 @@ def test_get_container_detail_api_success(client, monkeypatch):
 
     assert resp.status_code == 200
     assert resp.json()["container_info"]["container_name"] == "c"
+
+
+def test_get_container_detail_api_returns_bind_mount_path(client, monkeypatch, db_session):
+    _auth(monkeypatch)
+    container = create_container()
+    container.bind_mount_path = "/home/alice/containers/api_detail_data"
+    db_session.commit()
+
+    resp = client.post(
+        "/api/containers/get_container_detail_information",
+        json={"container_id": container.id},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["container_info"]["bind_mount_path"] == "/home/alice/containers/api_detail_data"
+
+
+def test_container_detail_information_schema_treats_missing_bind_mount_path_as_none():
+    """旧响应没有该字段时按“未记录”（null）降级，不拼猜。"""
+    from ...schemas.container import ContainerDetailInformation
+
+    parsed = ContainerDetailInformation(container_id=1)
+
+    assert parsed.bind_mount_path is None
+
+
+def test_get_container_detail_api_legacy_payload_missing_bind_mount_path(
+    client, monkeypatch, db_session,
+):
+    """旧服务响应缺字段 → API 仍 200 且按 null 返回；读取不写 DB。"""
+    _auth(monkeypatch)
+    container = create_container()
+    container.bind_mount_path = "/home/alice/containers/legacy_data"
+    db_session.commit()
+    monkeypatch.setattr(
+        container_api.container_service,
+        "get_container_detail_information",
+        lambda **kwargs: {"container_id": container.id, "container_name": container.name},
+    )
+
+    with _capture_sql(db_session) as statements:
+        resp = client.post(
+            "/api/containers/get_container_detail_information",
+            json={"container_id": container.id},
+        )
+
+    assert resp.status_code == 200
+    info = resp.json()["container_info"]
+    assert "bind_mount_path" in info
+    assert info["bind_mount_path"] is None
+    assert _dml_statements(statements) == []
+    db_session.expire_all()
+    assert db_session.get(Container, container.id).bind_mount_path == "/home/alice/containers/legacy_data"
 
 
 def test_container_status_api_missing_fields_returns_400(client, monkeypatch):
