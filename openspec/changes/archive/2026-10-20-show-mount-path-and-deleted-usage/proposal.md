@@ -6,8 +6,8 @@ Ctrl 已持久化 `containers.bind_mount_path`，但详情 builder 与响应模�
 
 本 change 只定义 Ctrl 侧契约；Node/Web 由各自同名配套 change 实现：
 
-- Node：[show-mount-path-and-deleted-usage](../../../../FuxiYu_NodeKernel/openspec/changes/show-mount-path-and-deleted-usage/proposal.md)
-- Web：[show-mount-path-and-deleted-usage](../../../../FuxiYu_Web/openspec/changes/show-mount-path-and-deleted-usage/proposal.md)
+- Node：[show-mount-path-and-deleted-usage](../../../../../FuxiYu_NodeKernel/openspec/changes/archive/2026-10-20-show-mount-path-and-deleted-usage/proposal.md)
+- Web：[show-mount-path-and-deleted-usage](../../../../../FuxiYu_Web/openspec/changes/archive/2026-10-20-show-mount-path-and-deleted-usage/proposal.md)
 
 本仓契约以下文为准，不依赖跳转阅读。
 

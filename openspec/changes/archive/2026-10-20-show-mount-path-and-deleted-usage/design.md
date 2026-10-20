@@ -8,8 +8,8 @@ Ctrl 已持久化 `containers.bind_mount_path`，详情 builder/响应模型未�
 
 配套 change（仅链接，契约以本文件与 delta 为准）：
 
-- Node：[show-mount-path-and-deleted-usage](../../../../FuxiYu_NodeKernel/openspec/changes/show-mount-path-and-deleted-usage/proposal.md)
-- Web：[show-mount-path-and-deleted-usage](../../../../FuxiYu_Web/openspec/changes/show-mount-path-and-deleted-usage/proposal.md)
+- Node：[show-mount-path-and-deleted-usage](../../../../../FuxiYu_NodeKernel/openspec/changes/archive/2026-10-20-show-mount-path-and-deleted-usage/proposal.md)
+- Web：[show-mount-path-and-deleted-usage](../../../../../FuxiYu_Web/openspec/changes/archive/2026-10-20-show-mount-path-and-deleted-usage/proposal.md)
 
 ## Goals / Non-Goals
 

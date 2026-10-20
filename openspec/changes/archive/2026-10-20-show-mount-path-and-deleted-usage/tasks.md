@@ -21,4 +21,11 @@
 
 - 本轮按用户实施授权完成代码、测试与任务勾选；不 commit/push，提交与归档由主代理处理。
 - 验证：`pytest test/container/test_deleted_mount_usage.py test/container/test_container_api_information.py test/container/test_container_tasks_information.py test/container/test_deleted_containers.py test/test_testing_safety_contract.py -q` 通过 180 项；`openspec validate show-mount-path-and-deleted-usage --strict` 与 `git diff --check` 通过。
+- 调度验收：Ctrl→Node 单请求 timeout 5 秒、整批 deadline 8 秒、按机器并发≤8；预算到期保留已完成结果，未完成/排队项返回 `node_timeout` 并取消未启动 future（不新增持久化/状态）。
 - Node/Web 由各自同名 change 负责，本 change 不写他仓。
+
+## 主代理最终验收
+
+- 本地 WSL 隔离 SQLite 定向与相关回归共 **227 passed**，包含本变更、详情、已删除列表、测试安全约束、原 WSS 协议回放、磁盘测量和挂载清理入参解析；未使用远程服务。
+- `test/container/test_mount_usage_cross_repo.py` 的 3 项回放实际执行：Node HTTP + 临时目录真实 du → Ctrl API 序列化与只读解析 → Web 真实纯函数。SQL 捕获无 INSERT/UPDATE/DELETE；真实成功样本、pending、TTL 命中、目录消失、未知错误均核对，零值与稳定失败使用明确的缓存种子态。
+- 主代理收紧已知 `du_failed` 的跨仓断言：必须保留 error/reason，不接受以通用 unavailable 掩盖已支持的契约错误。代码、测试与规格按阶段本地提交，生产部署不属于本轮验收。
