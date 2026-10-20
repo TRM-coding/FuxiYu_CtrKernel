@@ -6,9 +6,12 @@ from datetime import datetime
 from sqlalchemy import select
 
 from ..extensions import session_scope
+from ..models.auth_group import AuthGroup
 from ..models.containers import Container
+from ..models.image import Image
+from ..models.machine import Machine
+from ..models.user import User
 from ..models.usercontainer import UserContainer
-from ..repositories import auth_repo, image_repo, machine_repo, user_repo
 from ..repositories.operation_log_repo import (
     list_logs as _repo_list,
     serialize,
@@ -258,10 +261,53 @@ def list_operation_logs(
     }
 
 
+def _load_target_rows(model, target_ids: set[int]) -> dict[int, object]:
+    """按主键批量读取单一目标类型；每次读取使用独立只读会话。
+
+    不共享 session：即使某类查询触发 DBAPI/事务级异常，也只清空该类关联，
+    不会毒化后续类型的查询。
+    """
+
+    if not target_ids:
+        return {}
+    try:
+        with session_scope(commit=False) as session:
+            rows = session.scalars(
+                select(model).where(model.id.in_(sorted(target_ids)))
+            ).all()
+            return {row.id: row for row in rows}
+    except Exception:
+        logger.warning("operation log target enrichment failed for %s", model.__name__, exc_info=True)
+        return {}
+
+
+def _load_root_bindings(container_ids: set[int]) -> dict[int, UserContainer]:
+    """批量读取容器 root 绑定；每容器只保留一条，匹配原逐行 `.first()` 语义。"""
+
+    if not container_ids:
+        return {}
+    try:
+        with session_scope(commit=False) as session:
+            rows = session.scalars(
+                select(UserContainer).where(
+                    UserContainer.container_id.in_(sorted(container_ids)),
+                    UserContainer.role == ROLE.ROOT,
+                )
+            ).all()
+            bindings: dict[int, UserContainer] = {}
+            for row in rows:
+                bindings.setdefault(row.container_id, row)
+            return bindings
+    except Exception:
+        logger.warning("operation log root binding enrichment failed", exc_info=True)
+        return {}
+
+
 def _enrich_targets(logs: list[dict]) -> None:
     """给每条日志附加目标的可读信息（target_name/target_display_name；容器额外带 root_owner）。
 
-    批量取目标 id 后逐条查名（单页最多 page_size 条，N+1 可接受）。
+    先按 target_type 批量预取本页涉及的目标，再逐行回填，查询次数不随日志行数线性增长。
+    每类目标使用独立只读会话；返回字段、历史名称和代际判断保持不变，不引入缓存或新状态。
     target_name 仅用于当前仍可导航的目标；目标已删除时保留 detail 中的历史名称到
     target_display_name，前端展示名称但不提供错误导航。
     """
@@ -270,11 +316,12 @@ def _enrich_targets(logs: list[dict]) -> None:
         r["target_display_name"] = None
         r["root_owner"] = None
 
+    target_ids: dict[str, set[int]] = {}
     for r in logs:
         try:
             detail = r.get("detail") or {}
-            tid = r.get("target_id")
             tt = r.get("target_type")
+            tid = r.get("target_id")
             if isinstance(detail, dict):
                 if tt in {"machine", "container", "image", "rbac_group", "container_mount_cleanup", "mail", "announcement"}:
                     r["target_display_name"] = detail.get("name") or detail.get("container_name")
@@ -286,56 +333,71 @@ def _enrich_targets(logs: list[dict]) -> None:
                         keys = detail.get("setting_keys") or []
                         if keys:
                             r["target_display_name"] = ", ".join(str(key) for key in keys)
+            if tid is None or tt not in {"machine", "container", "user", "image", "rbac_group"}:
+                continue
+            target_ids.setdefault(tt, set()).add(int(tid))
+        except Exception:
+            continue
+
+    machines = _load_target_rows(Machine, target_ids.get("machine", set()))
+    containers = _load_target_rows(Container, target_ids.get("container", set()))
+    bindings = _load_root_bindings(target_ids.get("container", set()))
+    user_ids = set(target_ids.get("user", set()))
+    user_ids.update(binding.user_id for binding in bindings.values())
+    users = _load_target_rows(User, user_ids)
+    images = _load_target_rows(Image, target_ids.get("image", set()))
+    groups = _load_target_rows(AuthGroup, target_ids.get("rbac_group", set()))
+
+    for r in logs:
+        try:
+            detail = r.get("detail") or {}
+            tid = r.get("target_id")
+            tt = r.get("target_type")
             if tid is None:
                 continue
+            target_id = int(tid)
             if tt == "machine":
-                with session_scope(commit=False) as session:
-                    m = machine_repo.get_by_id(tid, session=session)
+                m = machines.get(target_id)
                 if m:
                     r["target_name"] = getattr(m, "machine_name", None)
                     r["target_display_name"] = r["target_display_name"] or r["target_name"]
             elif tt == "container":
-                with session_scope(commit=False) as session:
-                    c = session.get(Container, int(tid))
-                    if c:
-                        # 身份校验（id 复用 2026-09）：日志早于容器创建 = 上一代容器日志，
-                        # 不映射名称/超管，前端回退显示保存的历史名称、不做错误导航。
-                        log_dt = None
-                        if r.get("created_at"):
-                            try:
-                                log_dt = datetime.fromisoformat(str(r["created_at"]))
-                            except ValueError:
-                                log_dt = None
-                        c_created = getattr(c, "created_at", None)
-                        if c_created is not None and log_dt is not None and log_dt < c_created:
-                            r["target_name"] = None
-                            r["root_owner"] = None
-                            continue
-                        r["target_display_name"] = r["target_display_name"] or getattr(c, "name", None)
-                        if getattr(c, "is_valid", True):
-                            r["target_name"] = getattr(c, "name", None)
-                        else:
-                            r["target_name"] = None
-                    binding = session.scalars(
-                        select(UserContainer).where(
-                            UserContainer.container_id == int(tid),
-                            UserContainer.role == ROLE.ROOT,
-                        )
-                    ).first()
-                    if binding:
-                        r["root_owner"] = user_repo.get_name_by_id(binding.user_id, session=session)
+                c = containers.get(target_id)
+                if c:
+                    # 身份校验（id 复用 2026-09）：日志早于容器创建 = 上一代容器日志，
+                    # 不映射名称/超管，前端回退显示保存的历史名称、不做错误导航。
+                    log_dt = None
+                    if r.get("created_at"):
+                        try:
+                            log_dt = datetime.fromisoformat(str(r["created_at"]))
+                        except ValueError:
+                            log_dt = None
+                    c_created = getattr(c, "created_at", None)
+                    if c_created is not None and log_dt is not None and log_dt < c_created:
+                        r["target_name"] = None
+                        r["root_owner"] = None
+                        continue
+                    r["target_display_name"] = r["target_display_name"] or getattr(c, "name", None)
+                    if getattr(c, "is_valid", True):
+                        r["target_name"] = getattr(c, "name", None)
+                    else:
+                        r["target_name"] = None
+                binding = bindings.get(target_id)
+                if binding:
+                    # root_owner 是容器 + User 的联合展示字段；User 批量读取失败时保持为空，
+                    # 不影响容器自身的 target_name。
+                    owner = users.get(binding.user_id)
+                    r["root_owner"] = getattr(owner, "username", None)
             elif tt == "user":
-                with session_scope(commit=False) as session:
-                    if user_repo.get_by_id(tid, session=session) is not None:
-                        r["target_name"] = r["target_display_name"] or user_repo.get_name_by_id(tid, session=session)
+                user = users.get(target_id)
+                if user is not None:
+                    r["target_name"] = r["target_display_name"] or getattr(user, "username", None)
             elif tt == "image":
-                with session_scope(commit=False) as session:
-                    image = image_repo.get_by_id(tid, session=session)
+                image = images.get(target_id)
                 if image:
                     r["target_name"] = r["target_display_name"] or getattr(image, "name", None)
             elif tt == "rbac_group":
-                with session_scope(commit=False) as session:
-                    group = auth_repo.get_group_by_id(tid, session=session)
+                group = groups.get(target_id)
                 if group:
                     r["target_name"] = r["target_display_name"] or getattr(group, "name", None)
             elif tt in {"container_mount_cleanup", "system_setting"}:

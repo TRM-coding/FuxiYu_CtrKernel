@@ -142,9 +142,9 @@ def _persist_container_record(
     - `image_version_at`：**本次采用的配方所对应的模板版本时刻**。模板路径下是当前
       `images.updated_at`；快照路径下沿用该容器原有的值（内容没变）。
       它既用于判定"是否落后"，也用于推导镜像标签。
-    - `dockerfile_parts`：本次采用的**配方**（FROM / 平台注入 / 业务片段）。只用于展示与
-      精确还原，绝不参与身份或新鲜度判断。落库只写其中模板侧的两项（FROM 与业务片段）；
-      平台注入不落库——它永远取当下的系统设置（见 models/containers.py）。
+    - `dockerfile_parts`：本次采用的**配方**（FROM / 平台注入 / 业务片段 / ENTRYPOINT）。
+      只用于展示与精确还原，绝不参与身份或新鲜度判断。落库写其中模板侧的三项（FROM、
+      业务片段与启动命令）；平台注入不落库——它永远取当下的系统设置（见 models/containers.py）。
 
     运行标签**不落库**：它由归属标识 + 版本戳推导（`image_tasks.format_image_build_tag`），
     创建与恢复都只把推导结果发进构建段，不在行上留副本。

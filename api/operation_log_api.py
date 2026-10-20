@@ -66,6 +66,6 @@ def operation_log_stats_api(
             tz_offset_minutes=tz_offset_minutes,
         )
     except Exception as e:
-        return _error(500, f"stats failed: {e}", "list_failed")
+        return _error(500, f"stats failed: {e}", "stats_failed")
 
     return {"success": 1, **result}

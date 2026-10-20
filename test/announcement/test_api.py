@@ -165,6 +165,54 @@ def test_a06_list_templates(client, monkeypatch):
     assert_json_success(resp)
 
 
+@pytest.mark.parametrize("query", ["limit=0", "limit=201", "offset=-1", "limit=not-a-number"])
+def test_a06b_list_templates_rejects_invalid_pagination(client, monkeypatch, query):
+    """limit 1..200、offset >=0；越界沿用既有 400 invalid_payload。"""
+
+    mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
+    resp = client.get(f"/api/announcements/templates?{query}", headers=_operator_headers())
+
+    assert_json_error(resp, 400, "invalid_payload")
+
+
+def test_a06c_list_templates_paginates_beyond_200(client, monkeypatch):
+    """205 条模板时 200 上限仍可分页；Web 正常使用的 100/200 不破。"""
+
+    mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
+    user = _make_operator()
+    with session_scope() as session:
+        for index in range(205):
+            announcement_repo.create_template(
+                name=f"paged-template-{index}",
+                subject_template="主题",
+                body_template="正文",
+                created_by=user.id,
+                session=session,
+            )
+
+    first_page = client.get(
+        "/api/announcements/templates?limit=200&offset=0",
+        headers=_operator_headers(),
+    )
+    first_payload = assert_json_success(first_page)
+    assert len(first_payload["templates"]) == 200
+    assert first_payload["total"] == 205
+
+    last_page = client.get(
+        "/api/announcements/templates?limit=200&offset=200",
+        headers=_operator_headers(),
+    )
+    last_payload = assert_json_success(last_page)
+    assert len(last_payload["templates"]) == 5
+    assert last_payload["total"] == 205
+
+    web_default = client.get(
+        "/api/announcements/templates?limit=100",
+        headers=_operator_headers(),
+    )
+    assert len(assert_json_success(web_default)["templates"]) == 100
+
+
 def test_a07_get_template_by_id(client, monkeypatch):
     """A-07: 获取存在的模板 → 200。"""
     mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))

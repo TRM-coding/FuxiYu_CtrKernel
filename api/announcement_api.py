@@ -88,7 +88,7 @@ def _draft_view(draft) -> dict[str, Any]:
 def list_templates_api(
     request: Request,
     category: str | None = Query(default=None),
-    limit: int = Query(default=100, ge=1),
+    limit: int = Query(default=100, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     _: int = Depends(require_operator),
 ):

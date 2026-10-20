@@ -2,12 +2,16 @@
 
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import event, select
+from sqlalchemy.exc import OperationalError
 
 from ...repositories import operation_log_repo
+from ...services import operation_log_tasks
 from ...services.operation_log_tasks import list_operation_logs, operation_log_stats
-from ...constant import OperationType
+from ...constant import OperationType, ROLE
 from ..factories import create_user, create_machine, create_container, bind_user_container
+from ...models.auth_group import AuthGroup
+from ...models.image import Image
 from ...models.operation_log import OperationLog
 from ...services.operation_log_tasks import log_failure, log_success
 
@@ -218,3 +222,215 @@ def test_list_skips_identity_mapping_for_previous_generation_log(db_session):
     cur = by_op[OperationType.START_CONTAINER.value]
     assert cur["target_name"] == "c2"
     assert cur["root_owner"] == "alice"
+
+
+def test_list_enriches_every_supported_target_type(db_session):
+    """批量化必须保持各 target_type 的旧有回填口径。"""
+
+    machine = create_machine(machine_name="batch-machine")
+    owner = create_user(username="batch-owner")
+    container = create_container(machine=machine, name="batch-container")
+    bind_user_container(owner, container, role=ROLE.ROOT)
+    image = Image(name="batch-image", base_image="ubuntu:24.04", dockerfile_body="")
+    group = AuthGroup(name="batch-group", description="")
+    db_session.add_all([image, group])
+    db_session.commit()
+
+    entries = [
+        ("machine", machine.id, {}),
+        ("container", container.id, {}),
+        ("user", owner.id, {}),
+        ("image", image.id, {}),
+        ("rbac_group", group.id, {}),
+        ("system_setting", 0, {"setting_keys": ["container.cleanup_after_days", "announcement.mail_interval_seconds"]}),
+        ("container_mount_cleanup", 0, {"name": "mount-history"}),
+    ]
+    for target_type, target_id, detail in entries:
+        operation_log_repo.write(
+            session=db_session,
+            operator_user_id=None,
+            operation=OperationType.UPDATE_SETTING.value,
+            target_type=target_type,
+            target_id=target_id,
+            detail=detail,
+            success=True,
+        )
+    db_session.commit()
+
+    result = list_operation_logs(page=1, page_size=10)
+    by_type = {row["target_type"]: row for row in result["logs"]}
+
+    assert by_type["machine"]["target_name"] == "batch-machine"
+    assert by_type["container"]["target_name"] == "batch-container"
+    assert by_type["container"]["root_owner"] == "batch-owner"
+    assert by_type["user"]["target_name"] == "batch-owner"
+    assert by_type["image"]["target_name"] == "batch-image"
+    assert by_type["rbac_group"]["target_name"] == "batch-group"
+    assert by_type["system_setting"]["target_name"] == (
+        "container.cleanup_after_days, announcement.mail_interval_seconds"
+    )
+    assert by_type["container_mount_cleanup"]["target_name"] == "mount-history"
+
+
+def test_target_enrichment_query_count_does_not_grow_per_row(db_session):
+    """25 行容器日志的关联查询必须批量预取，而不是每行开 session 查三次。"""
+
+    machine = create_machine(machine_name="batch-query-machine")
+    for index in range(25):
+        owner = create_user(username=f"batch-query-owner-{index}")
+        container = create_container(machine=machine, name=f"batch-query-container-{index}")
+        bind_user_container(owner, container, role=ROLE.ROOT)
+        operation_log_repo.write(
+            session=db_session,
+            operator_user_id=None,
+            operation=OperationType.CREATE_CONTAINER.value,
+            target_type="container",
+            target_id=container.id,
+            detail={"name": container.name},
+            success=True,
+        )
+    db_session.commit()
+
+    statements: list[str] = []
+
+    def _record_select(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    engine = db_session.get_bind()
+    event.listen(engine, "before_cursor_execute", _record_select)
+    try:
+        result = list_operation_logs(page=1, page_size=100)
+    finally:
+        event.remove(engine, "before_cursor_execute", _record_select)
+
+    assert len(result["logs"]) == 25
+    assert all(row["target_name"].startswith("batch-query-container-") for row in result["logs"])
+    assert all(row["root_owner"].startswith("batch-query-owner-") for row in result["logs"])
+    # count + 分页 + containers + bindings + users：不随 25 行增长。
+    assert len(statements) <= 8, statements
+
+
+def test_target_type_query_failure_only_blanks_that_type(db_session, monkeypatch):
+    """单类批量预取失败时主日志仍返回，其它目标类型照常回填。"""
+
+    machine = create_machine(machine_name="failed-machine")
+    owner = create_user(username="surviving-owner")
+    container = create_container(machine=machine, name="surviving-container")
+    bind_user_container(owner, container, role=ROLE.ROOT)
+    for target_type, target_id in (("machine", machine.id), ("container", container.id)):
+        operation_log_repo.write(
+            session=db_session,
+            operator_user_id=None,
+            operation=OperationType.UPDATE_SETTING.value,
+            target_type=target_type,
+            target_id=target_id,
+            detail={},
+            success=True,
+        )
+    db_session.commit()
+
+    original_select = operation_log_tasks.select
+
+    def failing_select(model):
+        if model is operation_log_tasks.Machine:
+            raise RuntimeError("machine query failed")
+        return original_select(model)
+
+    monkeypatch.setattr(operation_log_tasks, "select", failing_select)
+
+    result = list_operation_logs(page=1, page_size=10)
+    by_type = {row["target_type"]: row for row in result["logs"]}
+
+    assert by_type["machine"]["target_name"] is None
+    assert by_type["container"]["target_name"] == "surviving-container"
+    assert by_type["container"]["root_owner"] == "surviving-owner"
+
+
+def test_user_query_failure_blanks_root_owner_only(db_session, monkeypatch):
+    """root_owner 依赖 User；User 批量读取失败时仅该联合字段和用户目标名称为空。"""
+
+    owner = create_user(username="failed-user-owner")
+    machine = create_machine(machine_name="user-failure-machine")
+    container = create_container(machine=machine, name="user-failure-container")
+    bind_user_container(owner, container, role=ROLE.ROOT)
+    image = Image(name="user-failure-image", base_image="ubuntu:24.04", dockerfile_body="")
+    db_session.add(image)
+    db_session.commit()
+
+    for target_type, target_id in (
+        ("container", container.id),
+        ("user", owner.id),
+        ("image", image.id),
+    ):
+        operation_log_repo.write(
+            session=db_session,
+            operator_user_id=None,
+            operation=OperationType.UPDATE_SETTING.value,
+            target_type=target_type,
+            target_id=target_id,
+            detail={},
+            success=True,
+        )
+    db_session.commit()
+
+    original_select = operation_log_tasks.select
+
+    def failing_select(model):
+        if model is operation_log_tasks.User:
+            raise RuntimeError("user query failed")
+        return original_select(model)
+
+    monkeypatch.setattr(operation_log_tasks, "select", failing_select)
+
+    result = list_operation_logs(page=1, page_size=10)
+    by_type = {row["target_type"]: row for row in result["logs"]}
+
+    assert by_type["container"]["target_name"] == "user-failure-container"
+    assert by_type["container"]["root_owner"] is None
+    assert by_type["user"]["target_name"] is None
+    # User 之后的类型仍使用独立 session 正常回填。
+    assert by_type["image"]["target_name"] == "user-failure-image"
+
+
+def test_user_dbapi_failure_does_not_poison_later_type_sessions(db_session):
+    """User 查询触发 DBAPI/事务级异常后，后续类型仍能独立查询并回填。"""
+
+    owner = create_user(username="dbapi-owner")
+    machine = create_machine(machine_name="dbapi-machine")
+    container = create_container(machine=machine, name="dbapi-container")
+    bind_user_container(owner, container, role=ROLE.ROOT)
+    image = Image(name="dbapi-image", base_image="ubuntu:24.04", dockerfile_body="")
+    db_session.add(image)
+    db_session.commit()
+
+    for target_type, target_id in (("container", container.id), ("image", image.id)):
+        operation_log_repo.write(
+            session=db_session,
+            operator_user_id=None,
+            operation=OperationType.UPDATE_SETTING.value,
+            target_type=target_type,
+            target_id=target_id,
+            detail={},
+            success=True,
+        )
+    db_session.commit()
+
+    engine = db_session.get_bind()
+
+    def _fail_user_select(conn, cursor, statement, parameters, context, executemany):
+        if "FROM USERS" in statement.upper():
+            raise OperationalError(statement, parameters, RuntimeError("simulated DB failure"))
+
+    event.listen(engine, "before_cursor_execute", _fail_user_select)
+    try:
+        result = list_operation_logs(page=1, page_size=10)
+    finally:
+        event.remove(engine, "before_cursor_execute", _fail_user_select)
+
+    by_type = {row["target_type"]: row for row in result["logs"]}
+
+    assert by_type["container"]["target_name"] == "dbapi-container"
+    assert by_type["container"]["root_owner"] is None
+    # User 失败后仍能新开 session 读取镜像，证明失败事务没有毒化后续类型。
+    assert by_type["image"]["target_name"] == "dbapi-image"

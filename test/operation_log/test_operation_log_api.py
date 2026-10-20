@@ -100,3 +100,35 @@ def test_stats_shape(client, monkeypatch):
     assert data["total"] == 5
     assert data["succeeded"] == 4
     assert data["by_operation"]["create_container"] == 2
+
+
+def test_list_failure_keeps_list_failed(client, monkeypatch):
+    _auth(monkeypatch)
+
+    def fail(**kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(operation_log_tasks, "list_operation_logs", fail)
+    resp = client.get("/api/admin/operation_logs")
+
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["success"] == 0
+    assert body["error_reason"] == "list_failed"
+    assert body["message"] == "query failed: boom"
+
+
+def test_stats_failure_uses_stats_failed(client, monkeypatch):
+    _auth(monkeypatch)
+
+    def fail(*, start=None, end=None, tz_offset_minutes=None):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(operation_log_tasks, "operation_log_stats", fail)
+    resp = client.get("/api/admin/operation_logs/stats")
+
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["success"] == 0
+    assert body["error_reason"] == "stats_failed"
+    assert body["message"] == "stats failed: boom"

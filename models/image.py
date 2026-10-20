@@ -28,11 +28,13 @@ class Image(db.Model):
     # `FROM ubuntu:24.04` 同一个道理。
     #
     # 可空且**空即默认**：留空表示"用平台默认"，即容器保持存活等你 SSH 进来
-    # （`tail -f /dev/null`）。默认值只写在 Node 一处，不冻进数据——否则将来想改默认值
-    # 就要写迁移，而且"空"的语义会糊（是用户没填，还是用户就想跑 tail？）。
+    # （`tail -f /dev/null`）。默认值 `PLATFORM_DEFAULT_ENTRYPOINT` 由 Ctrl 的构建器持有，
+    # 不冻进数据——否则将来想改默认值就要写迁移，而且"空"的语义会糊
+    # （是用户没填，还是用户就想跑 tail？）。
     #
-    # 它**不参与构建**：不进 tag、不进 Dockerfile、不影响"落后"判定。它是运行期参数，
-    # 所以刻意不做成 DockerfileParts 的第四个字段。
+    # 它**参与构建**（2026-09 决策）：构建器把裸命令渲染成最终 Dockerfile 的最后一行
+    # `ENTRYPOINT …`，因此它决定镜像内容，也参与配方指纹与"落后"判定；它就是
+    # `DockerfileParts` 的第四个字段，不是运行期参数。
     entrypoint: str | None = db.Column(db.String(255), nullable=True)
     # 可见范围：**唯一**决定可见性的字段（2026-09 决策）。此前"全员可见"是由
     # created_by_user_id IS NULL 派生的隐式规则，已退役——判定规则与 SQL 谓词都只有一处

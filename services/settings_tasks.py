@@ -13,6 +13,7 @@ from ..repositories import system_setting_repo
 from .operation_log_tasks import log_failure, log_success
 
 IMAGE_PLATFORM_INJECTION_KEY = "image.platform_injection_content"
+CLEANUP_REMINDER_HOURS_KEY = "container.cleanup_reminder_hours"
 DEFAULT_IMAGE_PLATFORM_INJECTION_CONTENT = r"""USER root
 SHELL ["/bin/sh", "-c"]
 RUN set -eu; \
@@ -79,7 +80,7 @@ SETTING_DEFINITIONS: tuple[SettingDefinition, ...] = (
         min_value=0,
     ),
     SettingDefinition(
-        key="container.cleanup_reminder_hours",
+        key=CLEANUP_REMINDER_HOURS_KEY,
         label="清理提醒节点",
         group="容器清理",
         value_type="text",
@@ -267,6 +268,41 @@ def _parse_value(value: str | None, definition: SettingDefinition) -> object:
     return raw
 
 
+def _coerce_integer(key: str, value: object) -> int:
+    """严格整数：不把 1.5 静默截断成 1，也不接受 bool / 整数字符串以外的文本。"""
+
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be an integer, got {value!r}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise ValueError(f"{key} must be an integer, got {value!r}")
+        return int(value)
+    try:
+        return int(str(value).strip(), 10)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be an integer, got {value!r}") from exc
+
+
+def _validate_reminder_hours(key: str, text: str) -> str:
+    """提醒节点必须是逗号分隔的正整数；空项、非整数、0/负数都会让整次写入失败。"""
+
+    if not text.strip():
+        raise ValueError(f"{key} must contain at least one positive integer hour")
+    for token in text.split(","):
+        item = token.strip()
+        if not item:
+            raise ValueError(f"{key} contains an empty reminder node")
+        try:
+            hours = int(item, 10)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} contains a non-integer reminder node: {item!r}") from exc
+        if hours <= 0:
+            raise ValueError(f"{key} reminder node must be positive: {item!r}")
+    return text
+
+
 def _validate_value(key: str, value: object) -> str:
     definition = _SETTING_BY_KEY.get(key)
     if definition is None:
@@ -283,10 +319,7 @@ def _validate_value(key: str, value: object) -> str:
         raise ValueError(f"{key} must be boolean")
 
     if definition.value_type == "integer":
-        try:
-            number = int(value)
-        except Exception as exc:
-            raise ValueError(f"{key} must be integer") from exc
+        number = _coerce_integer(key, value)
         if definition.min_value is not None and number < definition.min_value:
             raise ValueError(f"{key} must be >= {definition.min_value}")
         if definition.max_value is not None and number > definition.max_value:
@@ -296,6 +329,8 @@ def _validate_value(key: str, value: object) -> str:
     text = str(value)
     if definition.key == IMAGE_PLATFORM_INJECTION_KEY and not text.strip():
         raise ValueError(f"{key} cannot be empty")
+    if definition.key == CLEANUP_REMINDER_HOURS_KEY:
+        return _validate_reminder_hours(key, text)
     return text
 
 
@@ -533,7 +568,7 @@ def get_long_term_container_limit() -> int:
 
 
 def get_container_cleanup_reminder_hours() -> str:
-    return get_text_setting("container.cleanup_reminder_hours", "72,24,12")
+    return get_text_setting(CLEANUP_REMINDER_HOURS_KEY, "72,24,12")
 
 
 def get_container_disk_check_enabled() -> bool:
