@@ -1,12 +1,16 @@
 """公告系统模型层测试（M-01 ~ M-08）。"""
 
+import datetime as dt
 import json
 
 import pytest
+from sqlalchemy import inspect
 from sqlalchemy.exc import IntegrityError
 
 from ...constant import AnnouncementStatus, AnnouncementTemplateCategory
+from ...extensions import session_scope
 from ...models.announcement import Announcement, AnnouncementDraft, AnnouncementTemplate
+from ...repositories import announcement_repo
 from ..factories import create_user
 
 
@@ -49,7 +53,6 @@ def test_m02_draft_create_full_fields(db_session):
         raw_content="{{greeting}} 正文",
         created_by=user.id,
         targets='[{"type":"user","id":1}]',
-        template_id=None,
     )
     db_session.add(draft)
     db_session.commit()
@@ -58,7 +61,67 @@ def test_m02_draft_create_full_fields(db_session):
     assert draft.title == "草稿标题"
     assert draft.content == "正文内容"
     assert draft.created_by == user.id
-    assert draft.creator == user
+    assert draft.creator.id == user.id
+    # Q06/Q07：草稿不再有模板关联列
+    assert not hasattr(draft, "template_id")
+
+
+def test_m02b_draft_readback_contract(db_session):
+    """按主键重开：字段类型/空值、默认时间、创建者稳定主键都与落库值一致。"""
+
+    owner = create_user()
+    targets = json.dumps([{"type": "user", "id": owner.id}])
+
+    before = dt.datetime.utcnow()
+    with session_scope() as session:
+        minimal = announcement_repo.save_draft(
+            title="最小草稿",
+            content="最小正文",
+            created_by=owner.id,
+            session=session,
+        )
+        minimal_id = minimal.id
+        full = announcement_repo.save_draft(
+            title="完整草稿",
+            content="完整正文",
+            raw_content="{{greeting}} 完整正文",
+            targets=targets,
+            created_by=owner.id,
+            session=session,
+        )
+        full_id = full.id
+    after = dt.datetime.utcnow()
+
+    # 新会话按主键读回，避免把创建时对象的内存值当成持久化结果。
+    with session_scope(commit=False) as session:
+        minimal = announcement_repo.get_draft_by_id(minimal_id, session=session)
+        full = announcement_repo.get_draft_by_id(full_id, session=session)
+
+        assert minimal is not None
+        assert full is not None
+        assert isinstance(minimal.id, int) and minimal.id == minimal_id
+        assert isinstance(full.id, int) and full.id == full_id
+
+        for draft in (minimal, full):
+            assert isinstance(draft.title, str)
+            assert isinstance(draft.content, str)
+            assert isinstance(draft.created_by, int)
+            assert draft.created_by == owner.id
+            assert draft.creator is not None and draft.creator.id == owner.id
+            assert isinstance(draft.created_at, dt.datetime)
+            assert isinstance(draft.updated_at, dt.datetime)
+            assert before <= draft.created_at <= after
+            assert before <= draft.updated_at <= after
+
+        # 可空列未给值时保持 NULL，而不是空串或字符串 "None"。
+        assert minimal.raw_content is None
+        assert minimal.targets is None
+
+        # 非空 Text 列按原样往返，targets 仍是 JSON 文本而非被解析成对象。
+        assert full.raw_content == "{{greeting}} 完整正文"
+        assert full.targets == targets
+        assert isinstance(full.raw_content, str)
+        assert isinstance(full.targets, str)
 
 
 # ── M-03: AnnouncementTemplate 唯一名 ───────────────────────────────────
@@ -165,9 +228,9 @@ def test_m06_template_source_announcement_id(db_session):
     assert t2.source_announcement_id == 42
 
 
-# ── M-07: Draft ↔ Template 关联 ────────────────────────────────────────
+# ── M-07: 草稿不持久关联模板（Q06/Q07） ─────────────────────────────────
 
-def test_m07_draft_template_relation(db_session):
+def test_m07_draft_has_no_template_association(db_session):
     user = create_user()
     template = AnnouncementTemplate(
         name="模板",
@@ -182,13 +245,20 @@ def test_m07_draft_template_relation(db_session):
         title="草稿",
         content="正文",
         created_by=user.id,
-        template_id=template.id,
     )
     db_session.add(draft)
     db_session.commit()
 
-    assert draft.template is not None
-    assert draft.template.name == "模板"
+    # 选择模板只是编辑器侧复制初值；草稿模型既没有关联列也没有关联关系。
+    assert not hasattr(draft, "template_id")
+    assert not hasattr(draft, "template")
+    columns = {column["name"] for column in inspect(db_session.get_bind()).get_columns("announcement_drafts")}
+    assert "template_id" not in columns
+
+    # 删除模板不受草稿影响，草稿内容也不受影响
+    assert announcement_repo.delete_template(template.id, session=db_session) is True
+    db_session.refresh(draft)
+    assert draft.content == "正文"
 
 
 # ── M-08: Announcement.source_draft_id ─────────────────────────────────

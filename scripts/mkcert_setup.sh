@@ -167,8 +167,7 @@ for h in "${EXTRA_HOSTS[@]}"; do
 done
 
 echo "Generating certificate for: ${SAN_LIST[*]}"
-# name the files according to first SAN (localhost) for backwards-compatibility
-mkcert -cert-file "$CERT_DIR/localhost.pem" -key-file "$CERT_DIR/localhost-key.pem" "${SAN_LIST[@]}"
+mkcert -cert-file "$CERT_DIR/ctrl.pem" -key-file "$CERT_DIR/ctrl-key.pem" "${SAN_LIST[@]}"
 
 echo "Certificates written to: $CERT_DIR"
 echo

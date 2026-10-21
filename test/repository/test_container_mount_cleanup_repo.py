@@ -2,7 +2,6 @@
 
 from datetime import datetime, timedelta
 
-from ...extensions import db
 from ...models.container_mount_cleanup import ContainerMountCleanup
 from ...repositories import container_mount_cleanup_repo
 
@@ -15,6 +14,7 @@ class TestMountCleanupRepo:
             machine_id=2,
             mount_path="/home/test/containers/test_ctr/",
             escalation=False,
+            session=db_session,
         )
         assert row.id is not None
         assert row.container_name == "test_ctr"
@@ -30,6 +30,7 @@ class TestMountCleanupRepo:
             mount_path="/home/esc/containers/esc_ctr/",
             escalation=True,
             cleaned_at=now,
+            session=db_session,
         )
         assert row.escalation is True
         assert row.cleaned_at == now
@@ -44,27 +45,31 @@ class TestMountCleanupRepo:
             container_id=1, container_name="old",
             machine_id=1, mount_path="/home/x/containers/old/",
             escalation=False, removed_at=old,
+            session=db_session,
         )
         # old but already cleaned → should NOT be returned
         container_mount_cleanup_repo.insert(
             container_id=2, container_name="cleaned",
             machine_id=1, mount_path="/home/x/containers/cleaned/",
             escalation=False, removed_at=old, cleaned_at=datetime.utcnow(),
+            session=db_session,
         )
         # old but escalation → should NOT be returned
         container_mount_cleanup_repo.insert(
             container_id=3, container_name="esc",
             machine_id=1, mount_path="/home/x/containers/esc/",
             escalation=True, removed_at=old, cleaned_at=datetime.utcnow(),
+            session=db_session,
         )
         # recent → should NOT be returned
         container_mount_cleanup_repo.insert(
             container_id=4, container_name="recent",
             machine_id=1, mount_path="/home/x/containers/recent/",
             escalation=False, removed_at=recent,
+            session=db_session,
         )
 
-        pending = container_mount_cleanup_repo.list_pending(cutoff)
+        pending = container_mount_cleanup_repo.list_pending(cutoff, session=db_session)
         assert len(pending) == 1
         assert pending[0].id == r1.id
 
@@ -76,9 +81,10 @@ class TestMountCleanupRepo:
                 container_id=100 + i, container_name=f"c{i}",
                 machine_id=1, mount_path=f"/home/x/containers/c{i}/",
                 escalation=False, removed_at=old,
+                session=db_session,
             )
 
-        pending = container_mount_cleanup_repo.list_pending(cutoff, limit=3)
+        pending = container_mount_cleanup_repo.list_pending(cutoff, limit=3, session=db_session)
         assert len(pending) == 3
 
     def test_mark_cleaned_sets_timestamp(self, app, db_session):
@@ -86,15 +92,16 @@ class TestMountCleanupRepo:
             container_id=1, container_name="x",
             machine_id=1, mount_path="/home/x/containers/x/",
             escalation=False,
+            session=db_session,
         )
         assert row.cleaned_at is None
 
-        result = container_mount_cleanup_repo.mark_cleaned(row.id)
+        result = container_mount_cleanup_repo.mark_cleaned(row.id, session=db_session)
         assert result is True
 
         # re-fetch
-        refreshed = db.session.get(ContainerMountCleanup, row.id)
+        refreshed = db_session.get(ContainerMountCleanup, row.id)
         assert refreshed.cleaned_at is not None
 
     def test_mark_cleaned_returns_false_when_not_found(self, app, db_session):
-        assert container_mount_cleanup_repo.mark_cleaned(99999) is False
+        assert container_mount_cleanup_repo.mark_cleaned(99999, session=db_session) is False

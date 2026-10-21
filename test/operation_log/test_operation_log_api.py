@@ -1,12 +1,13 @@
 """operation_log 管理端 API 契约测试（只测鉴权与响应形状，数据查询在 repo 测试覆盖）。"""
 
-from ...blueprints import operation_log_api
+from ...api import operation_log_api, deps
 from ...services import operation_log_tasks
 
 
 def _auth(monkeypatch, *, valid=True, operator=True):
-    monkeypatch.setattr(operation_log_api.authentications_repo, "is_token_valid", lambda token: valid)
-    monkeypatch.setattr(operation_log_api.user_repo, "check_permission", lambda token, required_permission: operator)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: valid)
+    from ...services import rbac_service
+    monkeypatch.setattr(rbac_service, "_has_entity_direct", lambda uid, entity: operator)
 
 
 def _fake_log_dict():
@@ -33,7 +34,7 @@ def test_requires_operator(client, monkeypatch):
     _auth(monkeypatch, operator=False)
     resp = client.get("/api/admin/operation_logs")
     assert resp.status_code == 403
-    assert resp.get_json()["error_reason"] == "insufficient_permission"
+    assert resp.json()["error_reason"] == "insufficient_permission"
 
 
 def test_list_shape(client, monkeypatch):
@@ -44,7 +45,7 @@ def test_list_shape(client, monkeypatch):
     resp = client.get("/api/admin/operation_logs?page=1&page_size=20")
 
     assert resp.status_code == 200
-    data = resp.get_json()
+    data = resp.json()
     assert data["success"] == 1
     assert data["total_pages"] == 1
     row = data["logs"][0]
@@ -94,8 +95,40 @@ def test_stats_shape(client, monkeypatch):
     resp = client.get("/api/admin/operation_logs/stats?start=2026-08-01T00:00:00&end=2026-08-16T00:00:00")
 
     assert resp.status_code == 200
-    data = resp.get_json()
+    data = resp.json()
     assert data["success"] == 1
     assert data["total"] == 5
     assert data["succeeded"] == 4
     assert data["by_operation"]["create_container"] == 2
+
+
+def test_list_failure_keeps_list_failed(client, monkeypatch):
+    _auth(monkeypatch)
+
+    def fail(**kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(operation_log_tasks, "list_operation_logs", fail)
+    resp = client.get("/api/admin/operation_logs")
+
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["success"] == 0
+    assert body["error_reason"] == "list_failed"
+    assert body["message"] == "query failed: boom"
+
+
+def test_stats_failure_uses_stats_failed(client, monkeypatch):
+    _auth(monkeypatch)
+
+    def fail(*, start=None, end=None, tz_offset_minutes=None):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(operation_log_tasks, "operation_log_stats", fail)
+    resp = client.get("/api/admin/operation_logs/stats")
+
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["success"] == 0
+    assert body["error_reason"] == "stats_failed"
+    assert body["message"] == "stats failed: boom"

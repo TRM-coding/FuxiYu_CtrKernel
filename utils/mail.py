@@ -1,7 +1,8 @@
 """邮件发送工具。
 
-这个模块封装 Ctrl 子系统的邮件发送能力。
-核心入口是 send（单封）和 send_batch（批量，复用连接）。
+这个模块统一负责 Ctrl 邮件发送与审计。
+send 单封记账，send_batch 复用连接并按成功、失败各汇总至多一条日志。
+正文、验证码和 SMTP 配置不进入审计；重试与业务完成状态由调用方负责。
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ from dataclasses import dataclass
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Iterable
+
+from ..constant import OperationType
 
 logger = logging.getLogger(__name__)
 
@@ -206,11 +209,11 @@ def _create_smtp_connection(cfg: MailConfig) -> smtplib.SMTP:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 公开 API
+# SMTP implementation
 # ══════════════════════════════════════════════════════════════════════
 
 
-def send(
+def _send_smtp(
     to: str | list[str],
     subject: str,
     content: str,
@@ -262,10 +265,16 @@ def send(
         return {"ok": False, "error": str(exc), "to": recipients, "error_detail": detail}
 
 
-def send_batch(
+# 逐封间隔的默认值（秒）。调用方一般按业务设置传进来；这里兜底是为了别让旧调用方
+# 变成"全速发"——服务商限速踩一次就够难受的。
+DEFAULT_BATCH_INTERVAL_SECONDS = 2.0
+
+
+def _send_batch_smtp(
     messages: list[dict],
     *,
     config: MailConfig | None = None,
+    interval_seconds: float = DEFAULT_BATCH_INTERVAL_SECONDS,
 ) -> list[dict]:
     """批量发送邮件，复用单个 SMTP 连接。
 
@@ -337,8 +346,10 @@ def send_batch(
                 continue
 
             try:
-                if i > 0:
-                    time.sleep(0.8)  # 同一连接内间隔，避免被服务商限速
+                # 逐封间隔（服务商风控真正在意的东西）：调用方按业务传，默认 2s。
+                # 这条**不能**因为"改成异步了"就放松——异步只是让等待不占请求线程。
+                if i > 0 and interval_seconds > 0:
+                    time.sleep(interval_seconds)
                 smtp.send_message(msg, from_addr=cfg.sender, to_addrs=all_recips)
                 logger.info("[mail] %s → ok", recips)
                 results[i] = {"ok": True, "to": recips}
@@ -350,4 +361,137 @@ def send_batch(
                 fail_count += 1
 
     logger.info("[mail] batch done: %d ok / %d fail / %d total", ok_count, fail_count, n_total)
+    return results
+
+
+# Audit imports stay inside the write functions to avoid eager service/model
+# initialization when the utils package is imported.
+
+
+def _failed_result(exc: Exception, to) -> dict:
+    return {"ok": False, "to": [to] if isinstance(to, str) else list(to or []),
+            "error": str(exc), "error_detail": {"exc_type": type(exc).__name__}}
+
+
+def _mail_audit_detail(result, *, to, subject, cc=None, bcc=None) -> dict:
+    # Only selected metadata enters the audit; never copy the message body or SMTP options.
+    audit_detail = {
+        "recipient": to,
+        "subject": subject,
+        "mail_mode": result.get("mode", "smtp"),
+    }
+    if cc:
+        audit_detail["cc"] = cc
+    if bcc:
+        audit_detail["bcc"] = bcc
+    error_detail = result.get("error_detail") or {}
+    for key in ("exc_type", "smtp_code"):
+        if key in error_detail:
+            audit_detail[key] = error_detail[key]
+    return audit_detail
+
+
+def _audit_result(result, *, to, subject, operation, target_type, target_id, operator_user_id, detail,
+                  cc=None, bcc=None):
+    from ..services.operation_log_tasks import log_failure, log_success
+
+    audit_detail = {**(detail or {}), **_mail_audit_detail(result, to=to, subject=subject, cc=cc, bcc=bcc)}
+    context = dict(operation=operation, target_type=target_type, target_id=target_id,
+                   operator_user_id=operator_user_id, detail=audit_detail)
+    if result.get("ok"):
+        log_success(**context)
+    else:
+        log_failure(**context, error_reason=result.get("error_reason") or result.get("error") or "mail_send_failed")
+
+
+def _audit_batch_results(messages, results, *, operation, target_type, target_id, operator_user_id, detail):
+    """Write at most one success and one failure summary for this batch.
+
+    The transport contract is one result per message; a short result list must not
+    silently drop messages from the audit, so unpaired messages become failures with
+    a distinct error_reason. A count mismatch is flagged in the detail.
+    """
+    from ..services.operation_log_tasks import log_failure, log_success
+
+    paired = list(results[:len(messages)])
+    paired += [{"ok": False, "error": "result_missing"} for _ in range(len(messages) - len(paired))]
+
+    groups = {True: [], False: []}
+    for message, result in zip(messages, paired):
+        success = bool(result.get("ok"))
+        entry = _mail_audit_detail(result, to=message["to"], subject=message["subject"],
+                                   cc=message.get("cc"), bcc=message.get("bcc"))
+        if not success:
+            entry["error_reason"] = result.get("error_reason") or result.get("error") or "mail_send_failed"
+        groups[success].append(entry)
+
+    summary = dict(detail or {})
+    if len(results) != len(messages):
+        summary["result_count"] = len(results)
+    for success, entries in groups.items():
+        if not entries:
+            continue
+        context = dict(
+            operation=operation, target_type=target_type, target_id=target_id,
+            operator_user_id=operator_user_id,
+            detail={**summary, "batch_total": len(messages),
+                    "message_count": len(entries), "messages": entries},
+        )
+        if success:
+            log_success(**context)
+        else:
+            log_failure(**context, error_reason="mail_batch_failed")
+
+
+def send(
+    to, subject: str, content: str, *,
+    operation=OperationType.SEND_MAIL,
+    target_type: str = "mail",
+    target_id: int = 0,
+    operator_user_id: int | None = None,
+    detail: dict | None = None,
+    **options,
+) -> dict:
+    """Send and audit once; return the transport result, including development mode.
+
+    detail contains business metadata only, never message bodies or credentials.
+    Unexpected transport exceptions become the same failed-result contract as SMTP errors.
+    """
+    try:
+        result = _send_smtp(to=to, subject=subject, content=content, **options)
+    except Exception as exc:
+        result = _failed_result(exc, to)
+    _audit_result(result, to=to, subject=subject, operation=operation,
+                  target_type=target_type, target_id=target_id,
+                  operator_user_id=operator_user_id, detail=detail,
+                  cc=options.get("cc"), bcc=options.get("bcc"))
+    return result
+
+
+def send_batch(
+    messages: list[dict], *,
+    operation=OperationType.SEND_MAIL,
+    target_type: str = "mail",
+    target_id: int = 0,
+    operator_user_id: int | None = None,
+    detail: dict | None = None,
+    config=None,
+    interval_seconds: float | None = None,
+) -> list[dict]:
+    """Reuse the connection; audit nonempty success/failure groups separately.
+
+    Per-message results are returned unchanged for the caller's business counts.
+
+    interval_seconds：同一连接内**逐封**之间的间隔（秒）。None 用默认值；业务层应当
+    从设置里读出来传进来（见 services/announcement_tasks）。
+    """
+    try:
+        kwargs = {"config": config}
+        if interval_seconds is not None:
+            kwargs["interval_seconds"] = interval_seconds
+        results = _send_batch_smtp(messages, **kwargs)
+    except Exception as exc:
+        results = [_failed_result(exc, message.get("to")) for message in messages]
+    _audit_batch_results(messages, results, operation=operation, target_type=target_type,
+                         target_id=target_id, operator_user_id=operator_user_id, detail=detail)
     return results
