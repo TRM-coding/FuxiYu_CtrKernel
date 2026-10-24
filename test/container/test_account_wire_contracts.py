@@ -247,7 +247,7 @@ def test_ctrl_update_role_wire_uppercase_request_is_normalized_for_node(
     assert accepted["cache_control"] == "no-store"
 
 
-def test_ctrl_transfer_root_never_enters_node_wire(node_contract):
+def test_ctrl_legacy_transfer_root_never_enters_node_wire(node_contract):
     request = UpdateRoleRequest.model_validate(
         {
             "container_id": 1,
@@ -496,10 +496,6 @@ def test_ctrl_unknown_role_never_reaches_node(
     monkeypatch.setattr(
         container_api.container_service, "start_add_collaborator",
         lambda **kwargs: calls.append(("add", kwargs)) or {},
-    )
-    monkeypatch.setattr(
-        container_api.container_service, "start_single_root_promotion",
-        lambda **kwargs: calls.append(("single_root", kwargs)) or {},
     )
     monkeypatch.setattr(
         container_api.container_service, "start_root_handover",

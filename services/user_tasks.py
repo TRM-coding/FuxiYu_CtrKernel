@@ -6,6 +6,7 @@ from ..repositories.user_repo import *
 from ..repositories import auth_repo, authentications_repo
 from ..repositories import registration_code_repo
 from ..repositories import usercontainer_repo, containers_repo, long_term_container_repo
+from ..utils.container_lock import container_role_lock
 from .operation_log_tasks import log_failure, log_success
 from ..utils.mail import send as send_mail
 from ..constant import ROLE, ContainerStatus, OperationType
@@ -264,25 +265,28 @@ def Delete_user(user_id: int, operator_user_id: int | None = None) -> bool:
         for item in res.get("transfer_required", []) or []:
             cid = item.get("container_id")
             new_root_uid = item.get("new_root_user_id")
-            if not container_tasks.promote_root_sync(
-                container_id=cid,
-                user_id=new_root_uid,
-                operator_user_id=operator_user_id,
-            ):
-                return _role_step_failed(f"transfer_root_role_failed:container:{cid}")
-            if not container_tasks.update_role(
-                container_id=cid,
-                user_id=user_id,
-                updated_role=ROLE.COLLABORATOR,
-                operator_user_id=operator_user_id,
-            ):
-                return _role_step_failed(f"demote_user_failed:container:{cid}")
-            if not container_tasks.remove_collaborator(
-                container_id=cid,
-                user_id=user_id,
-                operator_user_id=operator_user_id,
-            ):
-                return _role_step_failed(f"remove_user_binding_failed:container:{cid}")
+            with container_role_lock(cid):
+                if container_tasks.get_container_binding_role(cid, user_id) != ROLE.ROOT.value:
+                    return _role_step_failed(f"old_root_changed:container:{cid}")
+                if not container_tasks.promote_root_sync(
+                    container_id=cid,
+                    user_id=new_root_uid,
+                    operator_user_id=operator_user_id,
+                ):
+                    return _role_step_failed(f"transfer_root_role_failed:container:{cid}")
+                if not container_tasks.update_role(
+                    container_id=cid,
+                    user_id=user_id,
+                    updated_role=ROLE.COLLABORATOR,
+                    operator_user_id=operator_user_id,
+                ):
+                    return _role_step_failed(f"demote_user_failed:container:{cid}")
+                if not container_tasks.remove_collaborator(
+                    container_id=cid,
+                    user_id=user_id,
+                    operator_user_id=operator_user_id,
+                ):
+                    return _role_step_failed(f"remove_user_binding_failed:container:{cid}")
 
         for cid in res.get("removable", []) or []:
             if not container_tasks.remove_collaborator(

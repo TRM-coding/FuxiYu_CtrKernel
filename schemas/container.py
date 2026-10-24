@@ -11,6 +11,11 @@ except ImportError:  # pragma: no cover
     field_validator = None
     from pydantic import validator
 
+try:  # Pydantic v2 错误体可 JSON 序列化；v1 继续用 ValueError
+    from pydantic_core import PydanticCustomError
+except ImportError:  # pragma: no cover
+    PydanticCustomError = None
+
 from .common import ApiErrorResponse, SuccessMessageResponse
 
 
@@ -24,6 +29,16 @@ def _blank_to_zero(value):
     """将创建容器的可选 owner 空值归一为 0，由 API 边界再归一为当前用户。"""
 
     return 0 if value in ("", None) else value
+
+
+def _reject_bool_id(value):
+    """ID 字段拒绝 JSON bool；整数与兼容数字字符串仍交给既有 int 归一。"""
+
+    if isinstance(value, bool):
+        if PydanticCustomError is not None:
+            raise PydanticCustomError("invalid_id", "boolean is not a valid id")
+        raise ValueError("boolean is not a valid id")
+    return value
 
 
 class _CompatBaseModel(BaseModel):
@@ -296,9 +311,23 @@ class UpdateRoleRequest(_CompatBaseModel):
     container_id: int = Field(..., ge=1)
     user_id: int = Field(..., ge=1)
     updated_role: Literal["ADMIN", "COLLABORATOR", "ROOT"] = "COLLABORATOR"
-    # 仅 Ctrl 编排使用：true 表示 Home/EditUserModal 的完整交接；
-    # false（默认）保持详情页单目标 ROLE 变更。Node 不接收该字段。
-    transfer_root: bool = False
+    # 旧客户端兼容字段：仅为避免旧请求 422 而保留；Ctrl MUST NOT 读取其值。
+    # 外部 ROOT 请求不论该字段省略/false/true，一律走完整交接。Node 不接收该字段。
+    transfer_root: bool = Field(
+        default=False,
+        description="旧客户端兼容字段；Ctrl 忽略其值，ROOT 请求一律执行完整交接。",
+        json_schema_extra={"deprecated": True},
+    )
+
+    if field_validator is not None:
+        @field_validator("container_id", "user_id", mode="before")
+        @classmethod
+        def _ids_reject_bool(cls, value):
+            return _reject_bool_id(value)
+    else:  # pragma: no cover - Pydantic v1 compatibility
+        @validator("container_id", "user_id", pre=True, allow_reuse=True)
+        def _ids_reject_bool(cls, value):
+            return _reject_bool_id(value)
 
 
 #####################

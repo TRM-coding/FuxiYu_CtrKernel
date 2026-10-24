@@ -4,6 +4,7 @@ from ..constant import OperationType, ROLE
 from ..extensions import session_scope
 from ..repositories import machine_image_repo
 from ..utils.Container import Container_info
+from ..utils.container_lock import container_role_lock
 from . import settings_tasks
 from .container_module.exceptions import NodeServiceError
 from .image_tasks import DockerfileParts
@@ -106,7 +107,6 @@ from .container_module.collaborators import (  # 协作者与角色族
     _collaborator_role_change,
     _audit_collaborator,
     start_add_collaborator,
-    start_single_root_promotion,
     start_root_handover,
     start_root_demotion,
     promote_root_sync,
@@ -425,17 +425,18 @@ def remove_collaborator(
 def update_role(
     container_id: int, user_id: int, updated_role: ROLE, operator_user_id: int | None = None,
 ) -> bool:
-    container, host, port = _load_container_target(container_id)
-    _ensure_container_action(container, "update_role", require_online=True)
-    user_name, old_binding = _load_collaborator_account(user_id, container_id)
-    payload = _build_collaborator_payload(container.name, user_name, updated_role=updated_role)
-    _request_collaborator_action(host, port, "update_role", payload)
-    _update_collaborator_binding(container_id, user_id, user_name, updated_role)
-    _audit_collaborator(
-        container, user_id, user_name, OperationType.UPDATE_COLLABORATOR_ROLE, operator_user_id,
-        **_collaborator_role_change(old_binding, updated_role),
-    )
-    return True
+    with container_role_lock(container_id):
+        container, host, port = _load_container_target(container_id)
+        _ensure_container_action(container, "update_role", require_online=True)
+        user_name, old_binding = _load_collaborator_account(user_id, container_id)
+        payload = _build_collaborator_payload(container.name, user_name, updated_role=updated_role)
+        _request_collaborator_action(host, port, "update_role", payload)
+        _update_collaborator_binding(container_id, user_id, user_name, updated_role)
+        _audit_collaborator(
+            container, user_id, user_name, OperationType.UPDATE_COLLABORATOR_ROLE, operator_user_id,
+            **_collaborator_role_change(old_binding, updated_role),
+        )
+        return True
 
 
 ####################################################

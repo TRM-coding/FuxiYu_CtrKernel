@@ -5,6 +5,7 @@ from ...extensions import session_scope
 from ...repositories import user_repo, usercontainer_repo
 from ...repositories.containers_repo import _binding_role_value
 from ...utils import sanitizer as _sanitizer
+from ...utils.container_lock import container_role_lock
 from ..operation_log_tasks import log_failure, log_success
 from .exceptions import NodeServiceError, safe_reason
 from . import node_comms
@@ -256,29 +257,6 @@ def _perform_role_step(
         return False
 
 
-def _run_single_root_promotion(
-    container_id: int, user_id: int, user_name: str, operator_user_id: int | None, root_password: str,
-) -> None:
-    _perform_role_step(
-        container_id, user_id, user_name, ROLE.ROOT, operator_user_id, root_password=root_password,
-    )
-
-
-def start_single_root_promotion(
-    container_id: int, user_id: int, operator_user_id: int | None = None,
-) -> dict:
-    container, _host, _port, user_name, _binding = _load_role_target(container_id, user_id)
-    root_password = generate_container_password()
-    try:
-        spawn_background(
-            "container-root-promote", _run_single_root_promotion,
-            container.id, int(user_id), user_name, operator_user_id, root_password,
-        )
-    except Exception as exc:
-        raise NodeServiceError("root promotion task was not started", reason="role_change_not_accepted") from exc
-    return {"credentials": [{"login_name": "root", "password": root_password}]}
-
-
 def _root_owner_names(container_id: int, target_user_id: int) -> list[tuple[int, str]]:
     with session_scope(commit=False) as session:
         bindings = usercontainer_repo.get_container_bindings(container_id, session=session) or []
@@ -301,37 +279,134 @@ def _root_owner_names(container_id: int, target_user_id: int) -> list[tuple[int,
                     "existing root system username is unsafe",
                     reason="invalid_root_owner_account",
                 ) from exc
-            if user_name == "root":
+            if user_name == "root" or user_name.startswith("-"):
                 raise NodeServiceError(
-                    "existing root user cannot reuse reserved username root",
+                    "existing root user cannot use reserved or option-like username",
                     reason="invalid_root_owner_account",
                 )
             owners.append((int(binding["user_id"]), user_name))
     return owners
 
 
+def _root_target_name_invalid(user_name: str | None) -> bool:
+    return not user_name or user_name == "root" or str(user_name).startswith("-")
+
+
+def _ensure_root_target_name(user_name: str) -> None:
+    if _root_target_name_invalid(user_name):
+        raise NodeServiceError(
+            "target system username is not usable for root role",
+            reason="invalid_target_account",
+        )
+
+
+def _read_handover_state(container_id: int, target_user_id: int):
+    """独立只读 session 读取当前 ROOT 身份与目标角色，不参与任何长事务。"""
+
+    with session_scope(commit=False) as session:
+        bindings = usercontainer_repo.get_container_bindings(container_id, session=session) or []
+        roots = []
+        for binding in bindings:
+            if _binding_role(binding) != ROLE.ROOT.value:
+                continue
+            user_id = int(binding["user_id"])
+            roots.append((user_id, user_repo.get_name_by_id(user_id, session=session)))
+        target_binding = usercontainer_repo.get_binding(
+            int(target_user_id), int(container_id), session=session,
+        )
+        target_role = _binding_role(target_binding) if target_binding else None
+        target_name = user_repo.get_name_by_id(int(target_user_id), session=session)
+    return roots, target_role, target_name
+
+
+def _log_root_handover_stale(
+    container_id: int, target_user_id: int, operator_user_id: int | None, *,
+    expected_root_ids: list[int], current_root_ids: list[int] | None,
+    expected_target_role: str, current_target_role: str | None,
+) -> None:
+    """固定 stale 失败：只含角色/ID 快照，不含密码。"""
+
+    log_failure(
+        operator_user_id=operator_user_id,
+        operation=OperationType.UPDATE_COLLABORATOR_ROLE,
+        target_type="container",
+        target_id=container_id,
+        error_reason="root_handover_stale",
+        detail={
+            "user_id": target_user_id,
+            "expected_root_ids": list(expected_root_ids),
+            "current_root_ids": current_root_ids,
+            "expected_target_role": expected_target_role,
+            "current_target_role": current_target_role,
+        },
+    )
+
+
 def _run_root_handover(
     container_id: int, target_user_id: int, target_user_name: str,
     old_roots: list[tuple[int, str, str]], root_password: str,
-    operator_user_id: int | None,
+    operator_user_id: int | None, expected_root_ids: list[int], expected_target_role: str,
 ) -> None:
-    for old_user_id, old_user_name, old_password in old_roots:
-        if not _perform_role_step(
-            container_id, old_user_id, old_user_name, ROLE.ADMIN,
-            operator_user_id, password=old_password,
-        ):
-            return
-    _perform_role_step(
-        container_id, target_user_id, target_user_name, ROLE.ROOT,
-        operator_user_id, root_password=root_password,
-    )
+    # 同一容器整个交接 job 持同一把同机锁；每步仍独立 repo/session 提交。
+    with container_role_lock(container_id):
+        try:
+            current_roots, current_target_role, current_target_name = _read_handover_state(
+                container_id, target_user_id,
+            )
+            expected_root_names = {user_id: name for user_id, name, _ in old_roots}
+            if expected_target_role == ROLE.ROOT.value:
+                expected_root_names[int(target_user_id)] = target_user_name
+            current_root_names = {user_id: name for user_id, name in current_roots}
+            if (
+                sorted(current_root_names) != sorted(expected_root_names)
+                or current_root_names != expected_root_names
+                or current_target_role != expected_target_role
+                or current_target_name != target_user_name
+            ):
+                _log_root_handover_stale(
+                    container_id, target_user_id, operator_user_id,
+                    expected_root_ids=expected_root_ids,
+                    current_root_ids=sorted(current_root_names),
+                    expected_target_role=expected_target_role,
+                    current_target_role=current_target_role,
+                )
+                return
+
+            # 先降级全部旧 ROOT；任一步失败立即返回，绝不继续提拔目标。
+            for old_user_id, old_user_name, old_password in old_roots:
+                if not _perform_role_step(
+                    container_id, old_user_id, old_user_name, ROLE.ADMIN,
+                    operator_user_id, password=old_password,
+                ):
+                    return
+            _perform_role_step(
+                container_id, target_user_id, target_user_name, ROLE.ROOT,
+                operator_user_id, root_password=root_password,
+            )
+        except Exception as exc:
+            log_failure(
+                operator_user_id=operator_user_id,
+                operation=OperationType.UPDATE_COLLABORATOR_ROLE,
+                target_type="container",
+                target_id=container_id,
+                error_reason=_password_failure_reason(exc, "root_handover_failed"),
+                detail={"user_id": target_user_id, "stage": "handover"},
+            )
 
 
 def start_root_handover(
     container_id: int, user_id: int, operator_user_id: int | None = None,
 ) -> dict:
-    container, _host, _port, user_name, _binding = _load_role_target(container_id, user_id)
+    """外部 ROOT 请求唯一入口：旧 ROOT 逐个降 ADMIN，成功后再升目标。"""
+
+    container, _host, _port, user_name, binding = _load_role_target(container_id, user_id)
+    _ensure_root_target_name(user_name)
+    target_role = _binding_role(binding)
     old_owner_names = _root_owner_names(container.id, user_id)
+    expected_root_ids = [old_user_id for old_user_id, _ in old_owner_names]
+    if target_role == ROLE.ROOT.value:
+        expected_root_ids.append(int(user_id))
+    expected_root_ids = sorted(expected_root_ids)
     root_password = generate_container_password()
     old_roots = []
     credentials = [{"login_name": "root", "password": root_password}]
@@ -343,6 +418,7 @@ def start_root_handover(
         spawn_background(
             "container-root-handover", _run_root_handover,
             container.id, int(user_id), user_name, old_roots, root_password, operator_user_id,
+            expected_root_ids, target_role,
         )
     except Exception as exc:
         raise NodeServiceError("root handover task was not started", reason="role_change_not_accepted") from exc
@@ -352,9 +428,10 @@ def start_root_handover(
 def _run_root_demotion(
     container_id: int, user_id: int, user_name: str, operator_user_id: int | None, password: str,
 ) -> None:
-    _perform_role_step(
-        container_id, user_id, user_name, ROLE.ADMIN, operator_user_id, password=password,
-    )
+    with container_role_lock(container_id):
+        _perform_role_step(
+            container_id, user_id, user_name, ROLE.ADMIN, operator_user_id, password=password,
+        )
 
 
 def start_root_demotion(
@@ -379,9 +456,12 @@ def promote_root_sync(
 ) -> bool:
     """删除用户内部路径：单目标同步提升，不使用 Web 交接编排。"""
 
-    _container, _host, _port, user_name, _binding = _load_role_target(container_id, user_id)
-    root_password = generate_container_password()
-    return _perform_role_step(
-        container_id, int(user_id), user_name, ROLE.ROOT,
-        operator_user_id, root_password=root_password,
-    )
+    with container_role_lock(container_id):
+        _container, _host, _port, user_name, _binding = _load_role_target(container_id, user_id)
+        if _root_target_name_invalid(user_name):
+            return False
+        root_password = generate_container_password()
+        return _perform_role_step(
+            container_id, int(user_id), user_name, ROLE.ROOT,
+            operator_user_id, root_password=root_password,
+        )

@@ -1,5 +1,7 @@
 """容器密码交付合同测试（按 test-plan 的 contract test 命名）。"""
 
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -32,6 +34,33 @@ def _auth(monkeypatch, user_id=1):
         "FuxiYu_CtrKernel.repositories.containers_repo.get_machine_id_by_container_id",
         lambda cid, session: 1,
     )
+
+
+def _root_user_ids(container_id, db_session):
+    db_session.expire_all()
+    rows = db_session.scalars(
+        select(UserContainer).where(UserContainer.container_id == container_id)
+    ).all()
+    return [
+        row.user_id for row in rows
+        if getattr(row.role, "value", row.role) == ROLE.ROOT.value
+    ]
+
+
+def _assert_no_password_in_logs_or_files(db_session, passwords):
+    db_session.expire_all()
+    logs = list(db_session.scalars(select(OperationLog)).all())
+    for log in logs:
+        text = f"{log.detail}|{log.error_reason}"
+        for password in passwords:
+            assert password not in text
+    log_dir = Path(os.environ["CTRL_LOG_DIR"])
+    log_files = [path for path in log_dir.rglob("*") if path.is_file()]
+    assert log_files
+    for log_file in log_files:
+        text = log_file.read_text(encoding="utf-8", errors="ignore")
+        for password in passwords:
+            assert password not in text
 
 
 def _mock_image(monkeypatch):
@@ -320,42 +349,49 @@ def test_reset_permission_contract(client, monkeypatch, db_session, container_gr
     assert exc.value.reason == "container_offline"
 
 
-def test_single_root_promotion_contract(db_session, container_graph_with_collaborator, mock_node_send, monkeypatch):
+def test_root_handover_preflight_contract(
+    db_session, container_graph_with_collaborator, mock_node_send, monkeypatch,
+):
     root, collaborator, machine, container = container_graph_with_collaborator
-    monkeypatch.setattr(collaborator_utils, "spawn_background", _run_now)
     calls = mock_node_send({"success": 1})
+    generated = []
+    monkeypatch.setattr(
+        collaborator_utils, "generate_container_password",
+        lambda: generated.append(True) or "NeverUsedPwd_123",
+    )
+    monkeypatch.setattr(collaborator_utils, "spawn_background", _run_now)
 
-    result = container_tasks.start_single_root_promotion(container.id, collaborator.id, root.id)
-    assert result["credentials"] and len(result["credentials"]) == 1
-    assert result["credentials"][0]["login_name"] == "root"
-    payload = calls[0]["payload"]["config"]
-    assert payload["updated_role"] == "root"
-    assert payload["root_password"] == result["credentials"][0]["password"]
-    assert "transfer_root" not in payload
-    old_binding = usercontainer_repo.get_binding(root.id, container.id, session=db_session)
-    new_binding = usercontainer_repo.get_binding(collaborator.id, container.id, session=db_session)
-    assert getattr(old_binding["role"], "value", old_binding["role"]) == ROLE.ROOT.value
-    assert getattr(new_binding["role"], "value", new_binding["role"]) == ROLE.ROOT.value
-    assert new_binding["username"] == "root"
-    assert len(list(db_session.scalars(
-        select(OperationLog).where(OperationLog.operation == "update_collaborator_role")
-    ).all())) == 1
-
-    # 未绑定/离线容器/离线机器：不生成密码
+    # 目标未绑定
     with pytest.raises(container_tasks.NodeServiceError) as exc:
-        container_tasks.start_single_root_promotion(container.id, create_user().id, root.id)
+        container_tasks.start_root_handover(container.id, create_user().id, root.id)
     assert exc.value.reason == "target_not_bound"
+
+    # 容器离线
     container.container_status = ContainerStatus.OFFLINE
     db_session.commit()
     with pytest.raises(container_tasks.NodeServiceError) as exc:
-        container_tasks.start_single_root_promotion(container.id, collaborator.id, root.id)
+        container_tasks.start_root_handover(container.id, collaborator.id, root.id)
     assert exc.value.reason == "container_offline"
+
+    # 机器离线
     container.container_status = ContainerStatus.ONLINE
     machine.machine_status = MachineStatus.OFFLINE
     db_session.commit()
     with pytest.raises(container_tasks.NodeServiceError) as exc:
-        container_tasks.start_single_root_promotion(container.id, collaborator.id, root.id)
+        container_tasks.start_root_handover(container.id, collaborator.id, root.id)
     assert exc.value.reason == "machine_offline"
+
+    # 旧 ROOT 的系统用户名不可用（与保留账号 root 冲突）
+    bad_root = create_user(username="root")
+    _bad_root, _bad_machine, bad_container = create_container_graph(root_user=bad_root)
+    bad_target = create_user(username="handover_bad_target")
+    bind_user_container(bad_target, bad_container, role=ROLE.COLLABORATOR, username=bad_target.username)
+    with pytest.raises(container_tasks.NodeServiceError) as exc:
+        container_tasks.start_root_handover(bad_container.id, bad_target.id, bad_root.id)
+    assert exc.value.reason == "invalid_root_owner_account"
+
+    assert generated == []
+    assert calls == []
 
 
 def test_role_change_semantics_contract(db_session, container_graph_with_collaborator, mock_node_send, monkeypatch):
@@ -402,8 +438,9 @@ def test_root_handover_contract(db_session, mock_node_send, monkeypatch):
     assert old_binding["username"] == root.username
     assert getattr(new_binding["role"], "value", new_binding["role"]) == ROLE.ROOT.value
     assert new_binding["username"] == "root"
+    assert _root_user_ids(container.id, db_session) == [target.id]
 
-    # 历史多 ROOT：root + 每个旧 ROOT 一项，不丢失涉及人
+    # 历史多 ROOT：root + 每个旧 ROOT 一项，逐个降级，目标成为唯一 ROOT
     root2, machine2, container2 = create_container_graph()
     target2 = create_user(username="handover_target2")
     old2 = create_user(username="handover_old2")
@@ -413,7 +450,15 @@ def test_root_handover_contract(db_session, mock_node_send, monkeypatch):
     result2 = container_tasks.start_root_handover(container2.id, target2.id, root2.id)
     assert len(result2["credentials"]) == 3
     assert {c["login_name"] for c in result2["credentials"]} == {"root", root2.username, old2.username}
+    assert len({c["password"] for c in result2["credentials"]}) == 3
+    roles2 = [c["payload"]["config"]["updated_role"] for c in calls]
     assert len(calls) == 3
+    assert roles2[-1] == "root"
+    assert all(role == "admin" for role in roles2[:-1])
+    assert succeeded_binding_role(container2.id, root2.id, db_session) == ROLE.ADMIN.value
+    assert succeeded_binding_role(container2.id, old2.id, db_session) == ROLE.ADMIN.value
+    assert succeeded_binding_role(container2.id, target2.id, db_session) == ROLE.ROOT.value
+    assert _root_user_ids(container2.id, db_session) == [target2.id]
 
     # 调用者本身是旧 ROOT：后台仍完成后续步骤
     root3, machine3, container3 = create_container_graph()
@@ -423,6 +468,7 @@ def test_root_handover_contract(db_session, mock_node_send, monkeypatch):
     result3 = container_tasks.start_root_handover(container3.id, target3.id, root3.id)
     assert len(result3["credentials"]) == 2
     assert succeeded_binding_role(container3.id, target3.id, db_session) == ROLE.ROOT.value
+    assert _root_user_ids(container3.id, db_session) == [target3.id]
 
 
 def succeeded_binding_role(container_id, user_id, db_session):
@@ -474,6 +520,20 @@ def test_root_handover_steps_contract(db_session, monkeypatch):
     container_tasks.start_root_handover(container2.id, target2.id, root2.id)
     assert len(calls) == 1
     assert succeeded_binding_role(container2.id, target2.id, db_session) == ROLE.COLLABORATOR.value
+
+    # 历史多 ROOT：任一旧 ROOT 降级失败也立即停止，不提拔目标
+    root2b, _m2b, container2b, target2b = _graph_with_target()
+    historic_root = create_user(username="historic_root_demote_fail")
+    bind_user_container(historic_root, container2b, role=ROLE.ROOT, username="root")
+    calls = _sequence_node(
+        monkeypatch,
+        [{"success": 1}, {"success": 0, "error_reason": "second_admin_step_failed"}],
+    )
+    container_tasks.start_root_handover(container2b.id, target2b.id, root2b.id)
+    assert len(calls) == 2
+    assert [c["payload"]["config"]["updated_role"] for c in calls] == ["admin", "admin"]
+    assert succeeded_binding_role(container2b.id, target2b.id, db_session) == ROLE.COLLABORATOR.value
+    assert len(_root_user_ids(container2b.id, db_session)) == 1
 
     # 第二步失败：旧 ROOT 已 ADMIN 保留，目标不记 ROOT 成功
     root3, _m3, container3, target3 = _graph_with_target()
@@ -587,39 +647,89 @@ def test_password_persistence_contract(db_session, container_graph, monkeypatch,
     assert all(bad["password"] not in str(log.detail) for log in fail_logs)
 
 
-def test_update_role_api_transfer_root_contract(client, monkeypatch, db_session):
+@pytest.mark.parametrize(
+    "transfer_root",
+    [
+        pytest.param(None, id="omitted"),
+        pytest.param(False, id="false"),
+        pytest.param(True, id="true"),
+    ],
+)
+def test_update_role_root_always_handover_contract(
+    client, monkeypatch, db_session, transfer_root,
+):
     _auth(monkeypatch)
     root, _machine, container, target = _graph_with_target()
     monkeypatch.setattr(collaborator_utils, "spawn_background", _run_now)
     calls = _sequence_node(monkeypatch, [{"success": 1}, {"success": 1}])
+    body = {"container_id": container.id, "user_id": target.id, "updated_role": "ROOT"}
+    if transfer_root is not None:
+        # 旧客户端兼容输入；值不得改变交接编排。
+        body["transfer_root"] = transfer_root
 
-    # 默认 false：详情页单目标，root 一项，不降旧 ROOT
-    resp = client.post("/api/containers/update_role",
-                       json={"container_id": container.id, "user_id": target.id, "updated_role": "ROOT"})
+    resp = client.post("/api/containers/update_role", json=body)
+
     assert resp.status_code == 200, resp.text
-    assert resp.json()["accepted"] is True
-    assert len(resp.json()["credentials"]) == 1
+    payload = resp.json()
+    assert payload["accepted"] is True
     assert resp.headers["Cache-Control"] == "no-store"
-    assert succeeded_binding_role(container.id, root.id, db_session) == ROLE.ROOT.value
+    credentials = payload["credentials"]
+    assert len(credentials) == 2
+    assert credentials[0]["login_name"] == "root"
+    assert credentials[1]["login_name"] == root.username
+    assert credentials[0]["password"] != credentials[1]["password"]
+    assert [c["payload"]["config"]["updated_role"] for c in calls] == ["admin", "root"]
+    assert calls[0]["payload"]["config"]["user_name"] == root.username
+    assert calls[0]["payload"]["config"]["password"] == credentials[1]["password"]
+    assert calls[1]["payload"]["config"]["root_password"] == credentials[0]["password"]
+    assert all("transfer_root" not in c["payload"]["config"] for c in calls)
 
-    # true：Home 完整交接，root + 旧 ROOT；旧 ROOT 变 ADMIN
-    root2, _m2, container2, target2 = _graph_with_target()
-    calls = _sequence_node(monkeypatch, [{"success": 1}, {"success": 1}])
-    resp2 = client.post("/api/containers/update_role",
-                        json={"container_id": container2.id, "user_id": target2.id,
-                              "updated_role": "ROOT", "transfer_root": True})
-    assert resp2.status_code == 200, resp2.text
-    assert resp2.json()["accepted"] is True
-    assert len(resp2.json()["credentials"]) == 2
-    assert succeeded_binding_role(container2.id, root2.id, db_session) == ROLE.ADMIN.value
-    assert succeeded_binding_role(container2.id, target2.id, db_session) == ROLE.ROOT.value
+    db_session.expire_all()
+    old_binding = usercontainer_repo.get_binding(root.id, container.id, session=db_session)
+    new_binding = usercontainer_repo.get_binding(target.id, container.id, session=db_session)
+    assert getattr(old_binding["role"], "value", old_binding["role"]) == ROLE.ADMIN.value
+    assert old_binding["username"] == root.username
+    assert getattr(new_binding["role"], "value", new_binding["role"]) == ROLE.ROOT.value
+    assert new_binding["username"] == "root"
+    assert _root_user_ids(container.id, db_session) == [target.id]
 
-    # transfer_root 只允许 ROOT
-    bad = client.post("/api/containers/update_role",
-                      json={"container_id": container2.id, "user_id": target2.id,
-                            "updated_role": "ADMIN", "transfer_root": True})
-    assert bad.status_code == 400
-    assert bad.json()["error_reason"] == "invalid_payload"
+    passwords = [item["password"] for item in credentials]
+    _assert_no_password_in_logs_or_files(db_session, passwords)
+    for row in db_session.scalars(
+        select(UserContainer).where(UserContainer.container_id == container.id)
+    ).all():
+        for column in UserContainer.__table__.columns:
+            value = str(getattr(row, column.key))
+            assert all(password not in value for password in passwords)
+
+
+def test_update_role_legacy_transfer_root_does_not_affect_non_root(
+    client, monkeypatch, db_session,
+):
+    _auth(monkeypatch)
+    _root, _machine, container, target = _graph_with_target()
+    called = []
+    monkeypatch.setattr(
+        container_api.container_service, "update_role",
+        lambda **kwargs: called.append(kwargs) or True,
+    )
+
+    resp = client.post(
+        "/api/containers/update_role",
+        json={
+            "container_id": container.id, "user_id": target.id,
+            "updated_role": "ADMIN", "transfer_root": True,
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["success"] == 1
+    assert called == [{
+        "container_id": container.id,
+        "user_id": target.id,
+        "updated_role": ROLE.ADMIN,
+        "operator_user_id": 1,
+    }]
 
 
 def test_reset_background_contract(client, monkeypatch, db_session, container_graph, mock_node_send):

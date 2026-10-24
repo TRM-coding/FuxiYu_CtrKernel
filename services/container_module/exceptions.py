@@ -46,6 +46,7 @@ SAFE_REASON_CODES = frozenset({
     "update_failed", "update_role_failed", "add_collaborator_failed",
     "role_change_not_accepted", "invalid_root_owner_account",
     "role_binding_failed", "root_handover_binding_failed", "node_error",
+    "root_handover_stale", "root_handover_failed",
     "internal_error",
 })
 

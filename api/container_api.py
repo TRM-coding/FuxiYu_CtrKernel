@@ -103,6 +103,8 @@ REASON_STATUS_MAP = {
     "reset_failed": 500,
     "role_change_not_accepted": 500,
     "invalid_root_owner_account": 409,
+    "root_handover_stale": 409,
+    "root_handover_failed": 500,
 }
 
 
@@ -789,30 +791,22 @@ def update_role_api(
     _res: int = Depends(require_resource("container:root", "container_id")),
     _machine: int = Depends(require_machine_of_container("container_id")),
 ):
-    """更新协作者角色；ROOT 分支按 transfer_root 区分详情单目标与 Home 完整交接。"""
+    """更新协作者角色；外部 ROOT 请求一律走完整交接"""
 
     data = _payload_data(payload)
     container_id = int(data.get("container_id", 0) or 0)
     user_id = data.get("user_id", "")
     updated_role = data.get("updated_role", "COLLABORATOR")
-    transfer_root = bool(data.get("transfer_root", False))
     try:
         role = ROLE(updated_role)
     except Exception:
         return _error(400, "invalid updated_role", "invalid_payload")
-    if transfer_root and role != ROLE.ROOT:
-        return _error(400, "transfer_root is only valid for root role", "invalid_payload")
 
     try:
         if role == ROLE.ROOT:
-            if transfer_root:
-                result = container_service.start_root_handover(
-                    container_id=container_id, user_id=user_id, operator_user_id=operator_user_id,
-                )
-            else:
-                result = container_service.start_single_root_promotion(
-                    container_id=container_id, user_id=user_id, operator_user_id=operator_user_id,
-                )
+            result = container_service.start_root_handover(
+                container_id=container_id, user_id=user_id, operator_user_id=operator_user_id,
+            )
             response.headers["Cache-Control"] = "no-store"
             return {
                 "success": 1,
@@ -854,7 +848,7 @@ def update_role_api(
             target_id=container_id,
             operator_user_id=operator_user_id,
             error_reason=reason,
-            detail={"user_id": user_id, "new_role": updated_role, "transfer_root": transfer_root},
+            detail={"user_id": user_id, "new_role": updated_role},
         )
         return _error(REASON_STATUS_MAP.get(reason, 500), "Failed to update role", reason)
     except Exception as e:
@@ -867,7 +861,7 @@ def update_role_api(
             target_id=container_id,
             operator_user_id=operator_user_id,
             error_reason=reason,
-            detail={"user_id": user_id, "new_role": updated_role, "transfer_root": transfer_root},
+            detail={"user_id": user_id, "new_role": updated_role},
         )
         return _error(500, "Failed to update role", reason)
     return {"success": 1, "message": "Role updated successfully"}

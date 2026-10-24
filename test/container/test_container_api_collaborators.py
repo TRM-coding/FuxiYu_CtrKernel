@@ -89,7 +89,7 @@ def test_update_role_api_rejects_unknown_role_before_node(client, monkeypatch):
     _auth(monkeypatch)
     called = []
     monkeypatch.setattr(
-        container_api.container_service, "start_single_root_promotion",
+        container_api.container_service, "start_root_handover",
         lambda **kwargs: called.append(kwargs) or {"credentials": [{"login_name": "root", "password": "p"}]},
     )
     resp = client.post(

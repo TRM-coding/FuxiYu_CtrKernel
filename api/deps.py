@@ -78,6 +78,20 @@ async def _read_resource_id(request: Request, id_field: str):
     return rid
 
 
+def _coerce_resource_id(rid, id_field: str) -> int:
+    """把资源 ID 转成整数；非法输入统一返回固定 4xx，不把 ValueError 漏成 500。"""
+    try:
+        return int(rid)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "success": 0,
+                "message": f"invalid resource id field {id_field!r}",
+                "error_reason": "invalid_resource_id",
+            },
+        ) from exc
+
 
 def require_resource(resource_type: str, id_field: str = "id"):
     """第二层 · 资源级判别：当前用户对指定资源有访问权。
@@ -91,7 +105,8 @@ def require_resource(resource_type: str, id_field: str = "id"):
                                 detail={"success": 0, "message": f"missing resource id field {id_field!r}",
                                         "error_reason": "invalid_resource_id"})
         from ..services.rbac_service import user_has_resource
-        if not user_has_resource(user_id, resource_type, int(rid)):
+        resource_id = _coerce_resource_id(rid, id_field)
+        if not user_has_resource(user_id, resource_type, resource_id):
             raise HTTPException(
                 status_code=403,
                 detail={"success": 0, "message": "resource access denied",
@@ -115,8 +130,9 @@ def require_machine_of_container(id_field: str = "container_id"):
                                 detail={"success": 0, "message": f"missing resource id field {id_field!r}",
                                         "error_reason": "invalid_resource_id"})
         from ..repositories.containers_repo import get_machine_id_by_container_id
+        resource_id = _coerce_resource_id(rid, id_field)
         with session_scope(commit=False) as session:
-            machine_id = get_machine_id_by_container_id(int(rid), session=session)
+            machine_id = get_machine_id_by_container_id(resource_id, session=session)
         if machine_id is None:
             raise HTTPException(status_code=404,
                                 detail={"success": 0, "message": "container not found",
