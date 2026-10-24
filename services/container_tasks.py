@@ -57,7 +57,9 @@ from .container_module.creation import (     # 创建族
     _bind_owner_and_restored_accounts,
     _seed_initial_ssh_record,
     _audit_create,
+    _with_transient_restore_passwords,
 )
+from .container_module.passwords import generate_container_password, start_reset_container_password
 from .container_module.deletion import (     # 删除族
     _load_removal_container,
     _request_node_removal,
@@ -103,6 +105,12 @@ from .container_module.collaborators import (  # 协作者与角色族
     _update_collaborator_binding,
     _collaborator_role_change,
     _audit_collaborator,
+    start_add_collaborator,
+    start_single_root_promotion,
+    start_root_handover,
+    start_root_demotion,
+    promote_root_sync,
+    get_container_binding_role,
 )
 from .container_module.lifecycle import (    # 启停族
     _load_container_target,
@@ -131,12 +139,16 @@ def Create_container(
     restore_mount_path: str | None = None,
     restore_accounts: list[dict] | None = None,
     reuse_container_id: int | None = None,
+    root_password: str | None = None,
 ) -> bool:
     full_url, owner_name = _ensure_create_target(owner_user_id, machine_id, reuse_container_id)
     _validate_create_params(container, machine_id, public_key)
     _select_gpu_cards(container, machine_id, restore_mount_path)
+    root_password = root_password or generate_container_password()
+    restore_accounts = _with_transient_restore_passwords(restore_accounts)
     payload = _build_create_payload(
-        container, owner_name, public_key, image_build, restore_mount_path, restore_accounts,
+        container, owner_name, public_key, image_build, restore_mount_path,
+        restore_accounts, root_password,
     )
     _request_node_create(full_url, payload)
     container_id = _persist_container_record(
@@ -264,6 +276,7 @@ def resurrect_container(
         # 快照未消费，可干净拒绝；放到恢复完成后查只会造成半恢复或静默丢标记。
         _ensure_restore_long_term_capacity(target.snapshot, root_account)
 
+        root_password = generate_container_password()
         container, renamed = _build_restore_container(target, resolved.image_tag)
         Create_container(
             owner_user_id=int(root_account["user_id"]), machine_id=target.machine_id,
@@ -273,6 +286,7 @@ def resurrect_container(
             image_build=resolved.image_build, image_id=resolved.image_id,
             image_version_at=resolved.version_at,
             dockerfile_parts=resolved.dockerfile_parts,
+            root_password=root_password,
         )
         container_id = _get_restored_container_id(container.NAME, target.machine_id)
         _restore_long_term_state(container_id, target.snapshot, operator_user_id)
@@ -285,7 +299,7 @@ def resurrect_container(
                 "image_tag": resolved.image_tag,
             },
         )
-        return {"container_id": container_id}
+        return {"container_id": container_id, "root_password": root_password}
     except Exception as exc:
         _audit_restore_failure(deleted_id, operator_user_id, exc)
         raise
@@ -381,7 +395,9 @@ def add_collaborator(
     user_name, _ = _load_collaborator_account(user_id, container_id)
     if role == ROLE.ROOT:
         return False
-    payload = _build_collaborator_payload(container.name, user_name, role=role)
+    payload = _build_collaborator_payload(
+        container.name, user_name, role=role, password=generate_container_password(),
+    )
     _request_collaborator_action(host, port, "add_collaborator", payload)
     _add_collaborator_binding(container_id, user_id, user_name, role)
     _audit_collaborator(

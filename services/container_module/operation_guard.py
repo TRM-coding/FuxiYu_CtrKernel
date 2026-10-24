@@ -21,6 +21,7 @@ ALL_CONTAINER_WRITE_OPS = {
     "add_collaborator",
     "remove_collaborator",
     "update_role",
+    "reset_container_password",
 }
 
 CONTAINER_OPERATION_DENY_MATRIX = {

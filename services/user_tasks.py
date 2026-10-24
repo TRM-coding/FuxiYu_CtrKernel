@@ -264,10 +264,9 @@ def Delete_user(user_id: int, operator_user_id: int | None = None) -> bool:
         for item in res.get("transfer_required", []) or []:
             cid = item.get("container_id")
             new_root_uid = item.get("new_root_user_id")
-            if not container_tasks.update_role(
+            if not container_tasks.promote_root_sync(
                 container_id=cid,
                 user_id=new_root_uid,
-                updated_role=ROLE.ROOT,
                 operator_user_id=operator_user_id,
             ):
                 return _role_step_failed(f"transfer_root_role_failed:container:{cid}")

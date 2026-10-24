@@ -19,7 +19,7 @@ def test_add_collaborator_api_container_offline_returns_400(client, monkeypatch)
     def _raise(**kwargs):
         raise container_tasks.NodeServiceError("offline", reason="container_offline")
 
-    monkeypatch.setattr(container_api.container_service, "add_collaborator", _raise)
+    monkeypatch.setattr(container_api.container_service, "start_add_collaborator", _raise)
 
     resp = client.post(
         "/api/containers/add_collaborator",
@@ -31,7 +31,10 @@ def test_add_collaborator_api_container_offline_returns_400(client, monkeypatch)
 
 def test_add_collaborator_api_success_returns_201(client, monkeypatch):
     _auth(monkeypatch)
-    monkeypatch.setattr(container_api.container_service, "add_collaborator", lambda **kwargs: True)
+    monkeypatch.setattr(
+        container_api.container_service, "start_add_collaborator",
+        lambda **kwargs: {"login_name": "collab", "password": "Pwd_123"},
+    )
 
     resp = client.post(
         "/api/containers/add_collaborator",
@@ -63,3 +66,46 @@ def test_update_role_api_success(client, monkeypatch):
     )
 
     assert resp.status_code == 200
+
+
+def test_add_collaborator_api_rejects_root_and_unknown_role_before_node(client, monkeypatch):
+    _auth(monkeypatch)
+    called = []
+    monkeypatch.setattr(
+        container_api.container_service, "start_add_collaborator",
+        lambda **kwargs: called.append(kwargs) or {"login_name": "x", "password": "p"},
+    )
+    for role in ("ROOT", "SUPERADMIN", "admin"):
+        resp = client.post(
+            "/api/containers/add_collaborator",
+            json={"container_id": 1, "user_id": 2, "role": role},
+        )
+        assert resp.status_code == 400, role
+        assert resp.json()["error_reason"] == "invalid_payload"
+    assert called == []
+
+
+def test_update_role_api_rejects_unknown_role_before_node(client, monkeypatch):
+    _auth(monkeypatch)
+    called = []
+    monkeypatch.setattr(
+        container_api.container_service, "start_single_root_promotion",
+        lambda **kwargs: called.append(kwargs) or {"credentials": [{"login_name": "root", "password": "p"}]},
+    )
+    resp = client.post(
+        "/api/containers/update_role",
+        json={"container_id": 1, "user_id": 2, "updated_role": "SUPERADMIN"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error_reason"] == "invalid_payload"
+    assert called == []
+
+
+def test_collaborator_openapi_role_enums_are_public_uppercase(client):
+    schemas = client.app.openapi()["components"]["schemas"]
+    assert set(schemas["CollaboratorRequest"]["properties"]["role"]["enum"]) == {
+        "ADMIN", "COLLABORATOR",
+    }
+    assert set(schemas["UpdateRoleRequest"]["properties"]["updated_role"]["enum"]) == {
+        "ADMIN", "COLLABORATOR", "ROOT",
+    }

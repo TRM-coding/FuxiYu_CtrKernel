@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, Request
+from fastapi import APIRouter, Body, Depends, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
@@ -12,6 +12,8 @@ from ..constant import OperationType, ROLE
 from ..extensions import session_scope
 from ..repositories import containers_repo
 from ..services import container_tasks as container_service
+from ..services.container_module.passwords import generate_container_password
+from ..services.container_module.exceptions import safe_reason
 from ..services.operation_log_tasks import log_failure
 from ..utils.Container import Container_info
 from ..utils.parsers import parse_bool
@@ -34,13 +36,17 @@ from ..schemas.container import (
     ListDeletedContainersResponse,
     ListAllContainerBrefInformationRequest,
     ListAllContainerBrefInformationResponse,
+    PasswordOperationResponse,
     RefreshLastSshLoginTimeRequest,
     RefreshLastSshLoginTimeResponse,
     ResurrectContainerRequest,
     ResurrectContainerResponse,
+    ResetContainerPasswordRequest,
+    ResetContainerPasswordResponse,
     SetLongTermContainerRequest,
     SetLongTermContainerResponse,
     UpdateRoleRequest,
+    UpdateRoleResponse,
 )
 from .deps import require_current_user, require_permission, require_resource, require_machine_of_container
 
@@ -90,6 +96,13 @@ REASON_STATUS_MAP = {
     "long_term_limit_reached": 409,
     "disk_usage_over_limit": 409,
     "data_not_recoverable": 409,
+    "target_not_bound": 409,
+    "invalid_target_account": 409,
+    "reset_not_accepted": 500,
+    "add_not_accepted": 500,
+    "reset_failed": 500,
+    "role_change_not_accepted": 500,
+    "invalid_root_owner_account": 409,
 }
 
 
@@ -137,6 +150,7 @@ def _user_id_or_none(value: Any) -> int | None:
 @router.post("/create_container", response_model=CreateContainerResponse)
 def create_container_api(
     request: Request,
+    response: Response,
     payload: CreateContainerRequest = Body(default_factory=CreateContainerRequest),
     operator_user_id: int = Depends(require_permission("container:create")),
     _res: int = Depends(require_resource("machine", "machine_id")),
@@ -228,6 +242,7 @@ def create_container_api(
         return _error(400, f"Invalid container payload: {e}", "invalid_payload")
 
     try:
+        root_password = generate_container_password()
         if not container_service.Create_container(
             owner_user_id=owner_user_id,
             machine_id=machine_id,
@@ -240,6 +255,7 @@ def create_container_api(
             # 容器上的留痕，用于判定"是否落后"与精确还原。
             image_version_at=build.version_at,
             dockerfile_parts=build.dockerfile_parts,
+            root_password=root_password,
         ):
             log_failure(
                 operation=OperationType.CREATE_CONTAINER,
@@ -262,7 +278,7 @@ def create_container_api(
         )
         return _error(409, f"Duplicate entry: {detail}", "duplicate_entry")
     except container_service.NodeServiceError as e:
-        reason = getattr(e, "reason", None)
+        reason = safe_reason(getattr(e, "reason", None), "create_failed")
         log_failure(
             operation=OperationType.CREATE_CONTAINER,
             target_type="container",
@@ -271,20 +287,28 @@ def create_container_api(
             error_reason=reason,
             detail={"machine_id": machine_id, "name": name},
         )
-        return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
+        return _error(REASON_STATUS_MAP.get(reason, 500), "Failed to create container", reason)
     except Exception as e:
-        reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
+        reason = safe_reason(
+            getattr(e, "reason", None) or getattr(e, "error_reason", None), "internal_error",
+        )
         log_failure(
             operation=OperationType.CREATE_CONTAINER,
             target_type="container",
             target_id=0,
             operator_user_id=operator_user_id,
-            error_reason=reason or "internal_error",
+            error_reason=reason,
             detail={"machine_id": machine_id, "name": name},
         )
-        return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
+        return _error(REASON_STATUS_MAP.get(reason, 500), "Internal error", reason)
 
-    return {"success": 1, "message": "Create container request sent"}
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "success": 1,
+        "message": "Create container request sent",
+        "accepted": True,
+        "credentials": [{"login_name": "root", "password": root_password}],
+    }
 
 
 @router.post("/delete_container", response_model=DeleteContainerResponse)
@@ -376,6 +400,7 @@ def clean_deleted_container_mount_api(
 
 @router.post("/resurrect_container", response_model=ResurrectContainerResponse)
 def resurrect_container_api(
+    response: Response,
     payload: ResurrectContainerRequest = Body(default_factory=ResurrectContainerRequest),
     operator_user_id: int = Depends(require_permission("container:manage")),
 ):
@@ -398,15 +423,22 @@ def resurrect_container_api(
     except Exception as e:
         reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
         return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
+    if result.get("requires_choice"):
+        return {
+            # 二选一：**没有恢复**，把两份内容交回调用方选。容器留痕只在这里出去。
+            "success": 1,
+            "message": "restore requires a choice: snapshot or current template",
+            "accepted": False,
+            "credentials": [],
+            **result,
+        }
+    response.headers["Cache-Control"] = "no-store"
     return {
         "success": 1,
         "message": "container resurrect requested",
         "container_id": result.get("container_id"),
-    } if not result.get("requires_choice") else {
-        # 二选一：**没有恢复**，把两份内容交回调用方选。容器留痕只在这里出去。
-        "success": 1,
-        "message": "restore requires a choice: snapshot or current template",
-        **result,
+        "accepted": True,
+        "credentials": [{"login_name": "root", "password": result.get("root_password")}],
     }
 
 
@@ -604,60 +636,94 @@ def restart_container_api(
     return {"success": 1, "message": "Container restart request sent"}
 
 
-@router.post("/add_collaborator", response_model=ContainerOperationResponse, status_code=201)
+@router.post("/add_collaborator", response_model=PasswordOperationResponse, status_code=201)
 def add_collaborator_api(
     request: Request,
+    response: Response,
     payload: CollaboratorRequest = Body(default_factory=CollaboratorRequest),
     operator_user_id: int = Depends(require_permission("container:operation")),
     _res: int = Depends(require_resource("container:root", "container_id")),
     _machine: int = Depends(require_machine_of_container("container_id")),
 ):
-    """添加协作者。"""
+    """添加协作者（ADMIN/COLLABORATOR）：受理后一次性返回随机密码。"""
 
     data = _payload_data(payload)
     user_id = data.get("user_id", "")
     container_id = int(data.get("container_id", 0) or 0)
     role = data.get("role", "COLLABORATOR")
     try:
-        if not container_service.add_collaborator(
+        result = container_service.start_add_collaborator(
             container_id=container_id,
             user_id=user_id,
             role=ROLE(role),
             operator_user_id=operator_user_id,
-        ):
-            log_failure(
-                operation=OperationType.ADD_COLLABORATOR,
-                target_type="container",
-                target_id=container_id,
-                operator_user_id=operator_user_id,
-                error_reason="add_collaborator_failed",
-                detail={"user_id": user_id, "role": role},
-            )
-            return _error(500, "Failed to add collaborator", "add_collaborator_failed")
+        )
     except container_service.NodeServiceError as e:
-        reason = getattr(e, "reason", None)
+        reason = safe_reason(getattr(e, "reason", None), "add_collaborator_failed")
         log_failure(
             operation=OperationType.ADD_COLLABORATOR,
             target_type="container",
             target_id=container_id,
             operator_user_id=operator_user_id,
-            error_reason=reason or "add_collaborator_failed",
+            error_reason=reason,
             detail={"user_id": user_id, "role": role},
         )
-        if reason == "container_offline":
-            return _error(400, str(e), reason)
-        return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
+        return _error(REASON_STATUS_MAP.get(reason, 500), "Failed to add collaborator", reason)
     except Exception as e:
+        reason = safe_reason(
+            getattr(e, "reason", None) or getattr(e, "error_reason", None),
+            "add_collaborator_failed",
+        )
         log_failure(
             operation=OperationType.ADD_COLLABORATOR,
             target_type="container",
             target_id=container_id,
             operator_user_id=operator_user_id,
-            error_reason="internal_error",
+            error_reason=reason,
             detail={"user_id": user_id, "role": role},
         )
-        return _error(500, f"Internal error: {e}", "internal_error")
-    return {"success": 1, "message": "Collaborator added successfully"}
+        return _error(REASON_STATUS_MAP.get(reason, 500), "Failed to add collaborator", reason)
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "success": 1,
+        "message": "Collaborator add accepted",
+        "accepted": True,
+        "credentials": [{"login_name": result["login_name"], "password": result["password"]}],
+    }
+
+
+@router.post("/reset_container_password", response_model=ResetContainerPasswordResponse)
+def reset_container_password_api(
+    request: Request,
+    response: Response,
+    payload: ResetContainerPasswordRequest = Body(...),
+    operator_user_id: int = Depends(require_permission("container:operation")),
+    _res: int = Depends(require_resource("container:root", "container_id")),
+    _machine: int = Depends(require_machine_of_container("container_id")),
+):
+    """重置容器账号密码：受理后立即返回一次性密码，Node 结果只写 oplog。"""
+
+    try:
+        result = container_service.start_reset_container_password(
+            container_id=payload.container_id,
+            user_id=payload.user_id,
+            operator_user_id=operator_user_id,
+        )
+    except container_service.NodeServiceError as e:
+        reason = safe_reason(getattr(e, "reason", None), "internal_error")
+        return _error(REASON_STATUS_MAP.get(reason, 500), "Container password reset failed", reason)
+    except Exception as e:
+        reason = safe_reason(
+            getattr(e, "reason", None) or getattr(e, "error_reason", None), "internal_error",
+        )
+        return _error(REASON_STATUS_MAP.get(reason, 500), "Container password reset failed", reason)
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "success": 1,
+        "message": "Container password reset accepted",
+        "accepted": True,
+        "credentials": [{"login_name": result["login_name"], "password": result["password"]}],
+    }
 
 
 @router.post("/remove_collaborator", response_model=ContainerOperationResponse)
@@ -714,25 +780,61 @@ def remove_collaborator_api(
     return {"success": 1, "message": "Collaborator removed successfully"}
 
 
-@router.post("/update_role", response_model=ContainerOperationResponse)
+@router.post("/update_role", response_model=UpdateRoleResponse)
 def update_role_api(
     request: Request,
+    response: Response,
     payload: UpdateRoleRequest = Body(default_factory=UpdateRoleRequest),
     operator_user_id: int = Depends(require_permission("container:operation")),
     _res: int = Depends(require_resource("container:root", "container_id")),
     _machine: int = Depends(require_machine_of_container("container_id")),
 ):
-    """更新协作者角色。"""
+    """更新协作者角色；ROOT 分支按 transfer_root 区分详情单目标与 Home 完整交接。"""
 
     data = _payload_data(payload)
     container_id = int(data.get("container_id", 0) or 0)
     user_id = data.get("user_id", "")
     updated_role = data.get("updated_role", "COLLABORATOR")
+    transfer_root = bool(data.get("transfer_root", False))
     try:
+        role = ROLE(updated_role)
+    except Exception:
+        return _error(400, "invalid updated_role", "invalid_payload")
+    if transfer_root and role != ROLE.ROOT:
+        return _error(400, "transfer_root is only valid for root role", "invalid_payload")
+
+    try:
+        if role == ROLE.ROOT:
+            if transfer_root:
+                result = container_service.start_root_handover(
+                    container_id=container_id, user_id=user_id, operator_user_id=operator_user_id,
+                )
+            else:
+                result = container_service.start_single_root_promotion(
+                    container_id=container_id, user_id=user_id, operator_user_id=operator_user_id,
+                )
+            response.headers["Cache-Control"] = "no-store"
+            return {
+                "success": 1,
+                "message": "Role update accepted",
+                "accepted": True,
+                "credentials": result["credentials"],
+            }
+        if role == ROLE.ADMIN and container_service.get_container_binding_role(container_id, user_id) == "ROOT":
+            result = container_service.start_root_demotion(
+                container_id=container_id, user_id=user_id, operator_user_id=operator_user_id,
+            )
+            response.headers["Cache-Control"] = "no-store"
+            return {
+                "success": 1,
+                "message": "Role update accepted",
+                "accepted": True,
+                "credentials": result["credentials"],
+            }
         if not container_service.update_role(
             container_id=container_id,
             user_id=user_id,
-            updated_role=ROLE(updated_role),
+            updated_role=role,
             operator_user_id=operator_user_id,
         ):
             log_failure(
@@ -745,28 +847,29 @@ def update_role_api(
             )
             return _error(500, "Failed to update role", "update_role_failed")
     except container_service.NodeServiceError as e:
-        reason = getattr(e, "reason", None)
+        reason = safe_reason(getattr(e, "reason", None), "update_role_failed")
         log_failure(
             operation=OperationType.UPDATE_COLLABORATOR_ROLE,
             target_type="container",
             target_id=container_id,
             operator_user_id=operator_user_id,
-            error_reason=reason or "update_role_failed",
-            detail={"user_id": user_id, "new_role": updated_role},
+            error_reason=reason,
+            detail={"user_id": user_id, "new_role": updated_role, "transfer_root": transfer_root},
         )
-        if reason == "container_offline":
-            return _error(400, str(e), reason)
-        return _error(REASON_STATUS_MAP.get(reason, 500), str(e), reason)
+        return _error(REASON_STATUS_MAP.get(reason, 500), "Failed to update role", reason)
     except Exception as e:
+        reason = safe_reason(
+            getattr(e, "reason", None) or getattr(e, "error_reason", None), "internal_error",
+        )
         log_failure(
             operation=OperationType.UPDATE_COLLABORATOR_ROLE,
             target_type="container",
             target_id=container_id,
             operator_user_id=operator_user_id,
-            error_reason="internal_error",
-            detail={"user_id": user_id, "new_role": updated_role},
+            error_reason=reason,
+            detail={"user_id": user_id, "new_role": updated_role, "transfer_root": transfer_root},
         )
-        return _error(500, f"Internal error: {e}", "internal_error")
+        return _error(500, "Failed to update role", reason)
     return {"success": 1, "message": "Role updated successfully"}
 
 

@@ -102,6 +102,8 @@ class OperationType(str, Enum):
     START_CONTAINER = "start_container"
     STOP_CONTAINER = "stop_container"
     RESTART_CONTAINER = "restart_container"
+    # 容器账号密码重置（密码类异步结果；target_type=container）
+    RESET_CONTAINER_PASSWORD = "reset_container_password"
     # 用户
     REGISTER_USER = "register_user"
     CHANGE_PASSWORD = "change_password"

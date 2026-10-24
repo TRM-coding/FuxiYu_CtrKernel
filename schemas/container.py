@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, StrictInt
 
@@ -91,8 +91,16 @@ class CreateContainerRequest(_CompatBaseModel):
         _normalize_blank_owner = validator("owner_user_id", pre=True, allow_reuse=True)(_blank_to_zero)
 
 
+class ContainerCredential(_CompatBaseModel):
+    """一次性凭据；身份只需 login_name，不强制 user_id。"""
+
+    login_name: str
+    password: str
+
+
 class CreateContainerResponse(SuccessMessageResponse):
-    pass
+    accepted: bool = True
+    credentials: list[ContainerCredential] = Field(default_factory=list)
 
 
 #####################
@@ -224,6 +232,8 @@ class ResurrectContainerResponse(SuccessMessageResponse):
     snapshot: RestoreContentPreview | None = None
     template: RestoreContentPreview | None = None
     sections: list[DockerfileSectionDiff] = Field(default_factory=list)
+    accepted: bool = False
+    credentials: list[ContainerCredential] = Field(default_factory=list)
 
 
 class SetLongTermContainerRequest(_CompatBaseModel):
@@ -252,6 +262,25 @@ class ContainerOperationResponse(SuccessMessageResponse):
     pass
 
 
+class PasswordOperationResponse(SuccessMessageResponse):
+    accepted: bool = True
+    credentials: list[ContainerCredential] = Field(default_factory=list)
+
+
+class UpdateRoleResponse(PasswordOperationResponse):
+    accepted: bool = False
+    credentials: list[ContainerCredential] = Field(default_factory=list)
+
+
+class ResetContainerPasswordRequest(_StrictRequestModel):
+    container_id: int = Field(..., ge=1)
+    user_id: int = Field(..., ge=1)
+
+
+class ResetContainerPasswordResponse(PasswordOperationResponse):
+    pass
+
+
 #####################
 # 容器权限
 
@@ -259,13 +288,17 @@ class ContainerOperationResponse(SuccessMessageResponse):
 class CollaboratorRequest(_CompatBaseModel):
     container_id: int = Field(..., ge=1)
     user_id: int = Field(..., ge=1)
-    role: str = "COLLABORATOR"
+    # 公开 API 用平台大写角色；交给 Node 前 helper 统一转小写。
+    role: Literal["ADMIN", "COLLABORATOR"] = "COLLABORATOR"
 
 
 class UpdateRoleRequest(_CompatBaseModel):
     container_id: int = Field(..., ge=1)
     user_id: int = Field(..., ge=1)
-    updated_role: str = "COLLABORATOR"
+    updated_role: Literal["ADMIN", "COLLABORATOR", "ROOT"] = "COLLABORATOR"
+    # 仅 Ctrl 编排使用：true 表示 Home/EditUserModal 的完整交接；
+    # false（默认）保持详情页单目标 ROLE 变更。Node 不接收该字段。
+    transfer_root: bool = False
 
 
 #####################

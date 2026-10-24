@@ -310,9 +310,14 @@ def test_resurrect_container_reuses_snapshot_mount_and_restores_bindings(db_sess
     create_call = next(item for item in sent if item["url"].endswith("/create_container"))
     assert create_call["payload"]["restore_mount_path"] == restored.bind_mount_path
     assert create_call["payload"]["config"]["gpu_list"] == [1]
-    assert create_call["payload"]["restore_accounts"] == [
+    restore_accounts = create_call["payload"]["restore_accounts"]
+    assert [{k: v for k, v in item.items() if k != "password"} for item in restore_accounts] == [
         {"user_name": "restore_collab", "role": "collaborator"}
     ]
+    assert restore_accounts[0]["password"]
+    assert restore_accounts[0]["password"] != "restore_collab123"
+    assert result["root_password"]
+    assert create_call["payload"]["root_password"] == result["root_password"]
     bindings = usercontainer_repo.get_container_bindings(restored.id, session=db_session)
     assert {item["user_id"] for item in bindings} == {root.id, collaborator.id}
     assert deleted_container_restore_snapshot_repo.get_by_id(snapshot_id, session=db_session) is None
@@ -375,10 +380,11 @@ def test_resurrect_container_api(client, monkeypatch):
     monkeypatch.setattr(
         container_api.container_service,
         "resurrect_container",
-        lambda **kwargs: {"container_id": 19},
+        lambda **kwargs: {"container_id": 19, "root_password": "RestoreApiPwd"},
     )
 
     resp = client.post("/api/containers/resurrect_container", json={"deleted_id": 7})
 
     assert resp.status_code == 200
     assert resp.json()["container_id"] == 19
+    assert resp.json()["credentials"] == [{"login_name": "root", "password": "RestoreApiPwd"}]

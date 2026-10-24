@@ -13,10 +13,11 @@ from ...utils.Container import Container_info
 from ..image_tasks import DockerfileParts
 from ..operation_log_tasks import log_success
 from .deleted_containers import restore_role_api_value
-from .exceptions import NodeServiceError, _raise_on_node_error
+from .exceptions import NodeServiceError, safe_reason
 from . import node_comms
 from .node_comms import get_full_url, _ensure_machine_online_for_operation
 from .node_comms_modules.endpoint import resolve_endpoint
+from .passwords import generate_container_password
 from .utils import select_gpu_allowance
 
 logger = logging.getLogger(__name__)
@@ -61,9 +62,8 @@ def _validate_create_params(container: Container_info, machine_id: int, public_k
     except IntegrityError:
         raise
     except Exception as exc:
-        reason = getattr(exc, "error_reason", None)
-        if not reason:
-            reason = "invalid_payload" if isinstance(exc, ValueError) else "invalid_config"
+        default_reason = "invalid_payload" if isinstance(exc, ValueError) else "invalid_config"
+        reason = safe_reason(getattr(exc, "error_reason", None), default_reason)
         raise NodeServiceError(str(exc), reason=reason)
 
 
@@ -86,9 +86,14 @@ def _build_create_payload(
     image_build: dict | None = None,
     restore_mount_path: str | None = None,
     restore_accounts: list[dict] | None = None,
+    root_password: str | None = None,
 ) -> dict:
     """组包：构造发给 Node 的创建载荷。纯函数，不碰 DB/网络，可直接单测。"""
-    payload = {"owner_name": owner_name, "config": container.get_config()}
+    payload = {
+        "owner_name": owner_name,
+        "config": container.get_config(),
+        "root_password": root_password or generate_container_password(),
+    }
     if public_key:
         payload["public_key"] = public_key
     if image_build:
@@ -96,15 +101,34 @@ def _build_create_payload(
     if restore_mount_path:
         payload["restore_mount_path"] = restore_mount_path
     if restore_accounts:
-        payload["restore_accounts"] = [
-            {
-                "user_name": account.get("container_username") or account.get("system_username"),
+        accounts = []
+        for account in restore_accounts:
+            user_name = account.get("container_username") or account.get("system_username")
+            if not user_name:
+                continue
+            item = {
+                "user_name": user_name,
                 "role": restore_role_api_value(account.get("role")),
             }
-            for account in restore_accounts
-            if account.get("container_username") or account.get("system_username")
-        ]
+            if account.get("password"):
+                item["password"] = account["password"]
+            accounts.append(item)
+        payload["restore_accounts"] = accounts
     return payload
+
+
+def _with_transient_restore_passwords(restore_accounts: list[dict] | None) -> list[dict] | None:
+    """恢复协作者的密码只用于本次 Node wire，绝不写回快照/DB。"""
+
+    if not restore_accounts:
+        return restore_accounts
+    prepared = []
+    for account in restore_accounts:
+        item = dict(account)
+        if item.get("container_username") or item.get("system_username"):
+            item["password"] = generate_container_password()
+        prepared.append(item)
+    return prepared
 
 
 ####################################################
@@ -113,14 +137,18 @@ def _build_create_payload(
 ####################################################
 
 def _request_node_create(full_url: str, payload: dict) -> None:
-    """唯一网络出口：POST /create_container；Node 报错或非 success=1 一律上抛。"""
+    """唯一网络出口：POST /create_container；Node 报错或非 success=1 一律上抛。
+
+    密码类调用不把 Node 原始响应体拼进异常/日志，避免 secret 回显。
+    """
     response = node_comms.send(full_url, payload)
-    logger.debug("Create_container: NODE response: %s", response)
-    _raise_on_node_error(response, "create")
-    if response.get("success") != 1:
+    if not isinstance(response, dict):
+        raise NodeServiceError("NODE create unexpected response", reason="unexpected_response")
+    reason = safe_reason(response.get("error_reason"), "create_failed")
+    if response.get("error") or response.get("success") != 1:
         raise NodeServiceError(
-            f"NODE create returned failure or unexpected response: {response}",
-            reason=response.get("error_reason") or "unexpected_response",
+            f"NODE create returned failure reason={reason}",
+            reason=reason,
         )
 
 

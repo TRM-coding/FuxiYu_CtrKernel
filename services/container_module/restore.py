@@ -19,7 +19,7 @@ from .deleted_containers import (
     delete_restore_artifacts,
     restore_accounts_from_snapshot,
 )
-from .exceptions import NodeServiceError
+from .exceptions import NodeServiceError, safe_reason
 from .utils import _container_log_detail, container_dockerfile_parts
 
 ####################################################
@@ -151,9 +151,7 @@ def _audit_restore_failure(deleted_id, operator_user_id, exc) -> None:
         operator_user_id=operator_user_id,
         container_name=container_name,
         machine_id=machine_id,
-        error_reason=getattr(exc, "reason", None)
-        or getattr(exc, "error_reason", None)
-        or str(exc),
+        error_reason=safe_reason(exc, "resurrect_failed"),
         detail={"trigger": "resurrect", "deleted_id": deleted_id},
     )
 
