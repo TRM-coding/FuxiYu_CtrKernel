@@ -48,8 +48,39 @@
 | 容器详情返回既有宿主 bind 路径 | 空值或旧响应按未记录处理 | 待复核 | —（本轮未审计） | 主规格既有场景；本轮未复核空值降级断言。 |
 | 容器详情返回既有宿主 bind 路径 | 只读查询不写库 | 待复核 | —（本轮未审计） | 主规格既有场景；本轮未复核只读断言。 |
 | containers entrypoint 留痕说明符合构建语义 | 容器模型与创建流程说明一致 | 已覆盖 | `../../../test/test_entrypoint_docs.py::test_entrypoint_docs_describe_build_stage_at_all_four_locations`；机械检查 `ENTRYPOINT_DOC_CHECK: PASS`（4 文件，5 个旧短语均不存在，必需构建语义短语存在）；`git grep -n 'utils/Container.py' -- models/containers.py services/container_module/creation.py` 无输出 | 测试断言 `models/containers.py` 与 `services/container_module/creation.py` 不含“不参与构建”，且含“参与构建”“ENTRYPOINT”与“模板侧的三项”；机械检查额外确认两文件不含“只是运行期参数”，创建流程含“平台注入不落库”“当下的系统设置”，覆盖“平台注入现取”。 |
+| 容器创建与恢复生成一次性 root 密码 | 创建受理后返回 root 密码 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_create_restore_credentials_contract | 断言创建/恢复 accepted/credentials/no-store、失败无凭据、requires_choice、内部 root_password 非默认。 |
+| 容器创建与恢复生成一次性 root 密码 | 创建失败不返回密码 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_create_restore_credentials_contract | 断言创建/恢复 accepted/credentials/no-store、失败无凭据、requires_choice、内部 root_password 非默认。 |
+| 容器创建与恢复生成一次性 root 密码 | 恢复实际执行时生成新密码 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_create_restore_credentials_contract | 断言创建/恢复 accepted/credentials/no-store、失败无凭据、requires_choice、内部 root_password 非默认。 |
+| 容器创建与恢复生成一次性 root 密码 | 内容二选一不生成密码 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_create_restore_credentials_contract | 断言创建/恢复 accepted/credentials/no-store、失败无凭据、requires_choice、内部 root_password 非默认。 |
+| 容器创建与恢复生成一次性 root 密码 | 内部创建入口也不使用默认密码 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_create_restore_credentials_contract | 断言创建/恢复 accepted/credentials/no-store、失败无凭据、requires_choice、内部 root_password 非默认。 |
+| 容器账号密码重置的权限与目标校验 | ROOT 绑定用户重置协作者 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_reset_permission_contract | 断言方法/资源/机器三层守卫、绑定 login_name、目标/状态拒绝与错误 reason 映射。 |
+| 容器账号密码重置的权限与目标校验 | ROOT 绑定固定使用 root 登录名 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_reset_permission_contract | 断言方法/资源/机器三层守卫、绑定 login_name、目标/状态拒绝与错误 reason 映射。 |
+| 容器账号密码重置的权限与目标校验 | 资源管理通配可重置 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_reset_permission_contract | 断言方法/资源/机器三层守卫、绑定 login_name、目标/状态拒绝与错误 reason 映射。 |
+| 容器账号密码重置的权限与目标校验 | 仅实体通配被资源层拒绝 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_reset_permission_contract | 断言方法/资源/机器三层守卫、绑定 login_name、目标/状态拒绝与错误 reason 映射。 |
+| 容器账号密码重置的权限与目标校验 | ADMIN 或 COLLABORATOR 不能重置 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_reset_permission_contract | 断言方法/资源/机器三层守卫、绑定 login_name、目标/状态拒绝与错误 reason 映射。 |
+| 容器账号密码重置的权限与目标校验 | 目标用户未绑定被拒绝 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_reset_permission_contract | 断言方法/资源/机器三层守卫、绑定 login_name、目标/状态拒绝与错误 reason 映射。 |
+| 容器账号密码重置的权限与目标校验 | 绑定登录名非法被拒绝 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_reset_permission_contract | 断言方法/资源/机器三层守卫、绑定 login_name、目标/状态拒绝与错误 reason 映射。 |
+| 容器账号密码重置的权限与目标校验 | 机器离线时不生成密码 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_reset_permission_contract | 断言方法/资源/机器三层守卫、绑定 login_name、目标/状态拒绝与错误 reason 映射。 |
+| 容器账号密码重置的权限与目标校验 | 容器非 online 时不生成密码 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_reset_permission_contract | 断言方法/资源/机器三层守卫、绑定 login_name、目标/状态拒绝与错误 reason 映射。 |
+| 容器账号密码重置的权限与目标校验 | 额外字段不能指定登录名 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_reset_permission_contract | 断言方法/资源/机器三层守卫、绑定 login_name、目标/状态拒绝与错误 reason 映射。 |
+| 容器账号密码重置的权限与目标校验 | 错误按现有 reason 映射且不拼原始错误体 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_reset_permission_contract | 断言方法/资源/机器三层守卫、绑定 login_name、目标/状态拒绝与错误 reason 映射。 |
+| 容器密码重置的后台执行与一次性响应 | 受理后立即返回并后台请求 Node | 已覆盖 | ../../../test/container/test_password_contracts.py::test_reset_background_contract | 断言立即受理、客户端断开、后台 Node 调用、最小 guard、失败 oplog、no-store。 |
+| 容器密码重置的后台执行与一次性响应 | 客户端断开不取消后台任务 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_reset_background_contract | 断言立即受理、客户端断开、后台 Node 调用、最小 guard、失败 oplog、no-store。 |
+| 容器密码重置的后台执行与一次性响应 | Node 失败只写失败 oplog | 已覆盖 | ../../../test/container/test_password_contracts.py::test_reset_background_contract | 断言立即受理、客户端断开、后台 Node 调用、最小 guard、失败 oplog、no-store。 |
+| 容器密码重置的后台执行与一次性响应 | 后台复核失败只写 oplog | 已覆盖 | ../../../test/container/test_password_contracts.py::test_reset_background_contract | 断言立即受理、客户端断开、后台 Node 调用、最小 guard、失败 oplog、no-store。 |
+| 容器密码重置的后台执行与一次性响应 | 密码响应不可缓存 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_reset_background_contract | 断言立即受理、客户端断开、后台 Node 调用、最小 guard、失败 oplog、no-store。 |
+| 新增协作者的一次性账号密码 | 新增 ADMIN 协作者返回密码 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_add_collaborator_password_contract | 断言 ADMIN/COLLABORATOR config.password、后台绑定、既有 ADD_COLLABORATOR、失败/guard 不伪成功。 |
+| 新增协作者的一次性账号密码 | 新增 COLLABORATOR 协作者返回密码 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_add_collaborator_password_contract | 断言 ADMIN/COLLABORATOR config.password、后台绑定、既有 ADD_COLLABORATOR、失败/guard 不伪成功。 |
+| 新增协作者的一次性账号密码 | Node 或绑定失败不写成功 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_add_collaborator_password_contract | 断言 ADMIN/COLLABORATOR config.password、后台绑定、既有 ADD_COLLABORATOR、失败/guard 不伪成功。 |
+| 新增协作者的一次性账号密码 | 前置校验失败不生成密码 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_add_collaborator_password_contract | 断言 ADMIN/COLLABORATOR config.password、后台绑定、既有 ADD_COLLABORATOR、失败/guard 不伪成功。 |
+| 新增协作者的一次性账号密码 | 后台最小 guard 复核失败只写失败日志 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_add_collaborator_password_contract | 断言 ADMIN/COLLABORATOR config.password、后台绑定、既有 ADD_COLLABORATOR、失败/guard 不伪成功。 |
+| 恢复协作者账号的瞬时密码兼容 | 恢复协作者账号使用瞬时随机密码 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_restore_accounts_password_contract | 断言 restore_accounts 瞬时 password、不写 snapshot、Node 失败不回退弱密码。 |
+| 恢复协作者账号的瞬时密码兼容 | Node 拒绝瞬时密码时不回退弱默认值 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_restore_accounts_password_contract | 断言 restore_accounts 瞬时 password、不写 snapshot、Node 失败不回退弱密码。 |
+| 容器密码不持久化且不可回查 | 一次性密码只在响应中出现 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_password_persistence_contract | 断言 DB/日志/审计无密码、无 GET 回查、错误脱敏。 |
+| 容器密码不持久化且不可回查 | 失败响应与异常脱敏 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_password_persistence_contract | 断言 DB/日志/审计无密码、无 GET 回查、错误脱敏。 |
+| 容器密码不持久化且不可回查 | 无密码回查入口 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_password_persistence_contract | 断言 DB/日志/审计无密码、无 GET 回查、错误脱敏。 |
 
-## 最近验证
+## 历史验证
 
 - 时间：2026-10-21 03:03:42 +08:00（父任务最终 WSL 套件原始输出落盘时间）
 - 版本：`f68d54bacc15ecd401c1d83d8030fe140696b9e1`；本次仅同步文档，未改源代码/测试，未重跑业务套件。
@@ -59,3 +90,19 @@
   - Windows 定向：`E:\Miniconda3\envs\lianjue\python.exe -m pytest test/operation_log test/settings test/test_entrypoint_docs.py test/container/test_container_entrypoint.py test/announcement/test_api.py -q --no-header`
 - 结果：WSL 完整套件 1358 passed、0 failed、0 skipped、6 deselected、1 warning（既有 SAWarning），170.53s；Windows 定向 110 passed。原始输出：`.git/direct-q-final-suite.log`（本地记录，未提交）。
 - 限制：6 项按 `integration/legacy` 策略排除，未运行真实 Docker/GPU/SMTP 或生产数据库；完整套件包含 Node 跨仓回放和真实 du 探针。entrypoint 说明场景为文档约束，使用现有文档扫描测试加静态机械检查验证；`test/container/test_container_entrypoint.py` 的构建/恢复回归在同次运行中通过，但不是该文档场景的专用断言。上表既有场景未在本轮重新审计。
+
+## 附加合同证据（非新增 Scenario）
+
+- `CollaboratorRequest.role` 公开大写枚举（ADMIN/COLLABORATOR），Node wire 小写；非法/ROOT 新增请求 400 且不下发 Node：`../../../test/container/test_container_api_collaborators.py::test_add_collaborator_api_rejects_root_and_unknown_role_before_node`、`::test_collaborator_openapi_role_enums_are_public_uppercase`。
+- 真实 Node Pydantic/HTTP wire：`../../../test/container/test_account_wire_contracts.py`，13 passed；大写 role 被 Node 422 拒绝、helper 小写 wire 被接受且 no-store。
+
+## 最近验证
+
+- 时间：2026-10-24 17:30 +08:00
+- 版本：4e6830dfa35e584d5232360d5c06b0ea0ed18f50（实现/测试提交）
+- 主 spec SHA256：E960DBCD7B896660DB42EA5BF009E9CB341C399F0A873CFC95E3871AED352CE4
+- 命令与环境：
+  - WSL 离线 venv 根目录完整套件：`/home/chest/.cache/fuxi-password-tests-offline/bin/python -m pytest -q --no-header`
+  - 真实 Node wire：`/home/chest/.cache/fuxi-password-tests-offline/bin/python -m pytest test/container/test_account_wire_contracts.py -q --no-header`
+- 结果：完整套件 1431 passed、0 failed、6 deselected、24 subtests passed（224.04s）；Node wire 13 passed（19.72s）。
+- 限制：6 项 integration/legacy 按策略排除；未运行真实生产 Docker/MySQL；上表旧场景沿用历史台账，未在本轮重新审计；新增场景由本轮契约测试覆盖。
