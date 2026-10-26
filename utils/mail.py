@@ -81,9 +81,14 @@ def _build_message(
     sender: str,
     cc: list[str] | None = None,
     bcc: list[str] | None = None,
+    html_content: str | None = None,
     attachments: Iterable[str | Path] | None = None,
 ) -> tuple[EmailMessage, list[str]]:
-    """构建 EmailMessage 并返回 (msg, all_recipients)。"""
+    """构建 EmailMessage 并返回 (msg, all_recipients)。
+
+    html_content 非空时追加 HTML 替代正文；替代正文必须先于附件追加，
+    否则带附件的消息无法从 multipart/mixed 转回 multipart/alternative。
+    """
     recipients = [to] if isinstance(to, str) else list(to)
     if not recipients:
         raise ValueError("to must not be empty")
@@ -95,6 +100,8 @@ def _build_message(
     if cc:
         msg["Cc"] = ", ".join(cc)
     msg.set_content(content)
+    if html_content:
+        msg.add_alternative(html_content, subtype="html")
     _attach_files(msg, attachments)
 
     all_recipients = recipients + (cc or []) + (bcc or [])
@@ -281,7 +288,7 @@ def _send_batch_smtp(
     Args:
         messages: 邮件列表，每条 dict 包含:
             to (str|list[str]), subject (str), content (str),
-            以及可选的 cc, bcc, attachments。
+            以及可选的 html_content, cc, bcc, attachments。
         config: 可选的 SMTP 配置。
 
     Returns:
@@ -313,6 +320,7 @@ def _send_batch_smtp(
             msg, all_recips = _build_message(
                 to=m["to"], subject=m["subject"], content=m["content"],
                 sender=cfg.sender, cc=m.get("cc"), bcc=m.get("bcc"),
+                html_content=m.get("html_content"),
                 attachments=m.get("attachments"),
             )
             built.append((m, msg, all_recips))

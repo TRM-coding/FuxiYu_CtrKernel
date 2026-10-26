@@ -437,3 +437,135 @@ def test_s23_convert_to_template_source_tracked(db_session):
 
     template = convert_announcement_to_template_service(ann.id, created_by=user.id)
     assert template.source_announcement_id == ann.id
+
+
+def test_s28_send_and_resend_share_html_messages(db_session, monkeypatch, inline_send_thread):
+    import FuxiYu_CtrKernel.services.announcement_tasks as tasks
+    from ...utils.announcement_markdown import render_announcement_html
+
+    user1 = create_user(email="u1@bjtu.edu.cn")
+    user2 = create_user(email="u2@bjtu.edu.cn")
+    content = "# 维护通知\n\n今晚 **维护**。"
+    draft = _repo_save_draft(
+        title="维护通知", content=content, raw_content=content, created_by=user1.id
+    )
+
+    render_calls = []
+
+    def _counting_render(source):
+        render_calls.append(source)
+        return render_announcement_html(source)
+
+    captured = []
+
+    def _capture(messages, **kwargs):
+        captured.append(messages)
+        return [{"ok": True, "to": [m["to"]]} for m in messages]
+
+    monkeypatch.setattr(tasks, "render_announcement_html", _counting_render)
+    monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail._send_batch_smtp", _capture)
+
+    accepted = start_batch_send_service(
+        [draft.id],
+        [TargetEntry(type="user", id=user1.id), TargetEntry(type="user", id=user2.id)],
+    )
+
+    assert len(render_calls) == 1
+    assert len(captured) == 1
+    sent_messages = captured[0]
+    assert len(sent_messages) == 2
+    assert all(message["content"] == content for message in sent_messages)
+    assert all(
+        message["html_content"] == sent_messages[0]["html_content"]
+        for message in sent_messages
+    )
+    first_html = sent_messages[0]["html_content"]
+    assert "<h1" in first_html and "<strong>" in first_html
+
+    announcement = _repo_get_announcement(accepted.announcement_ids[0])
+    assert announcement.status == AnnouncementStatus.SENT
+    assert announcement.content == content
+    original_targets = announcement.targets
+
+    captured.clear()
+    start_resend_service(announcement.id)
+
+    assert len(render_calls) == 2
+    assert len(captured) == 1
+    resent_messages = captured[0]
+    assert all(message["content"] == content for message in resent_messages)
+    assert all(message["html_content"] == first_html for message in resent_messages)
+
+    resent = _repo_get_announcement(announcement.id)
+    assert resent.status == AnnouncementStatus.SENT
+    assert resent.title == "维护通知"
+    assert resent.content == content
+    assert resent.raw_content == content
+    assert resent.targets == original_targets
+
+
+def test_s29_send_preserves_source_and_audit(db_session, inline_send_thread):
+    from sqlalchemy import select
+
+    from ...models.operation_log import OperationLog
+
+    user = create_user(email="audit@bjtu.edu.cn")
+    content = "# 维护通知\n\n正文 **重点**"
+    draft = _repo_save_draft(
+        title="维护通知", content=content, raw_content=content, created_by=user.id
+    )
+
+    accepted = start_batch_send_service(
+        [draft.id], [TargetEntry(type="user", id=user.id)]
+    )
+
+    announcement = _repo_get_announcement(accepted.announcement_ids[0])
+    assert announcement.status == AnnouncementStatus.SENT
+    assert announcement.content == content
+    assert announcement.raw_content == content
+    assert announcement.success_count == 1
+    assert announcement.fail_count == 0
+    assert _repo_get_draft(draft.id) is None
+
+    logs = [
+        log
+        for log in db_session.scalars(select(OperationLog).order_by(OperationLog.id)).all()
+        if log.target_type == "announcement"
+    ]
+    assert logs
+    audit_text = json.dumps([log.detail for log in logs], ensure_ascii=False)
+    assert "html_content" not in audit_text
+    assert "<h1>" not in audit_text
+    assert "<strong>" not in audit_text
+
+
+def test_s30_render_exception_settles_failed_without_send(db_session, monkeypatch, inline_send_thread):
+    import FuxiYu_CtrKernel.services.announcement_tasks as tasks
+
+    user = create_user(email="render-fail@bjtu.edu.cn")
+    draft = _repo_save_draft(
+        title="渲染失败", content="# 渲染失败", created_by=user.id
+    )
+    sent = []
+
+    def _raise_render(source):
+        raise RuntimeError("render failed")
+
+    def _capture_send(messages, **kwargs):
+        sent.append(messages)
+        return []
+
+    monkeypatch.setattr(tasks, "render_announcement_html", _raise_render)
+    monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail._send_batch_smtp", _capture_send)
+
+    accepted = start_batch_send_service(
+        [draft.id], [TargetEntry(type="user", id=user.id)]
+    )
+
+    announcement = _repo_get_announcement(accepted.announcement_ids[0])
+    assert announcement.status == AnnouncementStatus.FAILED
+    assert sent == []
+    with session_scope(commit=False) as session:
+        assert announcement_repo.list_announcements_by_status(
+            AnnouncementStatus.SENDING, session=session
+        ) == []

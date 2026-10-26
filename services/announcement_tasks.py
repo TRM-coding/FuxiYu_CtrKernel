@@ -21,6 +21,7 @@ from ..models.user import User
 from ..models.usercontainer import UserContainer
 from ..repositories import announcement_repo
 from . import settings_tasks
+from ..utils.announcement_markdown import render_announcement_html
 from ..utils.mail import send_batch
 
 logger = logging.getLogger(__name__)
@@ -246,6 +247,18 @@ def _resolve_targets_for_send(targets: list[TargetEntry]) -> tuple[ResolveResult
 # 单条没有独立入口：批量与重发都直接组合这三步（2026-09 决策：不留同步版）。
 
 
+def _attach_announcement_html(messages: list[dict]) -> list[dict]:
+    """为一次公告的全部邮件附加同一份 HTML 正文。
+
+    公告内所有消息共用同一正文，因此只在投递前渲染一次；不修改原消息列表，
+    未提供消息时直接返回空列表。
+    """
+    if not messages:
+        return []
+    html = render_announcement_html(messages[0].get("content", ""))
+    return [{**message, "html_content": html} for message in messages]
+
+
 def _deliver_prepared_send(prepared: _PreparedSend, *, operator_user_id: int | None) -> SendResult:
     """慢后半段：发信 → 落终态与计数 → 删草稿。**后台线程走这里**。
 
@@ -253,7 +266,8 @@ def _deliver_prepared_send(prepared: _PreparedSend, *, operator_user_id: int | N
     异步化**不改变**它：批量仍然是一条连接顺序发，只是不再占着请求线程。
     """
     results = send_batch(
-        prepared.messages, target_type="announcement", target_id=prepared.announcement_id,
+        _attach_announcement_html(prepared.messages),
+        target_type="announcement", target_id=prepared.announcement_id,
         operator_user_id=operator_user_id,
         detail={"mail_type": prepared.mail_type, "name": prepared.title,
                 **({"draft_id": prepared.draft_id} if prepared.delete_draft else {})},

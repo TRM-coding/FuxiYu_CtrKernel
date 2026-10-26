@@ -13,3 +13,4 @@ pytest-cov>=5.0.0
 alembic>=1.13.0
 werkzeug
 httpx2
+markdown-it-py>=4.0
