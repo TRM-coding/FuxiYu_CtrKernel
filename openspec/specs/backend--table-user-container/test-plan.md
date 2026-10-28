@@ -1,118 +1,225 @@
-# user_container 测试覆盖
+# backend--table-user-container Test Plan
 
-规格：[spec.md](spec.md)
+Spec: [spec.md](spec.md)
 
-## 当前场景映射
+## Current Mapping
 
-| Requirement | Scenario | 覆盖状态 | 测试位置与 nodeid/参数 | 验证范围或缺口 |
-| --- | --- | --- | --- | --- |
-| user_container 持久化结构 | 读取有效记录 | 待复核 | —（本轮未审计） | 主规格既有场景；本轮只审计角色/密码/ROOT 交接契约。 |
-| user_container 生产职责与生命周期 | 协作角色变更 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_role_change_semantics_contract | 断言普通非 ROOT 互换无密码、ROOT 降 ADMIN 独立账号密码与绑定 username。 |
-| user_container 生产职责与生命周期 | 普通非 ROOT 角色互换不改密码 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_role_change_semantics_contract | 断言普通非 ROOT 互换无密码、ROOT 降 ADMIN 独立账号密码与绑定 username。 |
-| user_container 生产职责与生命周期 | 旧 ROOT 降为 ADMIN 保留独立账号密码 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_role_change_semantics_contract；::test_root_handover_contract | 断言 Node 降级使用独立账号密码、绑定改为 ADMIN/系统用户名；交接路径同样断言。 |
-| 外部 ROOT 请求统一完整交接 | flag 省略、false、true 执行同一完整交接 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_update_role_root_always_handover_contract[omitted]；[false]；[true] | 三种请求都走 handover：两份不同凭据、旧 ROOT 降 ADMIN、目标唯一 ROOT、Node 先 admin 后 root 且无 transfer_root。 |
-| 外部 ROOT 请求统一完整交接 | 多个旧 ROOT 逐个降级后目标成为唯一 ROOT | 已覆盖 | ../../../test/container/test_password_contracts.py::test_root_handover_contract | 断言历史多 ROOT 的 N+1 凭据、逐个 admin 后 root、旧 ROOT 均 ADMIN、最终只有目标 ROOT。 |
-| ROOT 交接的受理与凭据 | 正常单个旧 ROOT 交接返回两项不同登录名 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_update_role_root_always_handover_contract[omitted]、[false]、[true]；::test_root_handover_contract | 断言 root + 旧 ROOT 系统用户名两项、密码不同、Cache-Control: no-store。 |
-| ROOT 交接的受理与凭据 | 旧 ROOT 降 ADMIN 的独立账号使用其系统用户名 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_root_handover_contract | 断言旧 ROOT 绑定 username=root 时，降级 wire user_name 与凭据 login_name 使用用户表系统用户名。 |
-| ROOT 交接的受理与凭据 | 直接 ROOT 降 ADMIN 也返回独立账号密码 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_role_change_semantics_contract | 断言 ROOT→ADMIN 生成一项独立账号凭据、wire 使用 config.password、绑定改为 ADMIN/系统用户名。 |
-| ROOT 交接的受理与凭据 | 机器或容器不可用时不生成密码 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_root_handover_preflight_contract | 断言容器离线/机器离线时抛对应 reason，密码生成器未调用且无 Node 请求。 |
-| ROOT 交接的受理与凭据 | 目标未绑定或用户名不可用时不生成密码 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_root_handover_preflight_contract | 断言目标未绑定为 target_not_bound、旧 ROOT 系统用户名不可用为 invalid_root_owner_account；均不生成密码且无 Node 请求。 |
-| ROOT 交接的受理与凭据 | 调用者先被降级也不影响后续步骤 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_root_handover_contract | 断言调用者本身是旧 ROOT 时后台仍完成旧 ROOT 降级与目标升 ROOT。 |
-| ROOT 交接的逐步执行与失败边界 | 两步成功各记一条真实日志 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_root_handover_steps_contract | 断言两步成功各一条 update_collaborator_role 成功日志，绑定分别 ADMIN/系统用户名与 ROOT/root，日志不含密码。 |
-| ROOT 交接的逐步执行与失败边界 | 第一步失败不继续第二步 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_root_handover_steps_contract | 断言第一个旧 ROOT 降级失败后只发一次 Node，目标保持非 ROOT。 |
-| ROOT 交接的逐步执行与失败边界 | 多个旧 ROOT 中任一降级失败也不提拔目标 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_root_handover_steps_contract | 断言前一个旧 ROOT 已降 ADMIN、后一个降级失败时停止，仅两次 admin wire，目标保持 COLLABORATOR。 |
-| ROOT 交接的逐步执行与失败边界 | 第二步失败不伪报整体成功 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_root_handover_steps_contract | 断言旧 ROOT 已 ADMIN 保留、目标不记 ROOT 成功、写失败日志。 |
-| ROOT 交接的逐步执行与失败边界 | 绑定更新失败也停止后续步骤 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_root_handover_steps_contract | 断言第二步绑定更新失败后目标保持非 ROOT、旧 ROOT 保留 ADMIN、无后续步骤。 |
-| ROOT 交接的逐步执行与失败边界 | 后台最小 guard 复核失败只记失败 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_root_handover_steps_contract | 断言后台执行前容器离线则不调用 Node，目标保持非 ROOT。 |
-| ROOT 交接的逐步执行与失败边界 | Node 只改指定目标 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_root_handover_steps_contract；../../../test/container/test_account_wire_contracts.py::test_ctrl_legacy_transfer_root_never_enters_node_wire | 断言 Ctrl 逐步调用单目标 update_role，Node wire 不含 transfer_root 或额外目标。 |
-| ROOT 交接的身份预检与获锁复核 | 已受理的同容器交接冲突以 stale 结束 | 已覆盖 | ../../../test/container/test_role_adversarial.py::test_repeated_handover_to_same_target_keeps_one_root_and_stales_second；::test_interleaved_handover_to_two_targets_must_not_leave_two_roots | 断言后执行任务在任何 Node 前 `root_handover_stale` 退出，旧响应密码不入 wire/日志，最终唯一 ROOT。 |
-| ROOT 交接的并发串行化与已受理冲突 | 真实线程同容器并发只允许一个交接完成 | 已覆盖 | ../../../test/container/test_role_adversarial.py::test_threaded_handover_barrier_keeps_one_root_and_attributes_commands | barrier 后两真实线程竞争同容器 RLock/文件锁；恰好一个成功、一个 stale，零额外 Node，最终唯一 ROOT，Node 命令只归属胜出凭据。 |
-| ROOT 交接的并发串行化与已受理冲突 | 同机独立进程竞争同一容器锁 | 已覆盖 | ../../../test/container/test_role_adversarial.py::test_container_role_lock_cross_process；::test_container_role_lock_nested_reentrant_and_empty_marker | 独立子进程持锁时另一子进程阻塞；释放后获得；嵌套同线程可重入；锁文件为空标记。 |
-| ROOT 交接保留逐步提交事实 | 机器中途维护或 DB/审计异常不整批回滚 | 已覆盖 | ../../../test/container/test_role_adversarial.py::test_machine_offline_between_steps_keeps_first_committed_fact；::test_db_or_audit_exception_does_not_rollback_committed_step[binding/audit] | 第一步 ADMIN 绑定与成功日志保留；下一步 fresh guard 失败或 DB/审计异常只影响该步。 |
-| ROOT 交接的身份预检与获锁复核 | Node 不可用用户名在预检被拒 | 已覆盖 | ../../../test/container/test_role_adversarial.py::test_root_handover_preflight_rejects_node_unusable_names[target-root/target-leading-dash/old-root-leading-dash] | 目标 `root`/前导 `-`、旧 ROOT 前导 `-` 在生成密码/200/Node 前被拒。 |
-| 删除用户内部 ROOT 提升的密码兼容 | 删除用户内部提升生成随机 root 密码 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_delete_user_root_password_contract | 断言内部同步提升传非默认随机 config.root_password、不触发 Web 交接编排。 |
-| 删除用户内部 ROOT 提升的密码兼容 | 内部提升失败不回退弱密码 | 已覆盖 | ../../../test/container/test_password_contracts.py::test_delete_user_root_password_contract | 断言内部提升失败时删除失败、用户保留、不回退 {user_name}123。 |
+### Requirement: user_container 持久化结构
 
-## 附加合同证据（非新增 Scenario）
+#### Scenario: 读取有效记录
 
-- 旧 `transfer_root` 仅为兼容输入，不参与路由：`../../../test/container/test_password_contracts.py::test_update_role_root_always_handover_contract[omitted]`、`[false]`、`[true]`、`::test_update_role_legacy_transfer_root_does_not_affect_non_root`；`UpdateRoleRequest.updated_role` 公开大写枚举与非法角色 400：`../../../test/container/test_container_api_collaborators.py::test_update_role_api_rejects_unknown_role_before_node`、`::test_collaborator_openapi_role_enums_are_public_uppercase`。
-- 凭据响应不落密码：`../../../test/container/test_password_contracts.py::test_update_role_root_always_handover_contract` 扫描 `OperationLog` 与 `CTRL_LOG_DIR` 下日志文件；`::test_password_persistence_contract` 断言模型无密码列且日志不含密码。
-- 真实 Node Pydantic/HTTP wire：`../../../test/container/test_account_wire_contracts.py`，本轮 13 passed；大写角色被 Node 422 拒绝，helper 小写 wire 被接受且 no-store，`transfer_root` 不进入 wire。
-- 同机锁 helper 证据：`../../../test/container/test_role_adversarial.py::test_container_role_lock_nested_reentrant_and_empty_marker`（RLock 嵌套重入、空标记）与 `::test_container_role_lock_cross_process`（独立进程阻塞/释放）；锁文件在私有临时目录，不写业务状态。
+- Test/check:
+  - [X] test/container/test_anvil_freeze_membership.py::test_anvil_uc01_user_container_readback_contract
+- Assertion scope: 计划项持久化一条完整绑定（带 `public_key`）与一条最小绑定（`public_key=NULL`），换新 session 按 `(user_id, container_id)` 复合主键读取；断言 `user_id`/`container_id` 为 `int` 且等于真实主键，`role` 为 `ROLE` 枚举，`granted_at` 为插入窗口内 `datetime`，`public_key` 按 `str`/`NULL` 往返，`username` 为 `str` 原样往返，同一复合键只有一行，不用用户名/展示名替代稳定主键。
+- Coverage note: 既有 `test_role_change_semantics_contract` 等只读同一 session 的绑定 role/username；旧版主侧车曾把本场景标为“待复核”，没有完整的跨 session 类型/空值断言。
 
-## 对抗性补测（2026-10-24，先红后绿；双 ROOT 已收住）
+### Requirement: user_container 生产职责与生命周期
 
-文件：`../../../test/container/test_role_adversarial.py`。默认用显式后台队列固定顺序；另有真实线程 + barrier 与独立子进程文件锁用例。结果均可重复。
+#### Scenario: 协作角色变更
 
-| 探针 | 测试 | 本轮结果 | 说明 |
-| --- | --- | --- | --- |
-| 同一目标重复受理 | `::test_repeated_handover_to_same_target_keeps_one_root_and_stales_second` | 通过 | 第一次任务完成；第二次持锁发现 ROOT/目标角色/用户名已变，stale 退出且零 Node；最终唯一 ROOT，第二次响应密码不入 wire/日志。 |
-| 两个不同目标交错受理 | `::test_interleaved_handover_to_two_targets_must_not_leave_two_roots` | 通过 | 固定顺序“降 A → 升 B → 降 A → 升 C”；第二个任务在降 A 前 stale 退出，最终只有 B 为 ROOT，C 保持 COLLABORATOR，零额外 Node。 |
-| 真实线程 barrier 并发 | `::test_threaded_handover_barrier_keeps_one_root_and_attributes_commands` | 通过 | 两线程同时开始；恰好一个完成、一个 stale；最终唯一 ROOT；Node 命令只归属胜出任务凭据，失败任务密码不入 wire/日志。 |
-| 同机独立进程锁 | `::test_container_role_lock_nested_reentrant_and_empty_marker`、`::test_container_role_lock_cross_process` | 通过 | RLock 同线程嵌套重入；POSIX 空文件 flock 使另一独立子进程阻塞到释放；锁文件为空标记。 |
-| 预检 Node 不可用用户名 | `::test_root_handover_preflight_rejects_node_unusable_names[target-root/target-leading-dash/old-root-leading-dash]` | 通过 | 目标 `root`/前导 `-`、旧 ROOT 前导 `-` 在密码生成/200/Node 前被拒。 |
-| 机器中途维护 | `::test_machine_offline_between_steps_keeps_first_committed_fact` | 通过 | 第一旧 ROOT 的 ADMIN 绑定/成功日志已提交；第二步 fresh guard 失败，零第二步 Node，不整批回滚。 |
-| DB/审计异常 | `::test_db_or_audit_exception_does_not_rollback_committed_step[binding/audit]` | 通过 | 第一步 ADMIN 与成功日志保留；第二步 DB/审计异常只写该步失败。 |
-| 受理后调用者失权 | `::test_accepted_handover_survives_caller_permission_revocation` | 通过 | 受理后收回机器权限，快照未变，后台仍完成，目标唯一 ROOT。 |
-| 目标已是 ROOT | `::test_handover_to_already_root_target_demotes_other_roots` | 通过 | 旧 ROOT 降 ADMIN，目标保持/重新成为 ROOT，最终唯一。 |
-| 无旧 ROOT | `::test_handover_without_old_root_promotes_target_with_one_root_credential` | 通过 | 只返回 root 一项（不伪造旧 owner 凭据），目标升 ROOT，最终唯一。 |
-| 畸形 ID/role/flag | `::test_malformed_root_request_has_no_role_or_node_side_effects` | 11/11 通过 | 非整数 `container_id` 由 `require_resource` 固定 400；bool ID 由 `UpdateRoleRequest` 拒绝为 400；同一非整数用例还验证只挂 `require_machine_of_container` 的 `unpause_container` 返回 400。全部无角色/Node/后台任务副作用。 |
-| Node 超时/异常 | `::test_node_failure_during_demotion_stops_before_promotion[timeout]`、`[exception]` | 通过 | 第一个旧 ROOT 降级失败即停，不升目标，最终仍为原 ROOT 集合。 |
-| 降级绑定写入失败 | `::test_binding_failure_during_demotion_stops_before_promotion` | 通过 | Node 成功但绑定失败也停止，不升目标，最终仍为原 ROOT 集合。 |
+- Test/check:
+  - [X] test/container/test_anvil_freeze_membership.py::test_anvil_uc02_update_role_persists_binding
+- Assertion scope: 计划项对已绑定的普通用户调用真实 `update_role`，Node 替身记录一次 `update_role` wire；断言该复合主键绑定的 `role` 被更新为目标非 ROOT 角色、`username` 保持其系统用户名、旧/新角色写入成功审计，Node 请求不含密码字段。
+- Coverage note: 既有 `test_role_change_semantics_contract` 调用了 `update_role`，但只断言 Node config 无密码；没有读回绑定 role。`test_container_api_collaborators.py::test_update_role_api_success` 把 service 整个替换，不能作为落库证据。
 
-复现命令（WSL）：
+#### Scenario: 普通非 ROOT 角色互换不改密码
 
-```bash
-/home/chest/miniconda3/envs/fuxi/bin/python -m pytest test/container/test_role_adversarial.py -q --no-header
-```
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_role_change_semantics_contract
+  - [X] test/container/test_password_contracts.py::test_update_role_legacy_transfer_root_does_not_affect_non_root
+- Assertion scope: `update_role` 把 COLLABORATOR 切到 ADMIN 时，Node `config` 不含 `password` 与 `root_password`；`transfer_root=true` 的非 ROOT 请求仍只把 `updated_role`/`operator_user_id` 等原参数传给 service，兼容字段不改变路由；不生成或重置 root/目标账号密码。绑定 role 的落库部分不在本行断言范围内，由 `[X] test_anvil_uc02_update_role_persists_binding` 覆盖。
+- Coverage note: 测试断言的是 Node wire 不含密码字段，没有比较密码值；在该 wire 合同下已足以证明本路径不交付密码，未额外读取密码哈希。“Ctrl 只更新该绑定 role”的落库断言见 `[X] test_anvil_uc02_update_role_persists_binding`，本条不冒充已覆盖。
 
-本轮结果：**28 passed、0 failed（28 项）**。
+#### Scenario: 旧 ROOT 降为 ADMIN 保留独立账号密码
 
-### 并发互斥实现与范围
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_role_change_semantics_contract
+  - [X] test/container/test_anvil_freeze_membership.py::test_anvil_uc02_user_binding_changes_keep_other_bindings
+- Assertion scope: `start_root_demotion` 生成一项凭据，`login_name` 等于旧 ROOT 用户表系统用户名；Node `config.password` 等于该凭据密码；成功绑定落为 ADMIN 且 `username` 为该系统用户名。计划项在同一容器另有一条 collaborator 绑定时执行降级，断言该其他绑定仍存在且 role/username 不变。
+- Coverage note: 既有用例没有读回其他绑定，不能证明“不删除其他绑定”。
 
-- 新增 `utils/container_lock.py`：同一 `container_id` 用 `threading.RLock` 覆盖同进程并支持嵌套重入；POSIX 用私有临时目录空锁文件 + `fcntl.flock` 覆盖同机跨进程；Windows 无 fcntl 时仅线程锁。
-- 锁文件只做空标记，不保存密码、角色或业务状态；未新增表/字段/租约/持久化工作流。
-- 所有 ROOT 集合变更入口共用该锁：外部普通 `update_role`、直接 ROOT 降 ADMIN、ROOT 交接后台 job、删除用户内部 `promote_root_sync`，以及删除用户同容器移交段。
-- ROOT 交接后台在整个 job 期间持锁；获锁后用独立只读 session 重读 ROOT `user_id`/系统用户名集合、目标角色与目标用户名，与受理快照比较；变化则固定 `root_handover_stale` 并在任何 Node 前退出。
-- 交接每步仍独立 `session_scope`/repo 提交；机器/容器 guard 每步新鲜读取；DB/审计异常只影响该步，已提交绑定/成功日志不回滚。
-- 删除用户既有步骤/角色/顺序未改：仅用同一锁包住移交段，开始前核实旧 owner 仍 ROOT。
-- 异步受理不等待后台完成：后受理任务允许 `root_handover_stale`，其凭据不执行；最终唯一 ROOT 断言未放松。
-- 边界：当前部署单 Linux Ctrl 主机；多 Ctrl 主机、Windows 跨进程、真实生产 MySQL 互斥不在本轮承诺。
+### Requirement: 外部 ROOT 请求统一完整交接
 
-### 本轮输入验证修复
+#### Scenario: flag 省略、false、true 执行同一完整交接
 
-- `UpdateRoleRequest.container_id/user_id` 增加 `mode="before"` 校验：bool 直接拒绝；整数与既有兼容数字字符串仍被接受（schema 探针：`1`/`"1"` accepted，`true` rejected）。
-- `api/deps.py` 增加 `_coerce_resource_id`：`ValueError`/`TypeError`/`OverflowError` 统一收敛为 400 `invalid_resource_id`；`require_resource` 与 `require_machine_of_container` 共用，未改全局 schema。
-- 使用 `PydanticCustomError` 避免 `ValueError` 进入全局 400 响应时再次 JSON 序列化失败。
-- 预检拒绝目标 `root`/前导 `-`、旧 ROOT 前导 `-`，在生成密码/200/Node 前失败。
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_update_role_root_always_handover_contract[omitted]
+  - [X] test/container/test_password_contracts.py::test_update_role_root_always_handover_contract[false]
+  - [X] test/container/test_password_contracts.py::test_update_role_root_always_handover_contract[true]
+- Assertion scope: 三个参数分支都返回 200、`accepted=true`、`Cache-Control: no-store`，`credentials` 恰为 root 与旧 ROOT 系统用户名两项且密码不同；Node 调用顺序为 `admin` 后 `root`，旧 ROOT 用其系统用户名/密码降级，目标用 root 新密码升级；最终只有目标一个 ROOT，Node config 均不含 `transfer_root`；密码不出现在日志与日志文件中。
 
-### 契约不一致记录（本轮只记录，不扩大修复）
+#### Scenario: 多个旧 ROOT 逐个降级后目标成为唯一 ROOT
 
-- 目标无旧 ROOT 时，Ctrl 只返回 `root` 一项（`test_handover_without_old_root_promotes_target_with_one_root_credential` 已断言）。
-- 目标本身已是唯一 ROOT 且无其他旧 ROOT 时，`_root_owner_names` 排除目标后同样只返回 `root` 一项。
-- Web 侧“至少两项”合同与上述两种边界不一致；本轮未改 Web 或凭据数量语义，留待父级评估。
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_root_handover_contract
+- Assertion scope: 历史多 ROOT 时凭据数为旧 ROOT 数 + 1，登录名集合包含 root 与各旧 ROOT 系统用户名且密码互异；Node wire 逐个 `admin`、最后 `root`；所有旧 ROOT 绑定落为 ADMIN，目标落为 ROOT/`username=root`，最终 ROOT 集合仅目标；不丢弃涉及人或为凑两项篡改角色。
 
-## 最近验证
+### Requirement: ROOT 交接的受理与凭据
 
-- 上轮全量（新增对抗性文件前）：2026-10-24 21:00 +08:00；工作区基于 4dff54a（含未提交改动）；相关套件 39 passed；全量 1434 passed、6 deselected、1 warning、24 subtests passed（233.21s）。
-- 本轮对抗性（最终）：2026-10-24 21:47 +08:00；命令见上；结果 **28 passed、0 failed（28 项）**，含真实线程 barrier、独立进程 flock、预检用户名、机器中途维护、DB/审计异常回归；随后连跑 3 次均 28 passed。
-- 本轮原 ROOT 与依赖回归：`test/container/test_password_contracts.py`、`test/container/test_container_api_collaborators.py`、`test/container/test_account_wire_contracts.py`、`test/operation_log/test_password_logs.py`、`test/container/test_container_api_information.py`、`test/user/test_user_api_profile.py`，结果 **78 passed**。
-- 本轮完整默认套件：WSL `/home/chest/miniconda3/envs/fuxi/bin/python -m pytest -q --no-header`；结果 **1462 passed、6 deselected、1 warning、24 subtests passed（220.86s）**。
-- Schema 兼容探针：整数与数字字符串 accepted，bool rejected（`invalid_id`）。
-- 主 spec SHA256：3F7C70DBF2559B775048894C2D0E50DD8DBA3C7371FAE8D47D3CB3876B152356
-- 限制：6 项 integration/legacy 按策略排除；未连接真实生产 Docker/MySQL/Node；互斥范围仅当前单 Linux Ctrl 主机（POSIX 文件锁 + 同进程 RLock），Windows 无 fcntl 时仅线程锁；多 Ctrl 主机、Windows 跨进程、真实生产 MySQL 互斥未验证；锁在 Node 调用期间持有，慢 Node 会延迟同容器角色变更；持久化“读取有效记录”场景本轮未重新审计。
+#### Scenario: 正常单个旧 ROOT 交接返回两项不同登录名
 
-## 最终锁边界与兼容复验（2026-10-24）
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_update_role_root_always_handover_contract[omitted]
+  - [X] test/container/test_password_contracts.py::test_root_handover_contract
+- Assertion scope: 响应 `accepted=true`，`credentials` 恰为 root 与旧 ROOT 系统用户名两项，密码不同；后台先以旧 ROOT 系统用户名/密码降 ADMIN，再以 root 新密码升目标；Node wire 与凭据密码一一对应。
 
-| Requirement | 场景或边界 | 覆盖状态 | 测试位置 | 验证范围 |
-| --- | --- | --- | --- | --- |
-| ROOT 交接并发收敛 | 无 fcntl 时线程锁仍可重入并串行 | 已覆盖 | ../../../test/container/test_container_role_lock.py::test_thread_lock_fallback_works_without_fcntl | 不引入跨平台新依赖；另在 Windows 原生解释器实际导入工具并嵌套加锁成功。 |
-| ROOT 交接并发收敛 | 拒绝被替换为符号链接的锁目录 | 已覆盖 | ../../../test/container/test_container_role_lock.py::test_role_lock_rejects_symlink_directory_without_chmod | 拒绝前不更改链接目标权限或写入文件。 |
-| ROOT 交接并发收敛 | 解锁异常也关闭描述符 | 已覆盖 | ../../../test/container/test_container_role_lock.py::test_role_lock_closes_descriptor_even_when_unlock_raises | 异常退出后不残留本进程描述符。 |
-| ROOT 交接并发收敛 | fork 子进程不继承父进程重入资格 | 已覆盖 | ../../../test/container/test_container_role_lock.py::test_forked_child_does_not_inherit_parent_reentrancy_or_lock_descriptor | 独立解释器内实际 fork，父进程持锁时子进程阻塞，释放后正常获得。 |
+#### Scenario: 旧 ROOT 降 ADMIN 的独立账号使用其系统用户名
 
-- 上述新增三项文件边界先实测 RED（3 failed），修复后与原对抗文件合跑 31 passed；再补无 fcntl 降级测试，最终默认全量为 **1466 passed、6 deselected、1 warning、24 subtests passed**（230.46s）。
-- 当前代码基于本轮未提交工作区；主规格未因这些实现边界改写，哈希沿用上节所列值。
-- 日志：外部 `adversarial-ctrl/lock-edge-red.log`、`lock-edge-green.log`、`27-full-final-portability.log`；Windows 实测脚本位于外部 `windows-lock-smoke.py`。
-- 该 Windows 验证只证明工具的导入和线程锁降级，不宣称 Windows 跨进程互斥或完整应用部署验收。
-- 最终主规格按职责拆分长段落，未改变业务约束；当前 SHA256：b796604f9f6749223068cd53cffa3c65f2bcf0d09feac8af1ce2c0c3dd93d2c3。
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_root_handover_contract
+- Assertion scope: 旧 ROOT 绑定 `username="root"`、用户表系统用户名为另一个名字时，降级 Node `config.user_name` 与凭据 `login_name` 都使用后者；Node wire 携带该系统用户名与该密码，成功绑定落为 ADMIN/该系统用户名。
+- Coverage note: 真实 Node 是否创建/确保独立账号不在本仓库测试范围；Ctrl 侧断言的是 wire 内容与绑定结果。
+
+#### Scenario: 直接 ROOT 降 ADMIN 也返回独立账号密码
+
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_role_change_semantics_contract
+  - [X] test/container/test_anvil_freeze_membership.py::test_anvil_uc07_direct_root_demotion_api_returns_credential
+- Assertion scope: 目标当前为 ROOT 时调用 ROOT→ADMIN，服务返回一项 `login_name` 为系统用户名的凭据；Node `config.password` 等于该凭据；绑定更新为 ADMIN/系统用户名；该路径不经过外部 ROOT 交接的多旧 ROOT 遍历，也不当作普通非 ROOT 互换（普通互换无密码字段）。计划项走 HTTP 入口，断言 200、`accepted=true`、`Cache-Control: no-store`、恰一项凭据，且 Node wire 与绑定符合上述内容。
+- Coverage note: 既有用例在 service 层断言凭据/Node/绑定，没有断言 API 的 `accepted` 与 `Cache-Control`。
+
+#### Scenario: 机器或容器不可用时不生成密码
+
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_root_handover_preflight_contract
+- Assertion scope: 目标未绑定、容器离线、机器离线分别抛 `target_not_bound`、`container_offline`、`machine_offline`；密码生成器调用记录为空，Node 调用记录为空，不返回凭据。
+
+#### Scenario: 目标未绑定或用户名不可用时不生成密码
+
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_root_handover_preflight_contract
+  - [X] test/container/test_role_adversarial.py::test_root_handover_preflight_rejects_node_unusable_names[target-root]
+  - [X] test/container/test_role_adversarial.py::test_root_handover_preflight_rejects_node_unusable_names[target-leading-dash]
+  - [X] test/container/test_role_adversarial.py::test_root_handover_preflight_rejects_node_unusable_names[old-root-leading-dash]
+  - [X] test/container/test_anvil_freeze_membership.py::test_anvil_uc08_handover_preflight_api_maps_409
+- Assertion scope: 目标未绑定为 `target_not_bound`；旧 ROOT 系统用户名不可用为 `invalid_root_owner_account`；目标系统用户名为 `root` 或前导 `-` 为 `invalid_target_account`；旧 ROOT 前导 `-` 为 `invalid_root_owner_account`。以上均在生成密码/Node 前失败，密码生成记录为空。计划项走 HTTP 入口，断言目标未绑定/用户名不可用分别返回 409 与对应 reason、无 `credentials`、无 Node 调用。
+- Coverage note: 既有用例在 service 层断言 reason 与密码生成器未调用；API 的 409 映射与无凭据响应仍缺断言。
+
+#### Scenario: 调用者先被降级也不影响后续步骤
+
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_root_handover_contract
+  - [X] test/container/test_role_adversarial.py::test_accepted_handover_survives_caller_permission_revocation
+- Assertion scope: 调用者本身是旧 ROOT 时，后台仍完成旧 ROOT 降级与目标升 ROOT；受理后收回调用者机器权限，已受理任务仍完成，目标成为唯一 ROOT。
+
+### Requirement: ROOT 交接的逐步执行与失败边界
+
+#### Scenario: 两步成功各记一条真实日志
+
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_root_handover_steps_contract
+  - [X] test/container/test_password_contracts.py::test_root_handover_contract
+- Assertion scope: Node 恰好两次调用，顺序 `admin`、`root`；两条 `update_collaborator_role` 成功日志；旧 ROOT 绑定 ADMIN/系统用户名，目标绑定 ROOT/`username=root`；日志文本不含密码。
+
+#### Scenario: 第一步失败不继续第二步
+
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_root_handover_steps_contract
+  - [X] test/container/test_role_adversarial.py::test_node_failure_during_demotion_stops_before_promotion[timeout]
+  - [X] test/container/test_role_adversarial.py::test_node_failure_during_demotion_stops_before_promotion[exception]
+- Assertion scope: 第一个旧 ROOT 降级失败后只发生一次 Node 调用，目标仍为 COLLABORATOR、不会被升 ROOT；失败路径写 `update_collaborator_role` 失败日志；Node 超时与异常两个分支一致。
+
+#### Scenario: 多个旧 ROOT 中任一降级失败也不提拔目标
+
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_root_handover_steps_contract
+  - [X] test/container/test_anvil_freeze_membership.py::test_anvil_uc03_multi_root_demotion_failure_writes_failure
+- Assertion scope: 既有用例让前一个旧 ROOT 成功降 ADMIN、后一个失败，断言只发生两次 `admin` Node 调用、目标仍 COLLABORATOR、仍有一个旧 ROOT 保留。计划项补失败步骤的 `update_collaborator_role` 失败日志、没有目标 ROOT 成功日志，且日志不含密码。
+- Coverage note: 既有用例没有断言失败 oplog 内容。
+
+#### Scenario: 第二步失败不伪报整体成功
+
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_root_handover_steps_contract
+- Assertion scope: 旧 ROOT 已成功降 ADMIN 的绑定保留；目标仍 COLLABORATOR、不记 ROOT 成功；失败步骤写 `update_collaborator_role` 失败日志。
+- Coverage note: 用例没有单独统计成功日志条数；目标绑定未落 ROOT 且失败日志存在，已覆盖“不伪报整体成功”的可观察结果。
+
+#### Scenario: 绑定更新失败也停止后续步骤
+
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_root_handover_steps_contract
+  - [X] test/container/test_role_adversarial.py::test_binding_failure_during_demotion_stops_before_promotion
+  - [X] test/container/test_anvil_freeze_membership.py::test_anvil_uc04_binding_failure_writes_failure_oplog
+- Assertion scope: 第二步 Node 成功后写目标绑定失败时，旧 ROOT 保持 ADMIN、目标保持 COLLABORATOR，后续不再执行；降级步骤绑定失败时旧 ROOT 保持 ROOT，目标不升。计划项补失败步骤的失败 oplog、不写该步成功日志，且日志不含密码。
+- Coverage note: 既有两个用例只断言停止与角色状态，没有断言失败 oplog。
+
+#### Scenario: 后台最小 guard 复核失败只记失败
+
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_root_handover_steps_contract
+  - [X] test/container/test_anvil_freeze_membership.py::test_anvil_uc05_background_guard_failure_writes_failure_oplog
+- Assertion scope: 已受理后容器离线，后台执行前 guard 失败时不调用 Node，目标保持 COLLABORATOR。计划项补失败 oplog、无该步成功日志、无新增 DTO/持久状态，且日志不含密码。
+- Coverage note: 既有用例没有断言失败 oplog。
+
+#### Scenario: Node 只改指定目标
+
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_root_handover_steps_contract
+  - [X] test/container/test_account_wire_contracts.py::test_ctrl_legacy_transfer_root_never_enters_node_wire
+- Assertion scope: Ctrl 按旧 ROOT 与目标逐个发起 `update_role`，每个 Node payload 只暴露该步的 `config.user_name`/`updated_role` 等单目标字段；Node wire 不含 `transfer_root`。
+- Coverage note: 既有测试没有也不应由 Ctrl 断言真实 Node 内部是否扫描其他账号；这里只能证明 Ctrl 每次只发送一个目标，Node 自身不自动扫描的承诺不在本仓库测试范围内。
+
+### Requirement: ROOT 交接的并发串行化与已受理冲突
+
+#### Scenario: 真实线程同容器并发只允许一个交接完成
+
+- Test/check:
+  - [X] test/container/test_role_adversarial.py::test_threaded_handover_barrier_keeps_one_root_and_attributes_commands
+- Assertion scope: 两个真实线程在 barrier 后竞争同一容器锁；恰好一个完成降旧 ROOT、升目标并发送 `admin`/`root` 两次 Node，另一个 stale 退出且零 Node；最终 ROOT 集合恰好一个，Node 命令只归属胜出任务的凭据，失败任务密码不出现在 wire/日志。
+
+#### Scenario: 同机独立进程竞争同一容器锁
+
+- Test/check:
+  - [X] test/container/test_role_adversarial.py::test_container_role_lock_nested_reentrant_and_empty_marker
+  - [X] test/container/test_role_adversarial.py::test_container_role_lock_cross_process
+  - [X] test/container/test_container_role_lock.py::test_thread_lock_fallback_works_without_fcntl
+  - [X] test/container/test_container_role_lock.py::test_role_lock_rejects_symlink_directory_without_chmod
+  - [X] test/container/test_container_role_lock.py::test_forked_child_does_not_inherit_parent_reentrancy_or_lock_descriptor
+- Assertion scope: 同线程嵌套获取可重入且锁文件为空标记；独立子进程持锁时另一子进程阻塞，释放后才获得；无 fcntl 时线程锁仍能阻塞同进程竞争者；符号链接锁目录被拒且未改权限/写文件；fork 子进程不继承父进程重入资格。锁文件只作空标记，不含密码或业务状态。
+- Coverage note: 跨进程用例仅在 POSIX（`fcntl`/`fork`）有效，Windows 上按既有 skip 条件不执行；当前并发承诺限定单 Linux Ctrl 主机，多 Ctrl 主机、Windows 跨进程与真实生产 MySQL 互斥未验证。
+
+### Requirement: ROOT 交接的身份预检与获锁复核
+
+#### Scenario: 已受理的同容器交接冲突以 stale 结束
+
+- Test/check:
+  - [X] test/container/test_role_adversarial.py::test_repeated_handover_to_same_target_keeps_one_root_and_stales_second
+  - [X] test/container/test_role_adversarial.py::test_interleaved_handover_to_two_targets_must_not_leave_two_roots
+- Assertion scope: 第二次任务持锁后重读发现当前 ROOT 集合与受理快照不同，写一条 `root_handover_stale` 失败并在任何 Node 前退出；第二个响应中的密码不出现在 Node wire/日志；最终恰好一个 ROOT，后受理目标不增加额外 ROOT。
+- Coverage note: 既有断言隔离的是 `expected_root_ids`/`current_root_ids` 的 ROOT 集合差异；目标角色与用户名的单独比较没有被这些用例分开断言。
+
+#### Scenario: Node 不可用用户名在预检被拒
+
+- Test/check:
+  - [X] test/container/test_role_adversarial.py::test_root_handover_preflight_rejects_node_unusable_names[target-root]
+  - [X] test/container/test_role_adversarial.py::test_root_handover_preflight_rejects_node_unusable_names[target-leading-dash]
+  - [X] test/container/test_role_adversarial.py::test_root_handover_preflight_rejects_node_unusable_names[old-root-leading-dash]
+  - [X] test/container/test_password_contracts.py::test_root_handover_preflight_contract
+- Assertion scope: 目标系统用户名 `root`/前导 `-` 返回 `invalid_target_account`，旧 ROOT 系统用户名前导 `-` 或与保留 `root` 冲突返回 `invalid_root_owner_account`；均在生成密码、返回 200、调用 Node 前失败，不产生凭据。
+
+### Requirement: ROOT 交接保留逐步提交事实
+
+#### Scenario: 机器中途维护或 DB/审计异常不整批回滚
+
+- Test/check:
+  - [X] test/container/test_role_adversarial.py::test_machine_offline_between_steps_keeps_first_committed_fact
+  - [X] test/container/test_role_adversarial.py::test_db_or_audit_exception_does_not_rollback_committed_step[binding]
+  - [X] test/container/test_role_adversarial.py::test_db_or_audit_exception_does_not_rollback_committed_step[audit]
+- Assertion scope: 第一步旧 ROOT 已成功降 ADMIN 并提交绑定/成功日志；下一步前机器离线或该步绑定/审计抛 DB 异常时，第一步 ADMIN 与成功日志保留。`binding` 分支目标仍未升 ROOT，`audit` 分支目标绑定虽已实际落 ROOT 但不写该步成功日志；两种情况都不整批回滚，失败步骤只影响自身。
+
+### Requirement: 删除用户内部 ROOT 提升的密码兼容
+
+#### Scenario: 删除用户内部提升生成随机 root 密码
+
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_delete_user_root_password_contract
+- Assertion scope: 删除用户触发内部提升时，Node 第一次调用是目标单目标 `updated_role=root`，携带非空 `config.root_password` 且不等于 `{user_name}123`；不带 `transfer_root`；目标最终成为 ROOT。第一次调用即为 root 提升（而非外部交接的旧 ROOT 降级），证明没有使用外部完整交接编排；不产生 HTTP 凭据响应。
+- Coverage note: 用例没有断言总 Node 调用次数；第一次调用形态与后续删除流程已覆盖“不是外部交接编排”的可观察部分。
+
+#### Scenario: 内部提升失败不回退弱密码
+
+- Test/check:
+  - [X] test/container/test_password_contracts.py::test_delete_user_root_password_contract
+  - [X] test/container/test_anvil_freeze_membership.py::test_anvil_uc06_delete_user_internal_promotion_failure_no_retry
+- Assertion scope: Node 内部提升失败时删除返回 `False`，用户/绑定保留；失败调用的 `root_password` 仍不是 `{user_name}123`。计划项补断言没有第二次用弱密码/空密码重试，且不存在伪造凭据或持久状态，失败日志不含密码或 Node 原始请求/响应体。
+- Coverage note: 既有用例只检查第一次调用的密码值，没有断言失败后的重试次数。
