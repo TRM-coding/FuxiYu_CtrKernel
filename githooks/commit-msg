@@ -50,8 +50,8 @@ fi
 
 # ── ② 每行须为「- 空格 关键字 空格 中文」 ──────────────────────
 #
-# 关键字限定为 NEW / AMEND / FIX 三者之一 —— 规格
-# 提交关键字仅允许 NEW / AMEND / FIX 三者之一。
+# 关键字限定为 NEW / AMEND / FIX / SPEC / TEST 五者之一 —— 规格
+# 提交关键字仅允许 NEW / AMEND / FIX / SPEC / TEST 五者之一。
 #
 # ⚠️ 这里曾写作 `^- [A-Z]+ .+$`，任何大写词都放行，于是
 #    `- GITIGINORE 添加了 ignore 内容` 这类拼写错误能一路提交进去。
@@ -67,7 +67,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     ''|'#'*) continue ;;
   esac
   items=$((items + 1))
-  if ! printf '%s' "$line" | grep -qE '^- (NEW|AMEND|FIX) .+$'; then
+  if ! printf '%s' "$line" | grep -qE '^- (NEW|AMEND|FIX|SPEC|TEST) .+$'; then
     echo "✗ 第 ${lineno} 行不符合条目格式：" >&2
     echo "      $line" >&2
     fail=1
@@ -87,7 +87,8 @@ if [ "$fail" -ne 0 ]; then
     - <关键字> <中文短句>
 
     关键字   NEW（新增） / AMEND（修改既有行为或结构） / FIX（修复缺陷）
-             三者之一，不可自造
+             SPEC（规格与文档） / TEST（测试）
+             五者之一，不可自造
     一行一条，不写段落
     每条自足，脱离上下文也能读懂改了什么
     连字符后必须有空格 —— 写成 -NEW 不合规
