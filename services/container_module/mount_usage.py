@@ -365,10 +365,6 @@ def _resolve_targets(deleted_ids: list[int]):
                     session=session,
                 )
 
-            # 已清理项不测量、不返回旧缓存；直接省略。
-            if bool(row.mount_cleaned) or (cleanup is not None and cleanup.cleaned_at is not None):
-                continue
-
             context = deleted_containers._get_deleted_container_context(
                 row,
                 cleanup,

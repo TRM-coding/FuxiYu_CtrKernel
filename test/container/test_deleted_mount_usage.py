@@ -155,7 +155,7 @@ def _dml_statements(statements):
     ]
 
 
-def test_returns_three_states_omits_cleaned_and_unknown(monkeypatch, db_session):
+def test_returns_three_states_including_cleaned(monkeypatch, db_session):
     machine = create_machine(machine_ip="127.0.40.1")
     ok_path = "/home/u/containers/ok"
     slow_path = "/home/u/containers/slow"
@@ -183,6 +183,7 @@ def test_returns_three_states_omits_cleaned_and_unknown(monkeypatch, db_session)
             _success_mount(ok_path, bytes_value=0),
             _pending_mount(slow_path),
             _error_mount(err_path),
+            _success_mount("/home/u/containers/cleaned", bytes_value=456),
         ),
     )
 
@@ -191,9 +192,9 @@ def test_returns_three_states_omits_cleaned_and_unknown(monkeypatch, db_session)
     )
 
     usages = _by_id(result)
-    assert list(usages) == [ok.id, slow.id, err.id, 999999]
+    assert list(usages) == [ok.id, slow.id, err.id, cleaned.id, 999999]
     assert len(calls) == 1
-    assert calls[0]["payload"] == {"config": {"mount_paths": [ok_path, slow_path, err_path]}}
+    assert calls[0]["payload"] == {"config": {"mount_paths": [ok_path, slow_path, err_path, "/home/u/containers/cleaned"]}}
     assert calls[0]["timeout"] == mount_usage.NODE_QUERY_TIMEOUT_SECONDS
 
     assert usages[ok.id]["bytes"] == 0
@@ -218,7 +219,7 @@ def test_returns_three_states_omits_cleaned_and_unknown(monkeypatch, db_session)
 
     for item in usages.values():
         _assert_usage_shape(item)
-    assert cleaned.id not in usages
+    assert usages[cleaned.id]["bytes"] == 456
     assert no_mount.id not in usages
 
 
@@ -748,22 +749,28 @@ def test_machine_id_falls_back_to_cleanup_record(monkeypatch, db_session):
         (False, datetime(2026, 10, 18, 12, 0, 0)),
     ],
 )
-def test_cleaned_rows_are_omitted_without_send(
+def test_cleaned_rows_with_paths_are_measured_read_only(
     monkeypatch, db_session, row_cleaned, cleaned_at,
 ):
     machine = create_machine(machine_ip="127.0.40.15")
-    row, _ = _insert_deleted(
+    row, cleanup = _insert_deleted(
         db_session,
         machine=machine,
         row_mount_cleaned=row_cleaned,
         cleanup_cleaned_at=cleaned_at,
     )
-    calls = _mock_send(monkeypatch, lambda url, payload: pytest.fail("cleaned row must not be called"))
+    path = "/home/u/containers/deleted_data"
+    calls = _mock_send(monkeypatch, lambda url, payload: _node_response(_success_mount(path)))
 
-    result = container_tasks.get_deleted_container_mount_usage([row.id])
+    with _capture_sql(db_session) as statements:
+        result = container_tasks.get_deleted_container_mount_usage([row.id])
 
-    assert result["usages"] == []
-    assert calls == []
+    assert _by_id(result)[row.id]["bytes"] == 123
+    assert calls[0]["payload"] == {"config": {"mount_paths": [path]}}
+    assert _dml_statements(statements) == []
+    db_session.expire_all()
+    assert db_session.get(DeletedContainerRestoreSnapshot, row.id).mount_cleaned == row_cleaned
+    assert db_session.get(ContainerMountCleanup, cleanup.id).cleaned_at == cleaned_at
 
 
 def test_row_without_mount_path_is_omitted_without_send(monkeypatch, db_session):
@@ -1044,7 +1051,7 @@ def test_api_accepts_exactly_100_ids(client, monkeypatch):
     assert captured["deleted_ids"] == ids
 
 
-def test_api_omits_cleaned_and_no_mount_without_node(client, monkeypatch, db_session):
+def test_api_queries_cleaned_and_omits_no_mount(client, monkeypatch, db_session):
     _auth(monkeypatch)
     machine = create_machine(machine_ip="127.0.40.21")
     cleaned, _ = _insert_deleted(
@@ -1061,7 +1068,8 @@ def test_api_omits_cleaned_and_no_mount_without_node(client, monkeypatch, db_ses
         snapshot_path=None,
         with_cleanup=False,
     )
-    calls = _mock_send(monkeypatch, lambda url, payload: pytest.fail("omitted rows must not reach Node"))
+    path = "/home/u/containers/api_cleaned"
+    calls = _mock_send(monkeypatch, lambda url, payload: _node_response(_error_mount(path, "not_found")))
 
     resp = client.post(
         "/api/containers/get_deleted_container_mount_usage",
@@ -1069,8 +1077,9 @@ def test_api_omits_cleaned_and_no_mount_without_node(client, monkeypatch, db_ses
     )
 
     assert resp.status_code == 200
-    assert resp.json() == {"success": 1, "usages": []}
-    assert calls == []
+    assert _by_id(resp.json())[cleaned.id]["error"] == "not_found"
+    assert no_mount.id not in _by_id(resp.json())
+    assert calls[0]["payload"] == {"config": {"mount_paths": [path]}}
 
 
 def test_api_requires_container_manage(client, monkeypatch):
