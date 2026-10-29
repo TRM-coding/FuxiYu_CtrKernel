@@ -5,8 +5,9 @@ from sqlalchemy import event
 from ...api import container_api, deps
 from ...constant import ContainerStatus
 from ...models.containers import Container
+from ...models.operation_log import OperationLog
 from ...services import container_tasks
-from ..factories import create_container
+from ..factories import bind_user_container, create_container, create_user
 
 
 @contextmanager
@@ -313,8 +314,55 @@ def test_get_container_operation_logs_api_filters_by_container(db_session, clien
     assert {log["operation"] for log in logs} == {"start_container", "stop_container"}
     assert all(log["target_id"] == container.id for log in logs)
     assert all("operator_username" in log for log in logs)
+    # Q45：容器历史与管理日志同表查询，但历史只补 operator_username，
+    # 不要求出现管理日志的目标展示字段，也不强求两边 DTO 一致。
+    assert all("target_name" not in log for log in logs)
+    assert all("target_display_name" not in log for log in logs)
+    assert all("root_owner" not in log for log in logs)
     failed = next(log for log in logs if not log["success"])
     assert failed["error_reason"] == "x"
+
+
+def test_same_operation_log_row_has_separate_admin_and_history_dtos(
+    client, monkeypatch, db_session
+):
+    """Q45：同一行日志由两个入口各自查询、各自补展示字段，不强制 DTO 一致。"""
+
+    _auth(monkeypatch)
+    monkeypatch.setattr(
+        "FuxiYu_CtrKernel.services.rbac_service._has_entity_direct",
+        lambda uid, entity: True,
+    )
+    owner = create_user(username="q45_owner")
+    container = create_container(name="q45_container")
+    bind_user_container(owner, container)
+    db_session.add(OperationLog(
+        operator_user_id=owner.id,
+        operation="start_container",
+        target_type="container",
+        target_id=container.id,
+        detail={"name": container.name},
+        success=True,
+    ))
+    db_session.commit()
+
+    admin_resp = client.get("/api/admin/operation_logs?target_type=container")
+    history_resp = client.post(
+        "/api/containers/get_container_operation_logs",
+        json={"container_id": container.id},
+    )
+
+    assert admin_resp.status_code == 200
+    assert history_resp.status_code == 200
+    admin_log = admin_resp.json()["logs"][0]
+    history_log = history_resp.json()["logs"][0]
+    assert admin_log["id"] == history_log["id"]
+    assert admin_log["target_name"] == container.name
+    assert admin_log["target_display_name"] == container.name
+    assert admin_log["root_owner"] == owner.username
+    assert history_log["operator_username"] == owner.username
+    assert "target_name" not in history_log
+    assert "root_owner" not in history_log
 
 
 def test_container_operation_logs_filters_old_id_reuse_logs(client, monkeypatch, db_session):

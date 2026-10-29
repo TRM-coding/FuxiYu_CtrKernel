@@ -50,6 +50,92 @@ def test_list_filter_by_success(db_session):
     assert len(rows) == 2
 
 
+def _seed_mixed(db_session):
+    operation_log_repo.write(
+        operator_user_id=1, operation=OperationType.CREATE_CONTAINER.value,
+        target_type="container", target_id=10, detail={"name": "a"}, success=True,
+        session=db_session,
+    )
+    operation_log_repo.write(
+        operator_user_id=2, operation=OperationType.UPDATE_MACHINE.value,
+        target_type="machine", target_id=20, detail={"name": "m"}, success=True,
+        session=db_session,
+    )
+    operation_log_repo.write(
+        operator_user_id=1, operation=OperationType.CHANGE_PASSWORD.value,
+        target_type="user", target_id=30, detail={"username": "u"}, success=False,
+        error_reason="old_password_incorrect", session=db_session,
+    )
+    operation_log_repo.write(
+        operator_user_id=None, operation=OperationType.PAUSE_CONTAINER.value,
+        target_type="container", target_id=40, detail={}, success=False,
+        error_reason="disk_limit", session=db_session,
+    )
+
+
+def test_list_filter_by_multiple_target_types_is_or(db_session):
+    _seed_mixed(db_session)
+
+    rows, _ = operation_log_repo.list_logs(
+        target_type=["container", "machine"], page_size=10, session=db_session,
+    )
+
+    assert {row.target_type for row in rows} == {"container", "machine"}
+    assert [row.target_id for row in rows] == [40, 20, 10]
+    assert all(row.target_type != "user" for row in rows)
+
+
+def test_list_multiple_target_types_combine_with_other_filters_as_and(db_session):
+    _seed_mixed(db_session)
+
+    rows, total_pages = operation_log_repo.list_logs(
+        target_type=["container", "machine"],
+        operator_user_id=1,
+        success=True,
+        page_size=10,
+        session=db_session,
+    )
+
+    assert [row.target_id for row in rows] == [10]
+    assert total_pages == 1
+
+
+def test_list_single_string_target_type_remains_compatible(db_session):
+    _seed_mixed(db_session)
+
+    rows, _ = operation_log_repo.list_logs(
+        target_type="machine", page_size=10, session=db_session,
+    )
+
+    assert [row.target_id for row in rows] == [20]
+
+
+def test_list_empty_target_type_values_do_not_filter(db_session):
+    _seed_mixed(db_session)
+
+    for empty in (None, "", [], ["", None]):
+        rows, _ = operation_log_repo.list_logs(
+            target_type=empty, page_size=10, session=db_session,
+        )
+        assert len(rows) == 4
+
+
+def test_list_pagination_uses_multi_target_type_filtered_total(db_session):
+    _seed_mixed(db_session)
+
+    first, total_pages = operation_log_repo.list_logs(
+        target_type=["container", "machine"], page=1, page_size=2, session=db_session,
+    )
+    second, second_total_pages = operation_log_repo.list_logs(
+        target_type=["container", "machine"], page=2, page_size=2, session=db_session,
+    )
+
+    assert total_pages == 2
+    assert second_total_pages == 2
+    assert [row.target_id for row in first] == [40, 20]
+    assert [row.target_id for row in second] == [10]
+
+
 def test_list_pagination(db_session):
     _seed(db_session)
     rows, total_pages = operation_log_repo.list_logs(page=1, page_size=2, session=db_session)

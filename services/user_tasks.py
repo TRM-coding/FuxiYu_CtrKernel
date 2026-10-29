@@ -429,6 +429,15 @@ def Update_user(user_id:int,**fields)->User|None:
     if 'email' in fields:
         del fields['email']
 
+    # 毕业年份不允许清空：请求层已把空串归一为 None，这里再拦内部调用传入的
+    # None/空串，避免把已保存的年份改成 NULL 或空字符串（列本身保持 NOT NULL）。
+    if 'graduation_year' in fields:
+        graduation_year = fields['graduation_year']
+        if graduation_year is None or (
+            isinstance(graduation_year, str) and not graduation_year.strip()
+        ):
+            del fields['graduation_year']
+
     # 防御性检查：限制字段长度，防止过长输入导致数据库异常
     if 'username' in fields and fields['username'] and len(fields['username']) > 75:
         raise ValueError(f"username too long (max 75): length={len(fields['username'])}")

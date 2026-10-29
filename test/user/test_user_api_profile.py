@@ -5,6 +5,7 @@ import pytest
 from ...api import user_api, deps
 from ...extensions import session_scope
 from ...models.announcement import AnnouncementDraft
+from ...models.user import User
 from ...repositories import announcement_repo
 
 pytestmark = pytest.mark.usefixtures("ensure_auth_users")
@@ -268,6 +269,40 @@ def test_update_user_blank_graduation_year_does_not_block_other_updates(client, 
 
     assert resp.status_code == 200
     assert captured == {"username": "updated"}
+
+
+def test_update_user_blank_graduation_year_keeps_persisted_value(client, db_session, monkeypatch):
+    """Q54：空字符串不会清空已保存的毕业年份。"""
+
+    _valid_token(monkeypatch)
+
+    resp = client.post(
+        "/api/users/update_user",
+        json={
+            "user_id": 1,
+            "fields": {"username": "auth_user_1", "graduation_year": ""},
+        },
+    )
+
+    assert resp.status_code == 200
+    db_session.expire_all()
+    assert db_session.get(User, 1).graduation_year == "2026"
+
+
+def test_update_user_null_graduation_year_is_ignored(client, db_session, monkeypatch):
+    """Q54：null 既不清空毕业年份，也不会被当作有效更新字段。"""
+
+    _valid_token(monkeypatch)
+
+    resp = client.post(
+        "/api/users/update_user",
+        json={"user_id": 1, "fields": {"graduation_year": None}},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error_reason"] == "missing_fields"
+    db_session.expire_all()
+    assert db_session.get(User, 1).graduation_year == "2026"
 
 
 @pytest.mark.parametrize("reason", ["invalid_username", "no_none_ascii"])

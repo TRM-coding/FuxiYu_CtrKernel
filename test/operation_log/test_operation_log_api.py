@@ -70,11 +70,53 @@ def test_list_passes_filters(client, monkeypatch):
 
     assert resp.status_code == 200
     assert captured["operation"] == "create_container"
-    assert captured["target_type"] == "container"
+    assert captured["target_type"] == ["container"]
     assert captured["operator_user_id"] == 7
     assert captured["success"] is False
     assert captured["start"] == "2026-08-01T00:00:00"
     assert captured["end"] == "2026-08-16T00:00:00"
+
+
+def test_list_accepts_repeated_target_types(client, monkeypatch):
+    """Q44：重复 target_type 参数按多选传给服务层，顺序保持不变。"""
+
+    _auth(monkeypatch)
+    captured = {}
+    monkeypatch.setattr(operation_log_tasks, "list_operation_logs",
+                        lambda **kw: captured.update(kw) or {"logs": [], "total_pages": 0})
+
+    resp = client.get(
+        "/api/admin/operation_logs?target_type=container&target_type=machine&target_type=user"
+    )
+
+    assert resp.status_code == 200
+    assert captured["target_type"] == ["container", "machine", "user"]
+
+
+def test_list_without_target_type_passes_none(client, monkeypatch):
+    _auth(monkeypatch)
+    captured = {}
+    monkeypatch.setattr(operation_log_tasks, "list_operation_logs",
+                        lambda **kw: captured.update(kw) or {"logs": [], "total_pages": 0})
+
+    resp = client.get("/api/admin/operation_logs")
+
+    assert resp.status_code == 200
+    assert captured["target_type"] is None
+
+
+def test_list_does_not_expose_target_id_filter(client, monkeypatch):
+    """Q44：管理端不新增 target_id 过滤；未知查询参数不会传给服务层。"""
+
+    _auth(monkeypatch)
+    captured = {}
+    monkeypatch.setattr(operation_log_tasks, "list_operation_logs",
+                        lambda **kw: captured.update(kw) or {"logs": [], "total_pages": 0})
+
+    resp = client.get("/api/admin/operation_logs?target_id=99")
+
+    assert resp.status_code == 200
+    assert "target_id" not in captured
 
 
 def test_stats_requires_operator(client, monkeypatch):

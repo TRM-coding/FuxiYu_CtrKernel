@@ -230,7 +230,7 @@ def list_operation_logs(
     page_size: int = 20,
     operator_user_id: int | None = None,
     operation: str | None = None,
-    target_type: str | None = None,
+    target_type: str | list[str] | None = None,
     success: bool | None = None,
     start: str | None = None,
     end: str | None = None,

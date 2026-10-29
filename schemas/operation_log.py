@@ -10,7 +10,7 @@ class OperationLogListQuery(BaseModel):
     page_size: int = Field(default=20, ge=1)
     operator_user_id: int | None = None
     operation: str | None = None
-    target_type: str | None = None
+    target_type: list[str] | None = None
     success: bool | None = None
     start: str | None = None
     end: str | None = None

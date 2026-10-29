@@ -469,6 +469,31 @@ def test_update_user_filters_forbidden_fields(db_session):
     assert updated.graduation_year == "2027"
 
 
+def test_update_user_blank_graduation_year_does_not_clear(db_session):
+    """Q54：服务层也忽略空字符串，已保存年份保持原值。"""
+
+    user = create_user(username="blank_year_update_user", graduation_year="2026")
+
+    updated = user_tasks.Update_user(
+        user.id,
+        username="blank_year_updated",
+        graduation_year="",
+    )
+    assert updated.username == "blank_year_updated"
+
+    db_session.expire_all()
+    refreshed = db_session.get(type(user), user.id)
+    assert refreshed.graduation_year == "2026"
+
+
+def test_graduation_year_column_stays_not_nullable():
+    """Q54：不因允许空输入而放宽 users.graduation_year 的非空约束。"""
+
+    from ...models.user import User
+
+    assert User.__table__.c.graduation_year.nullable is False
+
+
 def test_update_user_rejects_invalid_username(db_session):
     user = create_user(username="invalid_update_user")
 

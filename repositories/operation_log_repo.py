@@ -1,6 +1,7 @@
 ﻿"""操作日志 repo：只接收 session，不提交事务。"""
 
 import logging
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -57,11 +58,20 @@ def _parse_naive_utc(s: str, tz_offset_minutes: int | None = None) -> datetime |
     return dt
 
 
+def _normalized_target_types(target_type: str | Sequence[str] | None) -> list[str]:
+    """把单个旧参数或多值参数归一为去空后的字符串列表。"""
+
+    if target_type is None:
+        return []
+    values = [target_type] if isinstance(target_type, str) else list(target_type)
+    return [value for value in values if isinstance(value, str) and value]
+
+
 def _filtered_stmt(
     *,
     operator_user_id: int | None = None,
     operation: str | None = None,
-    target_type: str | None = None,
+    target_type: str | Sequence[str] | None = None,
     target_id: int | None = None,
     success: bool | None = None,
     start: str | None = None,
@@ -73,8 +83,11 @@ def _filtered_stmt(
         stmt = stmt.where(OperationLog.operator_user_id == operator_user_id)
     if operation:
         stmt = stmt.where(OperationLog.operation == operation)
-    if target_type:
-        stmt = stmt.where(OperationLog.target_type == target_type)
+    target_types = _normalized_target_types(target_type)
+    if len(target_types) == 1:
+        stmt = stmt.where(OperationLog.target_type == target_types[0])
+    elif len(target_types) > 1:
+        stmt = stmt.where(OperationLog.target_type.in_(target_types))
     if target_id is not None:
         stmt = stmt.where(OperationLog.target_id == int(target_id))
     if success is not None:
@@ -97,7 +110,7 @@ def list_logs(
     page_size: int = 20,
     operator_user_id: int | None = None,
     operation: str | None = None,
-    target_type: str | None = None,
+    target_type: str | Sequence[str] | None = None,
     target_id: int | None = None,
     success: bool | None = None,
     start: str | None = None,
