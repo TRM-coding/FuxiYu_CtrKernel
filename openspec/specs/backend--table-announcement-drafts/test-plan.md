@@ -14,6 +14,12 @@ Spec: [spec.md](spec.md)
 - Assertion scope: `test_m02b` 用新 session 按主键重开“最小草稿”和“完整草稿”，断言 `id`/`title`/`content` 是 `str`、`created_by` 是 `int` 且等于创建者用户主键、`creator.id` 与主键一致（未用展示名替代）、`created_at`/`updated_at` 是插入时间窗内的 `datetime`、`raw_content` 与 `targets` 未赋值时回读为 `NULL`、赋值时按文本原样往返且 `targets` 不被解析成对象；`test_m02` 断言创建后 `title`/`content`/`created_by`/`creator.id` 与写入一致，并确认模型无 `template_id`。
 - Coverage note: 该表没有业务唯一键，因此未断言数据库级 NULL 拒绝；未验证生产 MySQL 方言下的默认值行为。
 
+#### Scenario: 草稿创建者外键为级联删除
+
+- Test/check:
+  - [X] test/announcement/test_draft_ownership.py::test_fresh_sqlite_draft_fk_is_cascade_and_pragma_on
+- Assertion scope: 新建 SQLite 测试库 `PRAGMA foreign_keys=1`，`foreign_key_list(announcement_drafts)` 中 `created_by` 唯一指向 `users.id` 且 `on_delete=CASCADE`。
+
 ### Requirement: announcement_drafts 生产职责与生命周期
 
 #### Scenario: 保存与列出草稿
@@ -45,3 +51,42 @@ Spec: [spec.md](spec.md)
   - [X] test/announcement/test_template_decoupling.py::test_q06_edit_or_rename_template_does_not_touch_generated_content
 - Assertion scope: `[edited]` 分支在模板正文被改后重开草稿，`[deleted]` 分支在模板被删后重开；两次都断言详情与列表返回相同的 `title`/`content`/`raw_content`/`targets`/`created_by`、出参无 `template_id`、列表 `total=1`，即不重新套用模板也不因模板缺失失败；`test_q06_edit_or_rename...` 断言改名+改正文+删除模板后草稿 `title`/`content` 与公告 `content` 都不被改写。
 - Coverage note: `test_q06_edit_or_rename...` 只比对 `title`/`content`，完整字段由两个 reopening 分支覆盖。旧库残留 `template_id` 列的启动自愈由 `test_q06_legacy_sqlite_draft_reference_is_safely_detached` 另测，不映射为本场景证据；未验证生产 MySQL 上的旧列迁移/删列行为。
+
+### Requirement: 草稿私有归属继续隔离
+
+#### Scenario: 他人草稿不可读写删发
+
+- Test/check:
+  - [X] test/announcement/test_draft_ownership.py::test_q08_repo_read_and_delete_are_owner_scoped
+  - [X] test/announcement/test_draft_ownership.py::test_q08_repo_update_other_operators_draft_rejected_and_unchanged
+  - [X] test/announcement/test_draft_ownership.py::test_q08_batch_send_rejects_other_operators_draft_without_side_effects
+  - [X] test/announcement/test_draft_ownership.py::test_q08_api_two_operator_isolation
+- Assertion scope: 仓储他人读取/删除/更新、服务批量发送均被拒且原草稿不变；API 隔离测试断言列表、读取、保存、删除、批量发送均被拒，完整草稿与公告快照不变。
+
+#### Scenario: 所属者仍可读写自己的草稿
+
+- Test/check:
+  - [X] test/announcement/test_models.py::test_m02b_draft_readback_contract
+  - [X] test/announcement/test_draft_ownership.py::test_q08_api_two_operator_isolation
+- Assertion scope: 模型读回 `created_by`/`creator`；所属者列表 `total=1` 且 `drafts[0]["created_by"]` 为 owner id，详情字段完整，更新后仍属于同一创建者。
+
+### Requirement: 用户删除级联所属草稿
+
+#### Scenario: 成功删除只清理目标用户草稿
+
+- Test/check:
+  - [X] test/user/test_user_tasks_profile.py::test_delete_user_cascades_own_drafts_and_keeps_others
+  - [X] test/announcement/test_ownership_contracts.py::test_delete_author_keeps_announcements_and_templates
+- Assertion scope: 目标用户 token/草稿被清理，其他用户草稿保留；公告/模板全标量快照不变，`delete_draft` spy 未触发；删作者测试进一步验证 auth/templates/announcements 与重发内容。
+
+#### Scenario: 最终事务失败整体回滚
+
+- Test/check:
+  - [X] test/user/test_user_tasks_profile.py::test_delete_user_cascade_rolls_back_on_transaction_failure
+- Assertion scope: 用户行及草稿级联后抛错，回滚后用户/token/目标草稿仍存在，其他草稿与公告/模板快照完全不变。
+
+#### Scenario: 无草稿用户仍可删除
+
+- Test/check:
+  - [X] test/user/test_user_tasks_profile.py::test_delete_user_success_unbinds_before_delete
+- Assertion scope: 无草稿用户成功删除，不因缺少级联草稿行报错。

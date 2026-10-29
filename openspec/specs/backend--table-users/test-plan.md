@@ -129,3 +129,26 @@ Spec: [spec.md](spec.md)
   - [X] test/user/test_user_tasks_registration_code.py::test_register_with_code_success_is_not_reusable
   - [X] test/user/test_user_tasks_registration_code.py::test_register_with_code_default_group_failure_rolls_back
 - Assertion scope: 成功注册后用户、默认 user 组绑定与 `consumed_at` 同时生效；同码再次注册返回 `registration_code_invalid`；默认组绑定失败时用户与消费整体回滚。
+
+### Requirement: 用户删除原子清理所属草稿
+
+#### Scenario: 有认证记录和草稿但无阻塞容器
+
+- Test/check:
+  - [X] test/user/test_user_tasks_profile.py::test_delete_user_cascades_own_drafts_and_keeps_others
+  - [X] test/user/test_user_api_profile.py::test_delete_user_with_drafts_actually_deletes_them
+- Assertion scope: 服务路径建 token/目标草稿/其他草稿/公告模板，删除后目标用户、token、草稿消失，其他草稿与公告/模板快照保留，manual `delete_draft` spy 未触发；API 路径真实删除目标用户及其 token/草稿并保留他人草稿。两条路径合计覆盖，不把 API 行夸大为公告/模板 fixture 或 `session_scope` spy。
+
+#### Scenario: 容器阻止删除
+
+- Test/check:
+  - [X] test/user/test_user_tasks_profile.py::test_delete_user_wild_container_keeps_user_and_tokens
+  - [X] test/user/test_user_tasks_profile.py::test_delete_user_wild_container_keeps_drafts
+- Assertion scope: wild_container 分支保留用户与 token；草稿测试另有其他用户草稿、公告/模板，异常后目标 token/草稿及其他数据快照均不变。
+
+#### Scenario: 最终事务在级联后失败
+
+- Test/check:
+  - [X] test/user/test_user_tasks_profile.py::test_delete_user_token_delete_failure_rolls_back_user
+  - [X] test/user/test_user_tasks_profile.py::test_delete_user_cascade_rolls_back_on_transaction_failure
+- Assertion scope: token 删除在用户删除前失败时用户/token 回滚；after-cascade 测试在级联后失败，断言用户/token/目标草稿恢复，其他草稿与公告/模板快照不变。

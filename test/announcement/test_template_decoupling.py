@@ -33,7 +33,6 @@ def _make_template(user, *, name="模板", subject="模板主题", body="模板�
             name=name,
             subject_template=subject,
             body_template=body,
-            created_by=user.id,
             session=session,
         )
 
@@ -43,7 +42,6 @@ def _make_announcement(user, *, template_id=None, title="公告", content="公�
         return announcement_repo.create_announcement(
             title=title,
             content=content,
-            created_by=user.id,
             status=AnnouncementStatus.SENT,
             template_id=template_id,
             session=session,

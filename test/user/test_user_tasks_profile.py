@@ -1,13 +1,14 @@
 import pytest
 from sqlalchemy import select
 
-from ...constant import ContainerStatus, ROLE
-from ...extensions import SessionRegistry
+from ...constant import AnnouncementStatus, ContainerStatus, ROLE
+from ...extensions import SessionRegistry, session_scope
+from ...models.announcement import Announcement, AnnouncementDraft, AnnouncementTemplate
 from ...models.authentications import Authentication
 from ...models.containers import Container
 from ...models.long_term_container import LongTermContainer
 from ...models.user import User
-from ...repositories import usercontainer_repo
+from ...repositories import announcement_repo, usercontainer_repo
 from ...services import user_tasks
 from ..factories import bind_user_container, create_auth, create_container, create_machine, create_user
 
@@ -189,6 +190,194 @@ def test_delete_user_token_delete_failure_rolls_back_user(monkeypatch, db_sessio
     db_session.expire_all()
     assert db_session.get(User, user_id) is not None
     assert _token_count(user_id) == 1
+
+
+def _save_owner_draft(user, *, title, session):
+    return announcement_repo.save_draft(
+        title=title,
+        content=f"{title}-content",
+        created_by=user.id,
+        session=session,
+    )
+
+
+def _save_announcement_and_template(session, *, suffix):
+    announcement = announcement_repo.create_announcement(
+        title=f"kept-announcement-{suffix}",
+        content=f"kept-content-{suffix}",
+        raw_content=f"kept-raw-{suffix}",
+        status=AnnouncementStatus.SENT,
+        targets="[]",
+        target_snapshot="[]",
+        recipient_count=1,
+        session=session,
+    )
+    template = announcement_repo.create_template(
+        name=f"kept-template-{suffix}",
+        subject_template=f"kept-subject-{suffix}",
+        body_template=f"kept-body-{suffix}",
+        description=f"kept-description-{suffix}",
+        session=session,
+    )
+    return announcement, template
+
+
+def _announcement_template_snapshot():
+    with session_scope(commit=False) as session:
+        announcements = session.scalars(
+            select(Announcement).order_by(Announcement.id)
+        ).all()
+        templates = session.scalars(
+            select(AnnouncementTemplate).order_by(AnnouncementTemplate.id)
+        ).all()
+        return (
+            tuple(
+                (
+                    row.id,
+                    row.title,
+                    row.content,
+                    row.raw_content,
+                    row.status,
+                    row.targets,
+                    row.target_snapshot,
+                    row.recipient_count,
+                    row.success_count,
+                    row.fail_count,
+                    row.created_at,
+                    row.sent_at,
+                    row.source_draft_id,
+                    row.template_id,
+                )
+                for row in announcements
+            ),
+            tuple(
+                (
+                    row.id,
+                    row.name,
+                    row.category,
+                    row.description,
+                    row.subject_template,
+                    row.body_template,
+                    row.source_announcement_id,
+                    row.created_at,
+                    row.updated_at,
+                )
+                for row in templates
+            ),
+        )
+
+
+def test_delete_user_cascades_own_drafts_and_keeps_others(monkeypatch, db_session):
+    target = create_user(username="cascade_draft_target")
+    other = create_user(username="cascade_draft_other")
+    target_id = target.id
+    create_auth(target, token="cascade-draft-token")
+
+    with session_scope() as session:
+        target_draft = _save_owner_draft(target, title="target", session=session)
+        other_draft = _save_owner_draft(other, title="other", session=session)
+        announcement, template = _save_announcement_and_template(session, suffix="cascade")
+        target_draft_id = target_draft.id
+        other_draft_id = other_draft.id
+        announcement_id = announcement.id
+        template_id = template.id
+
+    content_before = _announcement_template_snapshot()
+
+    monkeypatch.setattr(
+        user_tasks.usercontainer_repo,
+        "remove_user_from_all_containers",
+        lambda user_id, **kwargs: {"ok": True},
+    )
+    delete_draft_calls = []
+
+    def _must_not_delete_draft(*args, **kwargs):
+        delete_draft_calls.append((args, kwargs))
+        raise AssertionError("service must not delete drafts manually")
+
+    monkeypatch.setattr(announcement_repo, "delete_draft", _must_not_delete_draft)
+
+    assert user_tasks.Delete_user(target_id) is True
+
+    db_session.expire_all()
+    assert db_session.get(User, target_id) is None
+    assert db_session.get(AnnouncementDraft, target_draft_id) is None
+    assert db_session.get(AnnouncementDraft, other_draft_id) is not None
+    assert db_session.get(Announcement, announcement_id) is not None
+    assert db_session.get(AnnouncementTemplate, template_id) is not None
+    assert _token_count(target_id) == 0
+    assert delete_draft_calls == []
+    assert _announcement_template_snapshot() == content_before
+
+
+def test_delete_user_cascade_rolls_back_on_transaction_failure(monkeypatch, db_session):
+    target = create_user(username="cascade_rollback_target")
+    other = create_user(username="cascade_rollback_other")
+    target_id = target.id
+    create_auth(target, token="cascade-rollback-token")
+
+    with session_scope() as session:
+        target_draft = _save_owner_draft(target, title="target", session=session)
+        other_draft = _save_owner_draft(other, title="other", session=session)
+        _save_announcement_and_template(session, suffix="rollback")
+        target_draft_id = target_draft.id
+        other_draft_id = other_draft.id
+
+    content_before = _announcement_template_snapshot()
+
+    monkeypatch.setattr(
+        user_tasks.usercontainer_repo,
+        "remove_user_from_all_containers",
+        lambda user_id, **kwargs: {"ok": True},
+    )
+    original_delete_user = user_tasks.delete_user
+
+    def _delete_then_fail(user_id, *, session):
+        original_delete_user(user_id=user_id, session=session)
+        raise RuntimeError("fail after database cascade")
+
+    monkeypatch.setattr(user_tasks, "delete_user", _delete_then_fail)
+
+    with pytest.raises(RuntimeError, match="fail after database cascade"):
+        user_tasks.Delete_user(target_id)
+
+    db_session.expire_all()
+    assert db_session.get(User, target_id) is not None
+    assert db_session.get(AnnouncementDraft, target_draft_id) is not None
+    assert db_session.get(AnnouncementDraft, other_draft_id) is not None
+    assert _token_count(target_id) == 1
+    assert _announcement_template_snapshot() == content_before
+
+
+def test_delete_user_wild_container_keeps_drafts(monkeypatch, db_session):
+    target = create_user(username="wild_draft_target")
+    other = create_user(username="wild_draft_other")
+    create_auth(target, token="wild-draft-token")
+    with session_scope() as session:
+        draft = _save_owner_draft(target, title="wild", session=session)
+        other_draft = _save_owner_draft(other, title="wild-other", session=session)
+        _save_announcement_and_template(session, suffix="wild")
+        draft_id = draft.id
+        other_draft_id = other_draft.id
+
+    content_before = _announcement_template_snapshot()
+
+    monkeypatch.setattr(
+        user_tasks.usercontainer_repo,
+        "remove_user_from_all_containers",
+        lambda user_id, **kwargs: {"ok": False, "wild_containers": [144]},
+    )
+
+    with pytest.raises(Exception) as excinfo:
+        user_tasks.Delete_user(target.id)
+
+    assert getattr(excinfo.value, "wild_containers") == [144]
+    db_session.expire_all()
+    assert db_session.get(User, target.id) is not None
+    assert db_session.get(AnnouncementDraft, draft_id) is not None
+    assert db_session.get(AnnouncementDraft, other_draft_id) is not None
+    assert _token_count(target.id) == 1
+    assert _announcement_template_snapshot() == content_before
 
 
 def test_user_delete_is_blocked_by_token_without_explicit_cleanup(db_session):

@@ -20,7 +20,6 @@ from ..models.announcement import Announcement, AnnouncementDraft, AnnouncementT
 def create_announcement(
     title: str,
     content: str,
-    created_by: int,
     *,
     session: Session,
     status: AnnouncementStatus = AnnouncementStatus.SENDING,
@@ -34,7 +33,6 @@ def create_announcement(
     announcement = Announcement(
         title=title,
         content=content,
-        created_by=created_by,
         status=status,
         raw_content=raw_content,
         targets=targets,
@@ -56,15 +54,12 @@ def list_announcements(
     *,
     session: Session,
     status: list[str] | None = None,
-    created_by: int | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[Announcement], int]:
     stmt = select(Announcement)
     if status:
         stmt = stmt.where(Announcement.status.in_(status))
-    if created_by is not None:
-        stmt = stmt.where(Announcement.created_by == created_by)
 
     total = int(session.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
     rows = list(
@@ -140,7 +135,6 @@ def create_template(
     name: str,
     subject_template: str,
     body_template: str,
-    created_by: int,
     *,
     session: Session,
     description: str | None = None,
@@ -151,7 +145,6 @@ def create_template(
         name=name,
         subject_template=subject_template,
         body_template=body_template,
-        created_by=created_by,
         description=description,
         category=AnnouncementTemplateCategory(category),
         source_announcement_id=source_announcement_id,
@@ -190,6 +183,18 @@ def update_template(template_id: int, *, session: Session, **fields) -> Announce
     template = get_template_by_id(template_id, session=session)
     if template is None:
         return None
+
+    # SYSTEM 模板的类别是边界，不是普通可编辑字段：先校验，再改任何属性。
+    # 这样同请求里的名称/正文也不会在拒绝前被写入 session。
+    proposed_category = fields.get("category")
+    if template.category == AnnouncementTemplateCategory.SYSTEM and proposed_category is not None:
+        try:
+            normalized_category = AnnouncementTemplateCategory(proposed_category)
+        except (TypeError, ValueError):
+            normalized_category = None
+        if normalized_category != AnnouncementTemplateCategory.SYSTEM:
+            raise ValueError("cannot_change_system_template_category")
+
     for key, value in fields.items():
         if key in allowed and value is not None:
             if key == "category":

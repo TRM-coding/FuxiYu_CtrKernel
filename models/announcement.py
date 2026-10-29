@@ -19,7 +19,6 @@ class Announcement(db.Model):
     title = db.Column(db.String(200), nullable=False)
     content = db.Column(db.Text, nullable=False)
     raw_content = db.Column(db.Text, nullable=True)
-    created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     status = db.Column(
         db.Enum(AnnouncementStatus, values_callable=lambda obj: [e.value for e in obj]),
         nullable=False,
@@ -35,7 +34,6 @@ class Announcement(db.Model):
     source_draft_id = db.Column(db.Integer, nullable=True)
     template_id = db.Column(db.Integer, db.ForeignKey("announcement_templates.id"), nullable=True)
 
-    creator = db.relationship("User")
     template = db.relationship("AnnouncementTemplate", foreign_keys=[template_id])
 
     def __repr__(self) -> str:  # pragma: no cover
@@ -56,11 +54,8 @@ class AnnouncementTemplate(db.Model):
     subject_template = db.Column(db.String(200), nullable=False)
     body_template = db.Column(db.Text, nullable=False)
     source_announcement_id = db.Column(db.Integer, nullable=True)
-    created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     created_at = db.Column(db.DateTime, default=dt.datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow)
-
-    creator = db.relationship("User")
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<AnnouncementTemplate {self.id} name={self.name!r} category={self.category}>"
@@ -76,7 +71,11 @@ class AnnouncementDraft(db.Model):
     title = db.Column(db.String(200), nullable=False)
     content = db.Column(db.Text, nullable=False)
     raw_content = db.Column(db.Text, nullable=True)
-    created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    created_by = db.Column(
+        db.Integer,
+        db.ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
     targets = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=dt.datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow)

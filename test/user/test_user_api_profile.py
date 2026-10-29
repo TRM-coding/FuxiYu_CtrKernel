@@ -3,6 +3,9 @@ from types import SimpleNamespace
 import pytest
 
 from ...api import user_api, deps
+from ...extensions import session_scope
+from ...models.announcement import AnnouncementDraft
+from ...repositories import announcement_repo
 
 pytestmark = pytest.mark.usefixtures("ensure_auth_users")
 
@@ -194,6 +197,48 @@ def test_delete_user_with_token_actually_deletes_user_and_token(client, monkeypa
     db_session.expire_all()
     assert db_session.get(User, 7) is None
     assert db_session.scalars(select(Authentication).where(Authentication.user_id == 7)).all() == []
+
+
+def test_delete_user_with_drafts_actually_deletes_them(client, monkeypatch, db_session):
+    """真实 API 删除目标用户时，所属草稿随最终事务级联消失，他人草稿保留。"""
+    from sqlalchemy import select
+
+    from ...models.authentications import Authentication
+    from ...models.user import User
+    from ..factories import create_auth
+
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
+    _valid_token(monkeypatch, user_id=1)
+
+    target = db_session.get(User, 7)
+    other = db_session.get(User, 1)
+    assert target is not None and other is not None
+    create_auth(target, token="api-delete-drafts-token")
+    with session_scope() as session:
+        target_draft = announcement_repo.save_draft(
+            title="target draft",
+            content="target content",
+            created_by=target.id,
+            session=session,
+        )
+        other_draft = announcement_repo.save_draft(
+            title="other draft",
+            content="other content",
+            created_by=other.id,
+            session=session,
+        )
+        target_draft_id = target_draft.id
+        other_draft_id = other_draft.id
+
+    resp = client.post("/api/users/delete_user", json={"user_id": 7})
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] == 1
+    db_session.expire_all()
+    assert db_session.get(User, 7) is None
+    assert db_session.scalars(select(Authentication).where(Authentication.user_id == 7)).all() == []
+    assert db_session.get(AnnouncementDraft, target_draft_id) is None
+    assert db_session.get(AnnouncementDraft, other_draft_id) is not None
 
 
 def test_update_user_success(client, monkeypatch):

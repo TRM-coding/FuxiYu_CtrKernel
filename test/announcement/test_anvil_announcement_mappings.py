@@ -46,7 +46,6 @@ def _make_template(
             name=name,
             subject_template=subject,
             body_template=body,
-            created_by=user_id,
             category=category,
             session=session,
             **kwargs,
@@ -90,7 +89,6 @@ def _make_announcement(
             title=title,
             content=content,
             raw_content=raw_content,
-            created_by=user_id,
             status=status,
             targets=targets,
             target_snapshot=target_snapshot,
@@ -107,7 +105,6 @@ def _announcement_snapshot(announcement: Announcement) -> dict:
         "title": announcement.title,
         "content": announcement.content,
         "raw_content": announcement.raw_content,
-        "created_by": announcement.created_by,
         "status": announcement.status,
         "targets": announcement.targets,
         "target_snapshot": announcement.target_snapshot,
@@ -143,7 +140,6 @@ def _template_snapshot(template: AnnouncementTemplate) -> dict:
         "subject_template": template.subject_template,
         "body_template": template.body_template,
         "source_announcement_id": template.source_announcement_id,
-        "created_by": template.created_by,
         "created_at": template.created_at,
         "updated_at": template.updated_at,
     }
@@ -173,15 +169,13 @@ def _count_drafts_and_announcements() -> tuple[int, int]:
 
 
 def test_anvil_t01_template_readback_contract(db_session):
-    """模板跨 session 读回：类型、默认分类、空值和创建者主键。"""
-    owner = create_user()
+    """模板跨 session 读回：类型、默认分类、空值和时间字段。"""
     before = dt.datetime.utcnow()
     with session_scope() as session:
         minimal = announcement_repo.create_template(
             name="anvil-t01-minimal",
             subject_template="最小主题",
             body_template="最小正文",
-            created_by=owner.id,
             session=session,
         )
         minimal_id = minimal.id
@@ -189,7 +183,6 @@ def test_anvil_t01_template_readback_contract(db_session):
             name="anvil-t01-full",
             subject_template="完整主题",
             body_template="完整正文",
-            created_by=owner.id,
             description="完整描述",
             source_announcement_id=42,
             session=session,
@@ -207,9 +200,8 @@ def test_anvil_t01_template_readback_contract(db_session):
             assert isinstance(template.name, str)
             assert isinstance(template.subject_template, str)
             assert isinstance(template.body_template, str)
-            assert isinstance(template.created_by, int)
-            assert template.created_by == owner.id
-            assert template.creator is not None and template.creator.id == owner.id
+            assert not hasattr(template, "created_by")
+            assert not hasattr(template, "creator")
             assert template.category == AnnouncementTemplateCategory.CUSTOM
             assert isinstance(template.created_at, dt.datetime)
             assert isinstance(template.updated_at, dt.datetime)
@@ -247,6 +239,7 @@ def test_anvil_t02_api_template_detail_returns_editor_initial_values(client, mon
     assert payload["template"]["subject_template"] == "编辑主题 {{name}}"
     assert payload["template"]["body_template"] == "编辑正文 {{body}}"
     assert payload["template"]["source_announcement_id"] == source_announcement.id
+    assert "created_by" not in payload["template"]
     assert _count_drafts_and_announcements() == before_counts
 
 
@@ -357,7 +350,6 @@ def test_anvil_t05_api_template_pagination_order_default_and_filtered_total(
                 subject_template=f"主题 {index}",
                 body_template=f"正文 {index}",
                 source_announcement_id=None,
-                created_by=owner.id,
                 created_at=stamp,
                 updated_at=stamp,
             )
@@ -385,6 +377,7 @@ def test_anvil_t05_api_template_pagination_order_default_and_filtered_total(
     assert default_payload["total"] == 205
     assert len(default_ids) == 100
     assert default_ids == expected[:100]
+    assert all("created_by" not in row for row in default_payload["templates"])
 
     explicit_payload, explicit_ids = _fetch("?limit=100&offset=0")
     assert explicit_payload["total"] == 205
@@ -415,13 +408,11 @@ def test_anvil_t05_api_template_pagination_order_default_and_filtered_total(
 
 def test_anvil_a01_announcement_readback_contract(db_session):
     """公告跨 session 读回：默认计数、可空列、target_snapshot 与 source_draft_id。"""
-    owner = create_user()
     before = dt.datetime.utcnow()
     with session_scope() as session:
         minimal = Announcement(
             title="最小公告",
             content="最小正文",
-            created_by=owner.id,
             status=AnnouncementStatus.SENDING,
         )
         session.add(minimal)
@@ -433,7 +424,6 @@ def test_anvil_a01_announcement_readback_contract(db_session):
             title="完整公告",
             content="完整正文",
             raw_content="完整原文",
-            created_by=owner.id,
             status=AnnouncementStatus.PARTIAL,
             targets='[{"type":"user","id":1}]',
             target_snapshot='[{"type":"user","id":1,"display_name":"u"}]',
@@ -457,9 +447,8 @@ def test_anvil_a01_announcement_readback_contract(db_session):
         for announcement in (minimal, full):
             assert isinstance(announcement.title, str)
             assert isinstance(announcement.content, str)
-            assert isinstance(announcement.created_by, int)
-            assert announcement.created_by == owner.id
-            assert announcement.creator is not None and announcement.creator.id == owner.id
+            assert not hasattr(announcement, "created_by")
+            assert not hasattr(announcement, "creator")
             assert isinstance(announcement.status, AnnouncementStatus)
             assert isinstance(announcement.created_at, dt.datetime)
             assert before <= announcement.created_at <= after

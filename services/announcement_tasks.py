@@ -175,14 +175,13 @@ class _PreparedSend:
 class _DraftSnapshot:
     """发送前从草稿里取出的字段（只读，避免长事务）。"""
 
-    __slots__ = ("draft_id", "title", "content", "raw_content", "created_by")
+    __slots__ = ("draft_id", "title", "content", "raw_content")
 
-    def __init__(self, *, draft_id, title, content, raw_content, created_by):
+    def __init__(self, *, draft_id, title, content, raw_content):
         self.draft_id = draft_id
         self.title = title
         self.content = content
         self.raw_content = raw_content
-        self.created_by = created_by
 
 
 def _load_draft_for_send(draft_id: int, *, created_by: int | None = None) -> _DraftSnapshot:
@@ -200,7 +199,6 @@ def _load_draft_for_send(draft_id: int, *, created_by: int | None = None) -> _Dr
             title=draft.title,
             content=draft.content,
             raw_content=draft.raw_content,
-            created_by=draft.created_by,
         )
 
 
@@ -213,7 +211,6 @@ def _create_sending_announcement(
             title=snapshot.title,
             content=snapshot.content,
             raw_content=snapshot.raw_content or snapshot.content,
-            created_by=snapshot.created_by,
             status=AnnouncementStatus.SENDING,
             targets=targets_json,
             target_snapshot=json.dumps([s.model_dump() for s in resolve_result.summary]),
@@ -569,7 +566,7 @@ def copy_announcement_as_draft_service(
 
 
 def convert_announcement_to_template_service(
-    announcement_id: int, *, created_by: int
+    announcement_id: int,
 ) -> "AnnouncementTemplate":
     """从已发送公告内容直接生成新模板（纯文字，不含变量）。"""
     with session_scope() as session:
@@ -581,7 +578,6 @@ def convert_announcement_to_template_service(
             name=f"来自公告: {ann.title}",
             subject_template=ann.title,
             body_template=ann.raw_content or ann.content,
-            created_by=created_by,
             source_announcement_id=ann.id,
             session=session,
         )

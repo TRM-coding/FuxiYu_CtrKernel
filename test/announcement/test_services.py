@@ -145,10 +145,17 @@ def test_s06_too_many_recipients(db_session, app):
 # ══════════════════════════════════════════════════════════════════════
 
 
-def test_s10_send_draft_all_success(db_session, inline_send_thread):
+def test_s10_send_draft_all_success(db_session, monkeypatch, inline_send_thread):
     """S-10: mock mail 全成功 → status=SENT, 草稿删除（异步入口 + 内联线程）。"""
     user = create_user(email="u@bjtu.edu.cn")
     draft = _repo_save_draft(title="维护通知", content="您好，GPU-01 将于今晚维护。", created_by=user.id)
+    captured = []
+
+    def _capture(messages, **kwargs):
+        captured.append([dict(message) for message in messages])
+        return [{"ok": True, "to": [message["to"]]} for message in messages]
+
+    monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail._send_batch_smtp", _capture)
 
     accepted = start_batch_send_service([draft.id], [TargetEntry(type="user", id=user.id)])
     assert accepted.total == 1
@@ -158,9 +165,17 @@ def test_s10_send_draft_all_success(db_session, inline_send_thread):
     assert ann.status == AnnouncementStatus.SENT
     assert ann.success_count == 1
     assert ann.fail_count == 0
+    assert ann.title == "维护通知"
+    assert ann.raw_content == "您好，GPU-01 将于今晚维护。"
+    assert ann.source_draft_id == draft.id
+    assert json.loads(ann.targets) == [{"type": "user", "id": user.id}]
     assert _repo_get_draft(draft.id) is None
     # 内容应直接使用草稿内容，不做变量渲染
     assert ann.content == "您好，GPU-01 将于今晚维护。"
+    assert len(captured) == 1 and len(captured[0]) == 1
+    assert captured[0][0]["to"] == user.email
+    assert captured[0][0]["subject"] == "维护通知"
+    assert captured[0][0]["content"] == "您好，GPU-01 将于今晚维护。"
 
 
 def test_s11_send_draft_partial_failure(db_session, monkeypatch, inline_send_thread):
@@ -270,22 +285,39 @@ def test_s16_batch_send_too_large(db_session):
 # ══════════════════════════════════════════════════════════════════════
 
 
-def test_s17_resend_from_sent(db_session, inline_send_thread):
+def test_s17_resend_from_sent(db_session, monkeypatch, inline_send_thread):
     """S-17: 从 SENT 状态重发。"""
     user = create_user(email="u@bjtu.edu.cn")
     ann = _repo_create_announcement(
         title="公告",
         content="正文",
-        created_by=user.id,
         status=AnnouncementStatus.SENT,
         targets=json.dumps([TargetEntry(type="user", id=user.id).model_dump()]),
         target_snapshot="[]",
         recipient_count=1,
+        source_draft_id=123,
     )
+    captured = []
+
+    def _capture(messages, **kwargs):
+        captured.append([dict(message) for message in messages])
+        return [{"ok": True, "to": [message["to"]]} for message in messages]
+
+    monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail._send_batch_smtp", _capture)
 
     accepted_id = start_resend_service(ann.id)
     assert accepted_id == ann.id, "重发沿用的是同一条公告"
-    assert _repo_get_announcement(ann.id).status == AnnouncementStatus.SENT
+    refreshed = _repo_get_announcement(ann.id)
+    assert refreshed.status == AnnouncementStatus.SENT
+    assert refreshed.title == "公告"
+    assert refreshed.raw_content is None
+    assert json.loads(refreshed.targets) == [{"type": "user", "id": user.id}]
+    assert refreshed.recipient_count == 1
+    assert refreshed.source_draft_id == 123
+    assert len(captured) == 1 and len(captured[0]) == 1
+    assert captured[0][0]["to"] == user.email
+    assert captured[0][0]["subject"] == "公告"
+    assert captured[0][0]["content"] == "正文"
 
 
 def test_s18_resend_sending_idempotent(db_session):
@@ -294,7 +326,6 @@ def test_s18_resend_sending_idempotent(db_session):
     ann = _repo_create_announcement(
         title="公告",
         content="正文",
-        created_by=user.id,
         status=AnnouncementStatus.SENDING,
         targets=json.dumps([TargetEntry(type="user", id=user.id).model_dump()]),
     )
@@ -316,7 +347,6 @@ def test_s19_copy_as_draft_content_match(db_session):
         title="公告标题",
         content="纯文本公告正文，无变量",
         raw_content="纯文本公告正文，无变量",
-        created_by=user.id,
         status=AnnouncementStatus.SENT,
         targets=targets_json,
         target_snapshot="[]",
@@ -332,10 +362,10 @@ def test_s20_copy_as_draft_does_not_inherit_template_ref(db_session):
     """Q07: 复制公告为草稿只复制内容，不继承（也不激活）模板关联。"""
     user = create_user()
     template = _repo_create_template(
-        name="模板", subject_template="主题", body_template="正文", created_by=user.id
+        name="模板", subject_template="主题", body_template="正文"
     )
     ann = _repo_create_announcement(
-        title="公告", content="正文", created_by=user.id, template_id=template.id
+        title="公告", content="正文", template_id=template.id
     )
 
     draft = copy_announcement_as_draft_service(ann.id, created_by=user.id)
@@ -349,29 +379,27 @@ def test_s20_copy_as_draft_does_not_inherit_template_ref(db_session):
 
 def test_s21_convert_to_template_preserves_content(db_session):
     """模板直接保存公告全文，不提取变量。"""
-    user = create_user()
     ann = _repo_create_announcement(
         title="GPU 维护",
         content="您好，GPU-01 将于今晚维护。",
         raw_content="您好，GPU-01 将于今晚维护。",
-        created_by=user.id,
     )
 
-    template = convert_announcement_to_template_service(ann.id, created_by=user.id)
+    template = convert_announcement_to_template_service(ann.id)
     assert template.body_template == "您好，GPU-01 将于今晚维护。"
     assert template.subject_template == "GPU 维护"
+    assert not hasattr(template, "created_by")
+    assert not hasattr(template, "creator")
 
 
 def test_s22_convert_to_template_name(db_session):
     """title="GPU维护" → name="来自公告: GPU维护"。"""
-    user = create_user()
     ann = _repo_create_announcement(
         title="GPU维护",
         content="正文",
-        created_by=user.id,
     )
 
-    template = convert_announcement_to_template_service(ann.id, created_by=user.id)
+    template = convert_announcement_to_template_service(ann.id)
     assert template.name == "来自公告: GPU维护"
 
 
@@ -409,12 +437,11 @@ def test_s24_settle_stuck_sending_on_startup(db_session):
     """
     from ...services.announcement_tasks import settle_stuck_sending_announcements
 
-    user = create_user()
     stuck = _repo_create_announcement(
-        title="半途而废", content="正文", created_by=user.id, status=AnnouncementStatus.SENDING,
+        title="半途而废", content="正文", status=AnnouncementStatus.SENDING,
     )
     done = _repo_create_announcement(
-        title="已发完", content="正文", created_by=user.id, status=AnnouncementStatus.SENT,
+        title="已发完", content="正文", status=AnnouncementStatus.SENT,
     )
 
     settled = settle_stuck_sending_announcements()
@@ -428,15 +455,15 @@ def test_s24_settle_stuck_sending_on_startup(db_session):
 
 def test_s23_convert_to_template_source_tracked(db_session):
     """转换后 source_announcement_id 指向原公告。"""
-    user = create_user()
     ann = _repo_create_announcement(
         title="测试",
         content="正文",
-        created_by=user.id,
     )
 
-    template = convert_announcement_to_template_service(ann.id, created_by=user.id)
+    template = convert_announcement_to_template_service(ann.id)
     assert template.source_announcement_id == ann.id
+    assert not hasattr(template, "created_by")
+    assert not hasattr(template, "creator")
 
 
 def test_s28_send_and_resend_share_html_messages(db_session, monkeypatch, inline_send_thread):

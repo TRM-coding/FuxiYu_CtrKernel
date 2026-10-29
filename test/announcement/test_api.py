@@ -71,7 +71,6 @@ def _make_announcement(user, **kw):
         return announcement_repo.create_announcement(
             title=kw.pop("title", "公告"),
             content=kw.pop("content", "正文"),
-            created_by=user.id,
             status=kw.pop("status", AnnouncementStatus.SENT),
             session=session,
             **kw,
@@ -95,7 +94,6 @@ def _make_template(user, name="测试模板", category="custom"):
             name=name,
             subject_template="主题{{key}}",
             body_template="正文{{key}}",
-            created_by=user.id,
             category=category,
             session=session,
         )
@@ -145,6 +143,7 @@ def test_a04_create_template_full(client, monkeypatch):
     )
     payload = assert_json_success(resp)
     assert payload["template"]["name"] == "新模板"
+    assert "created_by" not in payload["template"]
 
 
 def test_a05_create_template_missing_name(client, monkeypatch):
@@ -179,14 +178,12 @@ def test_a06c_list_templates_paginates_beyond_200(client, monkeypatch):
     """205 条模板时 200 上限仍可分页；Web 正常使用的 100/200 不破。"""
 
     mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
-    user = _make_operator()
     with session_scope() as session:
         for index in range(205):
             announcement_repo.create_template(
                 name=f"paged-template-{index}",
                 subject_template="主题",
                 body_template="正文",
-                created_by=user.id,
                 session=session,
             )
 
@@ -221,6 +218,7 @@ def test_a07_get_template_by_id(client, monkeypatch):
     resp = client.get(f"/api/announcements/templates/{t.id}", headers=_operator_headers())
     payload = assert_json_success(resp)
     assert payload["template"]["id"] == t.id
+    assert "created_by" not in payload["template"]
 
 
 def test_a08_get_template_not_found(client, monkeypatch):
@@ -309,7 +307,8 @@ def test_a15_list_announcements(client, monkeypatch):
     """A-15: 列表查询 → 200。"""
     mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
     resp = client.get("/api/announcements/list", headers=_operator_headers())
-    assert_json_success(resp)
+    payload = assert_json_success(resp)
+    assert all("created_by" not in item for item in payload["announcements"])
 
 
 def test_a16_list_announcements_filtered(client, monkeypatch):
@@ -357,6 +356,7 @@ def test_a17_get_announcement_detail(client, monkeypatch):
     resp = client.get(f"/api/announcements/{ann.id}", headers=_operator_headers())
     payload = assert_json_success(resp)
     assert payload["announcement"]["id"] == ann.id
+    assert "created_by" not in payload["announcement"]
 
 
 def test_a18_get_announcement_not_found(client, monkeypatch):

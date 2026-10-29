@@ -63,7 +63,6 @@ def _announcements_snapshot():
                 row.title,
                 row.content,
                 row.raw_content,
-                row.created_by,
                 row.status,
                 row.targets,
                 row.target_snapshot,
@@ -181,6 +180,19 @@ def test_q08_batch_send_rejects_other_operators_draft_without_side_effects(db_se
 # ══════════════════════════════════════════════════════════════════════
 
 
+def test_fresh_sqlite_draft_fk_is_cascade_and_pragma_on(db_session):
+    """新建 SQLite 测试库：草稿作者外键真实存在且为 ON DELETE CASCADE。"""
+
+    from sqlalchemy import text
+
+    assert db_session.execute(text("PRAGMA foreign_keys")).scalar() == 1
+    foreign_keys = db_session.execute(text("PRAGMA foreign_key_list(announcement_drafts)")).mappings().all()
+    created_by_fks = [fk for fk in foreign_keys if fk["from"] == "created_by"]
+    assert len(created_by_fks) == 1
+    assert created_by_fks[0]["table"] == "users"
+    assert str(created_by_fks[0]["on_delete"]).upper() == "CASCADE"
+
+
 def test_q08_api_two_operator_isolation(client, monkeypatch, db_session):
     owner = create_user()
     other = create_user()
@@ -200,7 +212,6 @@ def test_q08_api_two_operator_isolation(client, monkeypatch, db_session):
             title="既有公告",
             content="既有正文",
             raw_content="既有原文",
-            created_by=owner.id,
             status=AnnouncementStatus.SENT,
             targets=owner_targets,
             target_snapshot=json.dumps([{"type": "user", "id": owner.id, "name": owner.username}]),
@@ -225,6 +236,7 @@ def test_q08_api_two_operator_isolation(client, monkeypatch, db_session):
     _use_operator(client, "token-owner")
     listed_owner = assert_json_success(client.get("/api/announcements/drafts"))
     assert listed_owner["total"] == 1
+    assert listed_owner["drafts"][0]["created_by"] == owner.id
 
     # 读取隔离：完整草稿与关联公告都不变
     _use_operator(client, "token-other")

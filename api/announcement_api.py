@@ -1,4 +1,4 @@
-﻿"""公告系统 API 路由。
+"""公告系统 API 路由。
 
 全部端点要求 Operator 权限；认证由 FastAPI dependency 完成。
 """
@@ -43,7 +43,6 @@ def _template_view(template) -> dict[str, Any]:
         "subject_template": template.subject_template,
         "body_template": template.body_template,
         "source_announcement_id": template.source_announcement_id,
-        "created_by": template.created_by,
         "created_at": template.created_at.isoformat() if template.created_at else None,
         "updated_at": template.updated_at.isoformat() if template.updated_at else None,
     }
@@ -55,7 +54,6 @@ def _announcement_view(announcement) -> dict[str, Any]:
         "title": announcement.title,
         "content": announcement.content,
         "raw_content": announcement.raw_content,
-        "created_by": announcement.created_by,
         "status": announcement.status.value if hasattr(announcement.status, "value") else announcement.status,
         "targets": announcement.targets,
         "target_snapshot": announcement.target_snapshot,
@@ -109,7 +107,7 @@ def list_templates_api(
 async def create_template_api(
     request: Request,
     payload: dict[str, Any] = Body(default_factory=dict),
-    operator_user_id: int = Depends(require_operator),
+    _: int = Depends(require_operator),
 ):
     """创建公告模板。"""
 
@@ -127,7 +125,6 @@ async def create_template_api(
                 name=name,
                 subject_template=subject_template,
                 body_template=body_template,
-                created_by=operator_user_id,
                 description=payload.get("description"),
                 category=payload.get("category", "custom"),
                 session=session,
@@ -165,14 +162,19 @@ async def update_template_api(
 ):
     """更新模板。"""
 
-    with session_scope() as session:
-        template = announcement_repo.update_template(
-            template_id,
-            session=session,
-            **{k: v for k, v in payload.items() if v is not None},
-        )
-        if template is not None:
-            template_data = _template_view(template)
+    try:
+        with session_scope() as session:
+            template = announcement_repo.update_template(
+                template_id,
+                session=session,
+                **{k: v for k, v in payload.items() if v is not None},
+            )
+            if template is not None:
+                template_data = _template_view(template)
+    except ValueError as e:
+        if str(e) == "cannot_change_system_template_category":
+            return _error(400, "cannot change system template category", str(e))
+        raise
     if template is None:
         return _error(404, "template not found", "not_found")
     return {"success": 1, "template": template_data}
@@ -353,14 +355,13 @@ def copy_announcement_as_draft_api(
 def convert_announcement_to_template_api(
     request: Request,
     announcement_id: int,
-    operator_user_id: int = Depends(require_operator),
+    _: int = Depends(require_operator),
 ):
     """将公告转成模板。"""
 
     try:
         template = announcement_tasks.convert_announcement_to_template_service(
             announcement_id,
-            created_by=operator_user_id,
         )
         template_data = {
             "template_id": template.id,

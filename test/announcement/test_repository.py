@@ -1,8 +1,6 @@
 """公告系统仓库层测试（R-01 ~ R-15）。"""
 
-import json
-
-from ...constant import AnnouncementStatus, AnnouncementTemplateCategory
+from ...constant import AnnouncementStatus
 from ...repositories import announcement_repo
 from ..factories import create_user
 
@@ -13,12 +11,11 @@ def _make_user():
     return create_user()
 
 
-def _make_template(user, session, name="测试模板", category="custom"):
+def _make_template(session, name="测试模板", category="custom"):
     return announcement_repo.create_template(
         name=name,
         subject_template="主题模板",
         body_template="正文模板",
-        created_by=user.id,
         category=category,
         session=session,
     )
@@ -28,9 +25,9 @@ def _make_draft(user, session, title="草稿", content="正文"):
     return announcement_repo.save_draft(title=title, content=content, created_by=user.id, session=session)
 
 
-def _make_announcement(user, session, title="公告", content="正文", status=AnnouncementStatus.SENT):
+def _make_announcement(session, title="公告", content="正文", status=AnnouncementStatus.SENT):
     return announcement_repo.create_announcement(
-        title=title, content=content, created_by=user.id, status=status, session=session
+        title=title, content=content, status=status, session=session
     )
 
 
@@ -39,11 +36,9 @@ def _make_announcement(user, session, title="公告", content="正文", status=A
 
 def test_r01_create_announcement(db_session):
     """R-01: 用必填字段创建 Announcement。"""
-    user = _make_user()
     ann = announcement_repo.create_announcement(
         title="GPU 维护通知",
         content="您好，GPU 将维护。",
-        created_by=user.id,
         session=db_session,
     )
     assert ann.id is not None
@@ -53,8 +48,7 @@ def test_r01_create_announcement(db_session):
 
 def test_r02_get_announcement_by_id_exists(db_session):
     """R-02: 按存在 id 查询。"""
-    user = _make_user()
-    ann = _make_announcement(user, db_session)
+    ann = _make_announcement(db_session)
     found = announcement_repo.get_announcement_by_id(ann.id, session=db_session)
     assert found is not None
     assert found.id == ann.id
@@ -67,10 +61,9 @@ def test_r03_get_announcement_by_id_not_exists(db_session):
 
 def test_r04_list_announcements_by_status(db_session):
     """R-04: 多状态过滤。"""
-    user = _make_user()
-    _make_announcement(user, db_session, title="SENT", status=AnnouncementStatus.SENT)
-    _make_announcement(user, db_session, title="PARTIAL", status=AnnouncementStatus.PARTIAL)
-    _make_announcement(user, db_session, title="FAILED", status=AnnouncementStatus.FAILED)
+    _make_announcement(db_session, title="SENT", status=AnnouncementStatus.SENT)
+    _make_announcement(db_session, title="PARTIAL", status=AnnouncementStatus.PARTIAL)
+    _make_announcement(db_session, title="FAILED", status=AnnouncementStatus.FAILED)
 
     rows, total = announcement_repo.list_announcements(status=["sent", "partial"], session=db_session)
     assert total == 2
@@ -81,9 +74,8 @@ def test_r04_list_announcements_by_status(db_session):
 
 def test_r05_list_announcements_pagination(db_session):
     """R-05: 分页 + 倒序。"""
-    user = _make_user()
     for i in range(15):
-        _make_announcement(user, db_session, title=f"公告{i}")
+        _make_announcement(db_session, title=f"公告{i}")
 
     rows, total = announcement_repo.list_announcements(limit=10, offset=5, session=db_session)
     assert total == 15
@@ -96,8 +88,7 @@ def test_r06_update_announcement_status(db_session):
     """R-06: 更新状态 + 计数 + 时间。"""
     import datetime as dt
 
-    user = _make_user()
-    ann = _make_announcement(user, db_session, status=AnnouncementStatus.SENDING)
+    ann = _make_announcement(db_session, status=AnnouncementStatus.SENDING)
 
     now = dt.datetime.utcnow()
     updated = announcement_repo.update_announcement_status(
@@ -120,12 +111,10 @@ def test_r06_update_announcement_status(db_session):
 
 def test_r07_create_template(db_session):
     """R-07: 完整字段创建模板。"""
-    user = _make_user()
     t = announcement_repo.create_template(
         name="系统维护模板",
         subject_template="维护通知",
         body_template="您好...",
-        created_by=user.id,
         description="用于系统维护通知",
         category="custom",
         session=db_session,
@@ -137,8 +126,7 @@ def test_r07_create_template(db_session):
 
 def test_r08_update_template_partial(db_session):
     """R-08: 部分字段更新模板。"""
-    user = _make_user()
-    t = _make_template(user, db_session, name="旧名")
+    t = _make_template(db_session, name="旧名")
     updated = announcement_repo.update_template(t.id, name="新名", session=db_session)
     assert updated is not None
     assert updated.name == "新名"
@@ -147,16 +135,14 @@ def test_r08_update_template_partial(db_session):
 
 def test_r09_delete_template_custom(db_session):
     """R-09: 删除 custom 模板成功。"""
-    user = _make_user()
-    t = _make_template(user, db_session, category="custom")
+    t = _make_template(db_session, category="custom")
     assert announcement_repo.delete_template(t.id, session=db_session) is True
     assert announcement_repo.get_template_by_id(t.id, session=db_session) is None
 
 
 def test_r10_delete_template_system(db_session):
     """R-10: 删除 system 模板被拒。"""
-    user = _make_user()
-    t = _make_template(user, db_session, name="系统模板", category="system")
+    t = _make_template(db_session, name="系统模板", category="system")
     assert announcement_repo.delete_template(t.id, session=db_session) is False
     assert announcement_repo.get_template_by_id(t.id, session=db_session) is not None
 
