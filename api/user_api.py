@@ -95,14 +95,20 @@ def register(message: RegisterRequest, request: Request):
     return _error(status_code, error_messages.get(error_reason, "Registration failed"), error_reason)
 
 
-@router.post("/request_register_code", response_model=SuccessMessageResponse)
+class RegistrationCodeResponse(SuccessMessageResponse):
+    retry_after_seconds: int
+
+
+@router.post("/request_register_code", response_model=RegistrationCodeResponse)
 def request_register_code(message: RequestRegisterCodeRequest, request: Request):
     """发送注册验证码。"""
 
-    success, reason = user_tasks.Request_register_code(message.email)
+    success, reason, retry_after_seconds = user_tasks.Request_register_code(message.email)
     if success:
-        return {"success": 1, "message": "verification code sent"}
-    status_code = 400 if reason == "email_domain_not_allowed" else 500
+        return {"success": 1, "message": "verification code sent", "retry_after_seconds": retry_after_seconds}
+    status_code = {"email_exists": 409, "rate_limited": 429, "email_domain_not_allowed": 400}.get(reason, 500)
+    if reason == "rate_limited":
+        return JSONResponse(status_code=429, content={"success": 0, "message": reason, "error_reason": reason, "retry_after_seconds": retry_after_seconds})
     return _error(status_code, reason, reason)
 
 

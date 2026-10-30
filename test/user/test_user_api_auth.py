@@ -91,7 +91,7 @@ def test_register_registration_code_required_returns_400(client, monkeypatch):
 
 
 def test_request_register_code_success(client, monkeypatch):
-    monkeypatch.setattr(user_api.user_tasks, "Request_register_code", lambda email: (True, "code_sent"))
+    monkeypatch.setattr(user_api.user_tasks, "Request_register_code", lambda email: (True, "code_sent", 60))
 
     resp = client.post("/api/request_register_code", json={"email": "api_user@bjtu.edu.cn"})
 
@@ -107,7 +107,7 @@ def test_request_register_code_missing_email(client):
 
 
 def test_request_register_code_domain_not_allowed(client, monkeypatch):
-    monkeypatch.setattr(user_api.user_tasks, "Request_register_code", lambda email: (False, "email_domain_not_allowed"))
+    monkeypatch.setattr(user_api.user_tasks, "Request_register_code", lambda email: (False, "email_domain_not_allowed", None))
 
     resp = client.post("/api/request_register_code", json={"email": "api_user@example.com"})
 

@@ -38,7 +38,7 @@ def test_request_register_code_success_creates_code_and_sends_mail(monkeypatch, 
     monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail._send_smtp", lambda **kwargs: sent.append(kwargs) or {"ok": True})
     monkeypatch.setattr(user_tasks.secrets, "randbelow", lambda _: 12345)
 
-    success, reason = user_tasks.Request_register_code("code_user@bjtu.edu.cn")
+    success, reason, retry_after = user_tasks.Request_register_code("code_user@bjtu.edu.cn")
 
     assert success is True
     assert reason == "code_sent"
@@ -54,16 +54,53 @@ def test_request_register_code_success_creates_code_and_sends_mail(monkeypatch, 
 
 
 def test_request_register_code_rejects_unallowed_domain(db_session):
-    success, reason = user_tasks.Request_register_code("user@example.com")
+    success, reason, retry_after = user_tasks.Request_register_code("user@example.com")
 
     assert success is False
     assert reason == "email_domain_not_allowed"
 
 
+def test_registered_email_does_not_receive_new_registration_code(monkeypatch, db_session):
+    user = create_user(email="already@bjtu.edu.cn")
+    sent = []
+    monkeypatch.setattr(user_tasks, "send_mail", lambda **kwargs: sent.append(kwargs))
+    assert user_tasks.Request_register_code(user.email) == (False, "email_exists", None)
+    assert sent == []
+    assert db_session.scalars(select(RegistrationCode).where(RegistrationCode.email == user.email)).first() is None
+
+
+def test_registration_code_cooldown_blocks_repeat_email(monkeypatch, db_session):
+    sent = []
+    monkeypatch.setattr(user_tasks, "send_mail", lambda **kwargs: sent.append(kwargs) or {"ok": True})
+    success, reason, remaining = user_tasks.Request_register_code("new@bjtu.edu.cn")
+    assert success and reason == "code_sent" and 0 <= remaining <= 60
+    success, reason, remaining = user_tasks.Request_register_code("NEW@bjtu.edu.cn")
+    assert not success and reason == "rate_limited" and 0 < remaining <= 60
+    assert len(sent) == 1
+
+
+def test_registration_code_api_reports_existing_email_and_cooldown(client, monkeypatch, db_session):
+    create_user(email="registered@bjtu.edu.cn")
+    sent = []
+    monkeypatch.setattr(user_tasks, "send_mail", lambda **kwargs: sent.append(kwargs) or {"ok": True})
+    conflict = client.post("/api/request_register_code", json={"email": "registered@bjtu.edu.cn"})
+    assert conflict.status_code == 409
+    assert conflict.json()["error_reason"] == "email_exists"
+    assert "retry_after_seconds" not in conflict.json()
+    sent_response = client.post("/api/request_register_code", json={"email": "fresh@bjtu.edu.cn"})
+    assert sent_response.status_code == 200
+    assert 0 <= sent_response.json()["retry_after_seconds"] <= 60
+    limited = client.post("/api/request_register_code", json={"email": "fresh@bjtu.edu.cn"})
+    assert limited.status_code == 429
+    assert limited.json()["error_reason"] == "rate_limited"
+    assert 0 < limited.json()["retry_after_seconds"] <= 60
+    assert len(sent) == 1
+
+
 def test_request_register_code_handles_create_failure(monkeypatch, db_session):
     monkeypatch.setattr(user_tasks.registration_code_repo, "create_code", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("db failed")))
 
-    success, reason = user_tasks.Request_register_code("user@bjtu.edu.cn")
+    success, reason, retry_after = user_tasks.Request_register_code("user@bjtu.edu.cn")
 
     assert success is False
     assert reason == "code_creation_failed"
@@ -72,7 +109,7 @@ def test_request_register_code_handles_create_failure(monkeypatch, db_session):
 def test_request_register_code_handles_mail_failure(monkeypatch, db_session):
     monkeypatch.setattr("FuxiYu_CtrKernel.utils.mail._send_smtp", lambda **kwargs: {"ok": False})
 
-    success, reason = user_tasks.Request_register_code("user@bjtu.edu.cn")
+    success, reason, retry_after = user_tasks.Request_register_code("user@bjtu.edu.cn")
 
     assert success is False
     assert reason == "mail_send_failed"
@@ -258,3 +295,39 @@ def test_register_with_code_db_failure_rolls_back_consumption_and_retry_succeeds
     retry_success, retry_user, _ = user_tasks.Register_with_code("db_fail", "db_fail@bjtu.edu.cn", "Password_123", "2026", "123456")
     assert retry_success is True and retry_user.username == "db_fail"
     assert _code_consumed("db_fail@bjtu.edu.cn") is True
+
+
+def test_code_api_failure_then_cooldown(client, monkeypatch, db_session):
+    monkeypatch.setattr(user_tasks, "send_mail", lambda **kwargs: {"ok": False})
+    first = client.post("/api/request_register_code", json={"email": "failed@bjtu.edu.cn"})
+    assert first.status_code == 500 and "retry_after_seconds" not in first.json()
+    second = client.post("/api/request_register_code", json={"email": "failed@bjtu.edu.cn"})
+    assert second.status_code == 429 and 0 < second.json()["retry_after_seconds"] <= 60
+
+
+def test_code_api_cooldown_expires(client, monkeypatch, db_session):
+    monkeypatch.setattr(user_tasks, "send_mail", lambda **kwargs: {"ok": True})
+    email = "expired_cooldown@bjtu.edu.cn"
+    assert client.post("/api/request_register_code", json={"email": email}).status_code == 200
+    with session_scope() as session:
+        record = session.scalars(select(RegistrationCode).where(RegistrationCode.email == email)).one()
+        record.created_at = datetime.utcnow() - timedelta(seconds=61)
+    assert client.post("/api/request_register_code", json={"email": email}).status_code == 200
+
+
+def test_success_remaining_accounts_for_mail_send_time(client, monkeypatch, db_session):
+    class Clock(datetime):
+        offset = 0
+        @classmethod
+        def utcnow(cls):
+            return datetime.utcnow() + timedelta(seconds=cls.offset)
+
+    def slow_send(**kwargs):
+        Clock.offset = 25
+        return {"ok": True}
+
+    monkeypatch.setattr(user_tasks, "datetime", Clock)
+    monkeypatch.setattr(user_tasks, "send_mail", slow_send)
+    response = client.post("/api/request_register_code", json={"email": "slow@bjtu.edu.cn"})
+    assert response.status_code == 200
+    assert 30 <= response.json()["retry_after_seconds"] <= 35
