@@ -2,15 +2,22 @@ from types import SimpleNamespace
 
 import pytest
 
-from ...blueprints import user_api
+from ...api import user_api, deps
+from ...extensions import session_scope
+from ...models.announcement import AnnouncementDraft
+from ...models.user import User
+from ...repositories import announcement_repo
+
+pytestmark = pytest.mark.usefixtures("ensure_auth_users")
 
 
-def _valid_token(monkeypatch):
-    monkeypatch.setattr(user_api.authentications_repo, "is_token_valid", lambda token: True)
+def _valid_token(monkeypatch, user_id=1):
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: True)
+    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token, **kwargs: user_id)
 
 
 def test_get_user_detail_requires_token(client, monkeypatch):
-    monkeypatch.setattr(user_api.authentications_repo, "is_token_valid", lambda token: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: False)
 
     resp = client.get("/api/users/get_user_detail_information?user_id=1")
 
@@ -23,7 +30,7 @@ def test_get_user_detail_requires_user_id(client, monkeypatch):
     resp = client.get("/api/users/get_user_detail_information" )
 
     assert resp.status_code == 400
-    assert resp.get_json()["error_reason"] == "missing_user_id"
+    assert resp.json()["error_reason"] == "invalid_resource_id"
 
 
 def test_get_user_detail_not_found(client, monkeypatch):
@@ -43,11 +50,11 @@ def test_get_user_detail_success(client, monkeypatch):
     resp = client.get("/api/users/get_user_detail_information?user_id=1" )
 
     assert resp.status_code == 200
-    assert resp.get_json()["user_info"]["username"] == "u"
+    assert resp.json()["user_info"]["username"] == "u"
 
 
 def test_list_users_requires_token(client, monkeypatch):
-    monkeypatch.setattr(user_api.authentications_repo, "is_token_valid", lambda token: False)
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: False)
 
     resp = client.get("/api/users/list_all_user_bref_information")
 
@@ -57,27 +64,36 @@ def test_list_users_requires_token(client, monkeypatch):
 def test_list_users_success(client, monkeypatch):
     _valid_token(monkeypatch)
     user = SimpleNamespace(dict=lambda: {"user_id": 1, "username": "u"})
-    monkeypatch.setattr(user_api.user_tasks, "List_all_user_bref_information", lambda page_number, page_size: [user])
+    captured = {}
 
-    resp = client.get("/api/users/list_all_user_bref_information" )
+    def _list(page_number, page_size, user_search=None, viewer_user_id=None):
+        captured.update(page_number=page_number, page_size=page_size, user_search=user_search, viewer_user_id=viewer_user_id)
+        return [user]
+
+    monkeypatch.setattr(user_api.user_tasks, "List_all_user_bref_information", _list)
+
+    resp = client.get("/api/users/list_all_user_bref_information?user_search=alice" )
 
     assert resp.status_code == 200
-    assert resp.get_json()["users"] == [{"user_id": 1, "username": "u"}]
+    assert captured["user_search"] == "alice"
+    assert resp.json()["users"] == [{"user_id": 1, "username": "u"}]
 
 
 def test_list_users_task_failure(client, monkeypatch):
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
+
     _valid_token(monkeypatch)
-    monkeypatch.setattr(user_api.user_tasks, "List_all_user_bref_information", lambda page_number, page_size: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(user_api.user_tasks, "List_all_user_bref_information", lambda page_number, page_size, user_search=None: (_ for _ in ()).throw(RuntimeError("boom")))
 
     resp = client.get("/api/users/list_all_user_bref_information" )
 
     assert resp.status_code == 500
-    assert resp.get_json()["error_reason"] == "list_failed"
+    assert resp.json()["error_reason"] == "list_failed"
 
 
 def test_change_password_success(client, monkeypatch):
     _valid_token(monkeypatch)
-    monkeypatch.setattr(user_api.user_repo, "get_by_id", lambda user_id: SimpleNamespace(id=user_id))
+    monkeypatch.setattr(user_api.user_repo, "get_by_id", lambda user_id, **_: SimpleNamespace(id=user_id))
     monkeypatch.setattr(user_api.user_tasks, "Change_password", lambda user, old, new: True)
 
     resp = client.post("/api/users/change_password", json={"user_id": 1, "old_password": "old", "new_password": "new"} )
@@ -87,18 +103,33 @@ def test_change_password_success(client, monkeypatch):
 
 def test_change_password_wrong_old_password(client, monkeypatch):
     _valid_token(monkeypatch)
-    monkeypatch.setattr(user_api.user_repo, "get_by_id", lambda user_id: SimpleNamespace(id=user_id))
+    monkeypatch.setattr(user_api.user_repo, "get_by_id", lambda user_id, **_: SimpleNamespace(id=user_id))
     monkeypatch.setattr(user_api.user_tasks, "Change_password", lambda user, old, new: False)
 
     resp = client.post("/api/users/change_password", json={"user_id": 1, "old_password": "bad", "new_password": "new"} )
 
     assert resp.status_code == 400
-    assert resp.get_json()["error_reason"] == "old_password_incorrect"
+    assert resp.json()["error_reason"] == "old_password_incorrect"
+
+
+def test_change_password_others_requires_self(client, monkeypatch):
+    """改密只能改自己：目标 user_id 与会话用户不一致 → 403，Change_password 不应被调用。"""
+    _valid_token(monkeypatch, user_id=2)  # 当前用户 2，目标用户 1
+    called = []
+    monkeypatch.setattr(user_api.user_tasks, "Change_password", lambda user, old, new: called.append(user.id) or True)
+
+    resp = client.post("/api/users/change_password", json={"user_id": 1, "old_password": "old", "new_password": "new"} )
+
+    assert resp.status_code == 403
+    assert resp.json()["error_reason"] == "insufficient_permission"
+    assert called == []
 
 
 def test_delete_user_success(client, monkeypatch):
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
+
     _valid_token(monkeypatch)
-    monkeypatch.setattr(user_api.user_tasks, "Delete_user", lambda user_id: True)
+    monkeypatch.setattr(user_api.user_tasks, "Delete_user", lambda user_id, **kwargs: True)
 
     resp = client.post("/api/users/delete_user", json={"user_id": 1} )
 
@@ -106,9 +137,11 @@ def test_delete_user_success(client, monkeypatch):
 
 
 def test_delete_user_wild_containers(client, monkeypatch):
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
+
     _valid_token(monkeypatch)
 
-    def _raise(user_id):
+    def _raise(user_id, **kwargs):
         exc = Exception("wild")
         exc.wild_containers = [144]
         raise exc
@@ -118,7 +151,95 @@ def test_delete_user_wild_containers(client, monkeypatch):
     resp = client.post("/api/users/delete_user", json={"user_id": 1} )
 
     assert resp.status_code == 400
-    assert resp.get_json()["wild_containers"] == [144]
+    assert resp.json()["error_reason"] == "wild_container"
+    assert resp.json()["wild_containers"] == [144]
+
+
+def test_delete_user_non_wild_failure_is_not_reported_as_wild_container(client, monkeypatch):
+    """Q05：非野容器原因（如关联行删除失败）不得被说成 wild_container。"""
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
+
+    _valid_token(monkeypatch)
+
+    def _raise(user_id, **kwargs):
+        raise RuntimeError("delete_tokens_by_user_id exploded")
+
+    monkeypatch.setattr(user_api.user_tasks, "Delete_user", _raise)
+
+    resp = client.post("/api/users/delete_user", json={"user_id": 1} )
+
+    body = resp.json()
+    assert resp.status_code == 500
+    assert body["error_reason"] == "delete_user_failed"
+    assert "wild_containers" not in body
+    assert body["error_reason"] != "wild_container"
+
+
+def test_delete_user_with_token_actually_deletes_user_and_token(client, monkeypatch, db_session):
+    """Q05 修复后的端到端复现：有 authentications 行不再阻止删除，也不再误报野容器。"""
+    from sqlalchemy import select
+
+    from ...models.authentications import Authentication
+    from ...models.user import User
+    from ..factories import create_auth
+
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
+    _valid_token(monkeypatch, user_id=1)
+
+    target = db_session.get(User, 7)
+    assert target is not None
+    create_auth(target, token="api-delete-token")
+    assert len(db_session.scalars(select(Authentication).where(Authentication.user_id == 7)).all()) == 1
+
+    resp = client.post("/api/users/delete_user", json={"user_id": 7})
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] == 1
+    db_session.expire_all()
+    assert db_session.get(User, 7) is None
+    assert db_session.scalars(select(Authentication).where(Authentication.user_id == 7)).all() == []
+
+
+def test_delete_user_with_drafts_actually_deletes_them(client, monkeypatch, db_session):
+    """真实 API 删除目标用户时，所属草稿随最终事务级联消失，他人草稿保留。"""
+    from sqlalchemy import select
+
+    from ...models.authentications import Authentication
+    from ...models.user import User
+    from ..factories import create_auth
+
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
+    _valid_token(monkeypatch, user_id=1)
+
+    target = db_session.get(User, 7)
+    other = db_session.get(User, 1)
+    assert target is not None and other is not None
+    create_auth(target, token="api-delete-drafts-token")
+    with session_scope() as session:
+        target_draft = announcement_repo.save_draft(
+            title="target draft",
+            content="target content",
+            created_by=target.id,
+            session=session,
+        )
+        other_draft = announcement_repo.save_draft(
+            title="other draft",
+            content="other content",
+            created_by=other.id,
+            session=session,
+        )
+        target_draft_id = target_draft.id
+        other_draft_id = other_draft.id
+
+    resp = client.post("/api/users/delete_user", json={"user_id": 7})
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] == 1
+    db_session.expire_all()
+    assert db_session.get(User, 7) is None
+    assert db_session.scalars(select(Authentication).where(Authentication.user_id == 7)).all() == []
+    assert db_session.get(AnnouncementDraft, target_draft_id) is None
+    assert db_session.get(AnnouncementDraft, other_draft_id) is not None
 
 
 def test_update_user_success(client, monkeypatch):
@@ -128,7 +249,60 @@ def test_update_user_success(client, monkeypatch):
     resp = client.post("/api/users/update_user", json={"user_id": 1, "fields": {"username": "updated"}} )
 
     assert resp.status_code == 200
-    assert resp.get_json()["user"] == "updated"
+    assert resp.json()["user"] == "updated"
+
+
+def test_update_user_blank_graduation_year_does_not_block_other_updates(client, monkeypatch):
+    _valid_token(monkeypatch)
+    captured = {}
+
+    def _update(user_id, **fields):
+        captured.update(fields)
+        return SimpleNamespace(username="updated")
+
+    monkeypatch.setattr(user_api.user_tasks, "Update_user", _update)
+
+    resp = client.post(
+        "/api/users/update_user",
+        json={"user_id": 1, "fields": {"username": "updated", "graduation_year": ""}},
+    )
+
+    assert resp.status_code == 200
+    assert captured == {"username": "updated"}
+
+
+def test_update_user_blank_graduation_year_keeps_persisted_value(client, db_session, monkeypatch):
+    """Q54：空字符串不会清空已保存的毕业年份。"""
+
+    _valid_token(monkeypatch)
+
+    resp = client.post(
+        "/api/users/update_user",
+        json={
+            "user_id": 1,
+            "fields": {"username": "auth_user_1", "graduation_year": ""},
+        },
+    )
+
+    assert resp.status_code == 200
+    db_session.expire_all()
+    assert db_session.get(User, 1).graduation_year == "2026"
+
+
+def test_update_user_null_graduation_year_is_ignored(client, db_session, monkeypatch):
+    """Q54：null 既不清空毕业年份，也不会被当作有效更新字段。"""
+
+    _valid_token(monkeypatch)
+
+    resp = client.post(
+        "/api/users/update_user",
+        json={"user_id": 1, "fields": {"graduation_year": None}},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error_reason"] == "missing_fields"
+    db_session.expire_all()
+    assert db_session.get(User, 1).graduation_year == "2026"
 
 
 @pytest.mark.parametrize("reason", ["invalid_username", "no_none_ascii"])
@@ -139,4 +313,81 @@ def test_update_user_validation_errors(client, monkeypatch, reason):
     resp = client.post("/api/users/update_user", json={"user_id": 1, "fields": {"username": "bad"}} )
 
     assert resp.status_code == 400
-    assert resp.get_json()["error_reason"] == reason
+    assert resp.json()["error_reason"] == reason
+
+
+def test_update_user_others_requires_operator(client, monkeypatch):
+    """分级调控:普通用户改他人 → 403。"""
+    _valid_token(monkeypatch, user_id=2)  # 当前用户 2,目标用户 1
+    called = []
+
+    def _update(user_id, **fields):
+        called.append(user_id)
+        return SimpleNamespace(username="x")
+
+    monkeypatch.setattr(user_api.user_tasks, "Update_user", _update)
+
+    resp = client.post("/api/users/update_user", json={"user_id": 1, "fields": {"username": "x"}})
+
+    assert resp.status_code == 403
+    assert called == []  # Update_user 不应被调用
+
+
+def test_update_user_others_as_operator_allowed(client, monkeypatch):
+    """分级调控:operator 改他人 → 200。"""
+    _valid_token(monkeypatch, user_id=2)
+    from ...services import rbac_service
+    monkeypatch.setattr(rbac_service, "_has_entity_direct", lambda uid, entity: True)
+    monkeypatch.setattr(user_api.user_tasks, "Update_user", lambda user_id, **fields: SimpleNamespace(username="x"))
+
+    resp = client.post("/api/users/update_user", json={"user_id": 1, "fields": {"username": "x"}})
+
+    assert resp.status_code == 200
+    assert resp.json()["user"] == "x"
+
+
+def test_my_permissions_returns_user_group_entities(client, monkeypatch):
+    """me/permissions:普通用户(默认 user 组)返回基础权限点,不含 manage。"""
+    _valid_token(monkeypatch)
+    resp = client.get("/api/users/me/permissions")
+    assert resp.status_code == 200
+    entities = resp.json()["entities"]
+    assert "machine:view" in entities
+    assert "container:operation" in entities
+    assert "user:manage" not in entities
+    assert "bypass_auth_entity" not in entities
+
+
+def test_my_permissions_also_carries_identity(client, monkeypatch):
+    """响应必须同时给出身份（user_id / username）。
+
+    cookie 是 HttpOnly，前端读不到它——"我是谁"只能从响应体来。此前前端把身份存在
+    localStorage 里当登录标记，于是和服务端各说各话：401 时要清本地（清不掉 cookie）
+    再硬重载，登录页又凭本地标记把人推进去（2026-09 修）。这条锁住"一次请求交付
+    认证信号 + 授权数据 + 身份"这条正统路径。
+    """
+    _valid_token(monkeypatch)
+
+    resp = client.get("/api/users/me/permissions")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["user_id"] == 1
+    assert body["username"] == "auth_user_1"
+
+
+def test_my_permissions_operator_returns_all(client, monkeypatch):
+    """me/permissions:operator 组用户返回全部权限点(通配)。"""
+    _valid_token(monkeypatch)
+    from ...repositories import auth_repo
+    from ...extensions import session_scope as _ss
+    with _ss() as session:
+        group = auth_repo.ensure_group("operator", "t", session=session)
+        for code in ("bypass_auth_entity", "bypass_resource"):
+            auth_repo.ensure_group_entity(group.id, code, session=session)
+            auth_repo.ensure_user_group(1, group.id, session=session)
+    resp = client.get("/api/users/me/permissions")
+    assert resp.status_code == 200
+    entities = resp.json()["entities"]
+    assert "bypass_auth_entity" in entities
+    assert "machine:manage" in entities
