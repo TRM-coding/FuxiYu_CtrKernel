@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+#
+# capability 命名校验
+#
+# ═══════════════════════════════════════════════════════════════
+# 【启用】每个克隆各做一次：
+#
+#     git config core.hooksPath githooks
+#
+# ⚠️ core.hooksPath 是【替换】不是叠加 —— 设了之后 `.git/hooks/` 完全
+#    不再被读。所以本文件必须入库（就是这个目录）。
+#
+# ⚠️ Windows 上 git 不跟踪执行位（core.filemode=false）。新增或改动
+#    本文件后必须显式补：
+#
+#     git update-index --chmod=+x githooks/pre-commit
+#
+#    漏了的症状：本地好好的，别人克隆后钩子【静默不执行】。
+#    核对：git ls-files -s githooks/pre-commit 应为 100755。
+#
+# 约定见 本仓库 openspec/specs 中的工作流程规范
+#
+# 绕过（仅在确有理由时）：
+#     git commit --no-verify
+# ═══════════════════════════════════════════════════════════════
+
+# ── 只查【新增】的 capability ──────────────────────────────────
+#
+# 存量 capability 尚未迁移（它们保留裸名）。若一并校验，本钩子会从启用
+# 当日起拒绝一切提交 —— 而一个把正常提交也拦下的钩子，实际后果是所有
+# 人都改去用 --no-verify，规则随之作废。
+#
+# 主规格以 spec.md 被新增为判据；变更中的 delta 则先检查 HEAD 是否
+# 已有对应主规格。delta 文件新增不等于 capability 新增，否则对旧
+# capability 的第一次修改也会被错误拦截。用文件而非目录做判据，
+# 是因为 git 不追踪空目录。
+#
+# 由此自动放行的三类：
+#   · 改存量正文   —— 记为 M，不是 A
+#   · git mv 改名  —— 记为 R，不是 A
+#   · archive 下    —— 存档是历史记录，历史不追改
+
+set -u
+
+fail=0
+
+while IFS= read -r -d '' path; do
+  [ -n "$path" ] || continue
+
+  case "$path" in
+    openspec/changes/archive/*) continue ;;
+  esac
+
+  cap=''
+  case "$path" in
+    # 已归档的 capability：openspec/specs/<cap>/spec.md
+    openspec/specs/*/spec.md)
+      cap=${path#openspec/specs/}
+      cap=${cap%/spec.md}
+      ;;
+    # 提议中的 capability：openspec/changes/<change>/specs/<cap>/spec.md
+    openspec/changes/*/specs/*/spec.md)
+      cap=${path#openspec/changes/}
+      cap=${cap#*/specs/}
+      cap=${cap%/spec.md}
+      # 修改或移除既有 capability 的 delta 保留既有标识。
+      # 查 HEAD 而非工作区：本次迁移可能已删除旧主规格。
+      if git cat-file -e "HEAD:openspec/specs/$cap/spec.md" 2>/dev/null; then
+        continue
+      fi
+      ;;
+    *)
+      continue
+      ;;
+  esac
+
+  # capability 名不含斜杠；含斜杠说明层级更深，不是 capability 的标记文件。
+  case "$cap" in
+    ''|*/*) continue ;;
+  esac
+
+  suffix=${cap#*--}
+  case "$suffix" in
+    standard--*|frontend--*|backend--*|procedure--*)
+      echo "✗ capability 不得叠加门类前缀：$cap（来自 $path）" >&2
+      fail=1
+      continue
+      ;;
+  esac
+
+  case "$cap" in
+    standard--?*|frontend--?*|backend--?*|procedure--?*) ;;
+    *)
+      echo "✗ capability 名缺少门类前缀：" >&2
+      echo "      $cap" >&2
+      echo "      （来自 $path）" >&2
+      fail=1
+      ;;
+  esac
+done < <(git diff --cached --find-renames --name-only -z --diff-filter=A)
+
+if [ "$fail" -ne 0 ]; then
+  cat >&2 <<'HINT'
+
+新增 capability 须带门类前缀，形如 <前缀>--<名称>（两个连字符）：
+
+    standard--    跨两端、或不属于任何一端
+                  提交信息、仓库布局、忽略规则、脚本与钩子的书写机制
+    frontend--    客户端一侧
+                  页面规格、跨页面共用的呈现与交互约定、入口结构与构建边界
+    backend--     服务端一侧
+                  分层、数据访问、数据模型、接口契约、部署形态、传输安全
+    procedure--   人怎么做事
+                  原型流程、流水线、规格自身的撰写与命名
+
+    页面规格一律进 frontend--，即使其中夹带业务规则 ——
+    判定看它落在哪一端，不看内容是否纯粹。
+
+合规范例：
+
+    openspec/specs/frontend--calendar-view/spec.md
+    openspec/changes/<change>/specs/backend--task-management/spec.md
+
+四者穷尽：拿不准的归 standard--。
+本条只约束新增；既有 capability 保留原名，不因本规则改名。
+
+详见 本仓库 openspec/specs 中的工作流程规范
+
+HINT
+  exit 1
+fi
+
+exit 0

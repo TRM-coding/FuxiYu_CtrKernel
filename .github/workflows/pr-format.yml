@@ -1,0 +1,61 @@
+name: PR format
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-format-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-format:
+    name: pr-format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout reviewed base checker
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: reviewed
+          persist-credentials: false
+      - name: Select checker
+        id: checker
+        shell: bash
+        run: |
+          if [ -f reviewed/scripts/ci/check_pr.py ]; then
+            echo "bootstrap=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "bootstrap=true" >> "$GITHUB_OUTPUT"
+          fi
+      # The first adoption has no base checker. Require the exact imported
+      # checker hash before running proposed code in this bootstrap case.
+      - name: Checkout bootstrap checker
+        if: steps.checker.outputs.bootstrap == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          path: proposed
+          sparse-checkout: scripts/ci/check_pr.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Validate PR description
+        shell: bash
+        env:
+          BOOTSTRAP: ${{ steps.checker.outputs.bootstrap }}
+        run: |
+          set -e
+          checker="reviewed/scripts/ci/check_pr.py"
+          if [ "$BOOTSTRAP" = "true" ]; then
+            checker="proposed/scripts/ci/check_pr.py"
+            echo "18c7f5a20a07d38d98b86609204b4d17d64b214254f1f187538054b7ce75fe0c  $checker" | sha256sum --check --status
+          fi
+          python "$checker" --event "$GITHUB_EVENT_PATH"
