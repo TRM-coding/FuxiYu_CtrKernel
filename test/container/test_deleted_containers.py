@@ -13,7 +13,7 @@ from ...services import container_tasks
 from ...services.container_module import node_comms
 from ...services.container_module import mount_cleanup as mount_cleanup_mod
 from ..factories import create_container, create_container_graph, create_machine, create_user
-from .conftest import NODE_REMOVE_SUCCESS
+from .conftest import NODE_REMOVE_SUCCESS, _mount_check_exists_response
 
 
 def _bind_to_default_template(db_session, container) -> None:
@@ -92,9 +92,12 @@ def test_each_automatic_and_manual_mount_failure_is_audited(db_session, monkeypa
             mount_cleanup_mod.clean_mount_path(cleanup.id)
     assert len(db_session.scalars(select(OperationLog)).all()) == 3
     # Service preflight adopts a legacy record; downstream logs exactly once per manual attempt.
+    # Manual cleanup adds the action-time path probe, whose failed transport is surfaced as
+    # node_unavailable before /clean_mount rather than leaking the raw RuntimeError.
     for _ in range(2):
-        with pytest.raises(RuntimeError, match="node unavailable"):
+        with pytest.raises(container_tasks.NodeServiceError) as excinfo:
             container_tasks.clean_deleted_container_mount(mount_cleanup_id=cleanup.id)
+        assert excinfo.value.reason == "node_unavailable"
     logs = db_session.scalars(select(OperationLog)).all()
     assert len(logs) == 5
     assert len(attempts) == 5
@@ -196,6 +199,8 @@ def test_clean_deleted_container_mount_calls_node_and_marks_cleaned(db_session, 
 
     def _send(url, payload, timeout=5.0):
         sent.append((url, payload, timeout))
+        if url.endswith("/check_mount_usage"):
+            return _mount_check_exists_response(payload)
         return {"success": 1}
 
     monkeypatch.setattr(node_comms, "send", _send)
@@ -204,8 +209,12 @@ def test_clean_deleted_container_mount_calls_node_and_marks_cleaned(db_session, 
 
     db_session.expire_all()
     assert result["cleaned"] is True
-    assert sent[0][0].endswith("/clean_mount")
-    assert sent[0][1]["config"]["mount_path"] == "/home/u/containers/deleted_c"
+    assert [item[0].rsplit("/api/", 1)[-1] for item in sent] == [
+        "check_mount_usage",
+        "clean_mount",
+    ]
+    assert sent[0][1]["config"]["mount_paths"] == ["/home/u/containers/deleted_c"]
+    assert sent[1][1]["config"]["mount_path"] == "/home/u/containers/deleted_c"
     assert db_session.get(ContainerMountCleanup, row.id).cleaned_at is not None
 
 
@@ -284,6 +293,8 @@ def test_resurrect_container_reuses_snapshot_mount_and_restores_bindings(db_sess
 
     def _send(url, payload, timeout=5.0):
         sent.append({"url": url, "payload": payload, "timeout": timeout})
+        if url.endswith("/check_mount_usage"):
+            return _mount_check_exists_response(payload)
         if url.endswith("/remove_container"):
             return {"success": 1}
         if url.endswith("/create_container"):
@@ -334,6 +345,8 @@ def test_resurrect_container_renames_when_original_name_is_reused(db_session, mo
 
     def _send(url, payload, timeout=5.0):
         sent.append({"url": url, "payload": payload, "timeout": timeout})
+        if url.endswith("/check_mount_usage"):
+            return _mount_check_exists_response(payload)
         return {"success": 1}
 
     monkeypatch.setattr(node_comms, "send", _send)

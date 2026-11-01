@@ -251,10 +251,27 @@ class TestMountCleanupTask:
         db_session.commit()
 
         sent_payloads = []
-        monkeypatch.setattr(
-            node_comms, "send",
-            lambda url, payload, timeout: sent_payloads.append(url) or {"success": 1}
-        )
+        checked_paths = []
+
+        def _send(url, payload, timeout):
+            sent_payloads.append(url)
+            if url.endswith("/check_mount_usage"):
+                checked_paths.extend(payload["config"]["mount_paths"])
+                return {
+                    "success": 1,
+                    "mounts": [
+                        {
+                            "path": payload["config"]["mount_paths"][0],
+                            "bytes": 12,
+                            "measured_at": "2026-01-01T00:00:00Z",
+                            "pending": False,
+                            "error": None,
+                        }
+                    ],
+                }
+            return {"success": 1}
+
+        monkeypatch.setattr(node_comms, "send", _send)
         monkeypatch.setattr(
             mount_cleanup_mod.machine_repo, "get_machine_endpoint_by_id",
             lambda mid, **kwargs: ("10.0.0.9", None)
@@ -265,5 +282,7 @@ class TestMountCleanupTask:
         )
 
         assert result.get("cleaned") is True
-        assert len(sent_payloads) == 1
-        assert "/clean_mount" in sent_payloads[0]
+        assert checked_paths == ["/home/x/containers/manual_ctr/"]
+        assert len(sent_payloads) == 2
+        assert sent_payloads[0].endswith("/check_mount_usage")
+        assert sent_payloads[1].endswith("/clean_mount")

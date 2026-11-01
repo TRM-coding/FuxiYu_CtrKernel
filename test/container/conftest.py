@@ -21,6 +21,29 @@ NODE_STATUS_OFFLINE = {"success": 1, "container_status": "offline"}
 NODE_STATUS_404 = {"status_code": 404, "error": "not found", "text": "not found"}
 
 
+def _mount_check_exists_response(payload):
+    """Legacy tests configure a single generic Node reply; give the new action-time
+    path probe a well-formed "path exists" answer so those tests still exercise the
+    action under test. New tests that need a specific probe result install their own
+    send handler instead of this fixture.
+    """
+
+    paths = ((payload or {}).get("config") or {}).get("mount_paths") or []
+    return {
+        "success": 1,
+        "mounts": [
+            {
+                "path": path,
+                "bytes": 0,
+                "measured_at": "2026-01-01T00:00:00Z",
+                "pending": False,
+                "error": None,
+            }
+            for path in paths
+        ],
+    }
+
+
 @pytest.fixture()
 def container_info():
     return Container_info(
@@ -61,6 +84,12 @@ def mock_node_send(monkeypatch):
                 "payload": payload,
                 "timeout": timeout,
             })
+            if url.endswith("/check_mount_usage"):
+                configured = response if isinstance(response, dict) else {}
+                # 404/405 是“旧 Node 无接口”，坏的/显式的 mounts 形状也照原样返回；
+                # 其余泛化成功/失败回复默认视为“路径存在”，让旧用例继续测动作本身。
+                if "mounts" not in configured and configured.get("status_code") not in (404, 405):
+                    return _mount_check_exists_response(payload)
             return dict(response)
 
         monkeypatch.setattr("FuxiYu_CtrKernel.services.container_module.node_comms.send", _send)

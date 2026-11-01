@@ -1090,13 +1090,14 @@ def test_anvil_c27_restore_account_failure_no_retry_or_credentials(
     root, _container, collaborator, snapshot = _deleted_with_collaborator(
         db_session, mock_node_send, f"anvil_c27_{uuid.uuid4().hex[:6]}",
     )
-    sent = mock_node_send({"success": 0, "error": "node boom", "error_reason": "restore_failed"})
+    send = mock_node_send({"success": 0, "error": "node boom", "error_reason": "restore_failed"})
     with pytest.raises(container_tasks.NodeServiceError) as excinfo:
         container_tasks.resurrect_container(
             snapshot.id, operator_user_id=root.id, content_source="snapshot",
         )
-    assert len(sent) == 1
-    password = sent[0]["payload"]["restore_accounts"][0]["password"]
+    creates = [call for call in send if call["url"].endswith("/create_container")]
+    assert len(creates) == 1
+    password = creates[0]["payload"]["restore_accounts"][0]["password"]
     assert password and password != f"{collaborator.username}123"
     assert password not in str(excinfo.value)
     assert "credentials" not in str(excinfo.value)

@@ -76,6 +76,7 @@ from .container_module.actions import (      # 冻结 / 解冻族（磁盘超限
 )
 from .container_module.restore import (      # 恢复族（复活软删容器）
     _load_restore_target,
+    _ensure_restore_mount_source,
     _load_restore_accounts,
     _resolve_restore_image,
     RESTORE_MODES,
@@ -265,6 +266,9 @@ def resurrect_container(
     """
     try:
         target = _load_restore_target(deleted_id)
+        # 路径保护必须在任何恢复副作用之前：快照/清理记录读取之后、账号与镜像解析、
+        # 长期配额预检与 Create_container 之前。目录已不存在时直接拒绝。
+        _ensure_restore_mount_source(target)
         root_account, accounts = _load_restore_accounts(target.snapshot)
         resolved = _resolve_restore_image(target, content_source)
 
@@ -305,6 +309,93 @@ def resurrect_container(
         raise
 
 
+def _find_live_container_for_manual_cleanup(
+    deleted_id: int | None,
+    mount_cleanup_id: int | None,
+):
+    """手动清理前的只读状态核对：返回仍需保护的活容器行（没有则 None）。
+
+    必须在 ``resolve_mount_cleanup_request`` 之前调用——后者会收养 legacy cleanup
+    并可能补建 deleted 快照，属于可观察副作用。这里只读 deleted/cleanup/container，
+    不创建、不改写任何行。
+    """
+
+    from ..repositories import (
+        container_mount_cleanup_repo,
+        containers_repo,
+        deleted_container_restore_snapshot_repo,
+    )
+
+    container_ids: set[int] = set()
+    cleanup_ids: set[int] = set()
+    deleted_ids: set[int] = set()
+
+    def _add(target: set[int], value) -> bool:
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return False
+        if value <= 0 or value in target:
+            return False
+        target.add(value)
+        return True
+
+    with session_scope(commit=False) as session:
+        if deleted_id is not None:
+            deleted = deleted_container_restore_snapshot_repo.get_by_id(
+                int(deleted_id),
+                session=session,
+            )
+            if deleted is not None:
+                _add(deleted_ids, deleted_id)
+                cleanup = container_mount_cleanup_repo.get_by_deleted_id(
+                    int(deleted_id),
+                    session=session,
+                )
+                _add(cleanup_ids, getattr(cleanup, "id", None))
+            else:
+                # 无 deleted 行时才按既有兼容语义把 deleted_id 当 legacy cleanup id。
+                _add(cleanup_ids, deleted_id)
+        if mount_cleanup_id:
+            _add(cleanup_ids, mount_cleanup_id)
+
+        changed = True
+        while changed:
+            changed = False
+            for current_deleted_id in list(deleted_ids):
+                deleted = deleted_container_restore_snapshot_repo.get_by_id(
+                    current_deleted_id,
+                    session=session,
+                )
+                if deleted is None:
+                    continue
+                snapshot = dict(getattr(deleted, "snapshot", None) or {})
+                changed |= _add(
+                    container_ids,
+                    deleted.original_container_id or snapshot.get("container_id"),
+                )
+                changed |= _add(cleanup_ids, getattr(deleted, "mount_cleanup_id", None))
+            for current_cleanup_id in list(cleanup_ids):
+                cleanup = container_mount_cleanup_repo.get_by_id(
+                    current_cleanup_id,
+                    session=session,
+                )
+                if cleanup is None:
+                    continue
+                changed |= _add(container_ids, getattr(cleanup, "container_id", None))
+                changed |= _add(deleted_ids, getattr(cleanup, "deleted_id", None))
+
+        for container_id in container_ids:
+            container = containers_repo.get_by_id(
+                container_id,
+                session=session,
+                include_invalid=True,
+            )
+            if container is not None and bool(getattr(container, "is_valid", False)):
+                return container
+    return None
+
+
 def clean_deleted_container_mount(
     deleted_id: int | None = None,
     operator_user_id: int | None = None,
@@ -313,6 +404,13 @@ def clean_deleted_container_mount(
 ) -> dict:
     """手动清理已删容器的挂载目录：走 container:manage 方法级权限（已删记录无法通过在线资源校验）。"""
     try:
+        # 先做只读活容器核对，避免 resolve_mount_cleanup_request 的 legacy 收养/补建
+        # 快照发生在拒绝之前；活容器的挂载目录绝不能被历史清理记录删除。
+        if _find_live_container_for_manual_cleanup(deleted_id, mount_cleanup_id) is not None:
+            raise NodeServiceError(
+                "container is valid again; live mount path must not be cleaned",
+                reason="container_exists",
+            )
         deleted_id, cleanup = resolve_mount_cleanup_request(deleted_id, mount_cleanup_id)
     except Exception as exc:
         _audit_mount_preflight_failure(deleted_id, mount_cleanup_id, operator_user_id, exc)
@@ -322,7 +420,12 @@ def clean_deleted_container_mount(
             "deleted_id": int(deleted_id), "mount_cleanup_id": None,
             "cleaned": False, "already_cleaned": True,
         }
-    return clean_mount_path(cleanup.id, operator_user_id=operator_user_id, trigger="manual_clean_mount")
+    return clean_mount_path(
+        cleanup.id,
+        operator_user_id=operator_user_id,
+        trigger="manual_clean_mount",
+        verify_mount_path=True,
+    )
 
 
 ####################################################

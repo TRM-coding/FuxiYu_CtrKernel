@@ -46,6 +46,15 @@ NODE_UNAVAILABLE = "node_unavailable"
 NODE_BAD_RESPONSE = "node_bad_response"
 NOT_FOUND = "not_found"
 
+# 动作前路径校验的结论。present 只在 Node 的路径门禁同步 os.stat 成功后给出；
+# missing 只接受 Node 的 per-path not_found（不是 HTTP 404）；其余原因各自保留，
+# 绝不折叠成 missing。
+MOUNT_PRESENT = "present"
+MOUNT_MISSING = "missing"
+MOUNT_PERMISSION_DENIED = "permission_denied"
+MOUNT_INVALID_PATH = "invalid_path"
+# 校验本身未能得出结论（旧 Node 无接口、超时、离线、坏响应）。
+
 _MOUNT_FIELDS = ("path", "bytes", "measured_at", "pending", "error")
 _UTC_ISO_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)$"
@@ -322,6 +331,123 @@ def _machine_is_online(machine) -> bool:
     status = getattr(machine, "machine_status", None)
     value = getattr(status, "value", status)
     return str(value or "").lower() == MachineStatus.ONLINE.value
+
+
+def classify_mount_path_state(state: dict | None) -> str:
+    """把三态用量结果收敛为动作前校验结论。
+
+    Node 在**每次** ``/check_mount_usage`` 请求内同步
+    ``_validate_mount_path``（``os.stat``），并先清理失效路径的旧缓存，所以：
+
+    - ``pending`` / 成功样本：路径此刻确实是现存目录；
+    - 稳定 du 错误（``non_zero_exit`` 等）：路径已通过门禁，目录存在；
+    - per-path ``not_found``：只有它是明确“不存在”；
+    - ``permission_denied`` / ``invalid_path``：不能当成不存在；
+    - HTTP 404/405、超时、离线、坏形状：校验没有结论。
+
+    这里刻意不复用 ``error is None`` 之类的宽松判断：形状不可信时返回
+    ``node_bad_response``，由调用方以“未校验”拒绝，而不是当成存在或不存在。
+    """
+
+    if not isinstance(state, dict):
+        return NODE_BAD_RESPONSE
+
+    pending = state.get("pending")
+    error = state.get("error")
+
+    if pending is True:
+        return MOUNT_PRESENT
+
+    if pending is not False:
+        return NODE_BAD_RESPONSE
+
+    if error is None:
+        if (
+            _is_int(state.get("bytes"))
+            and state.get("bytes") >= 0
+            and _is_utc_timestamp(state.get("measured_at"))
+        ):
+            return MOUNT_PRESENT
+        return NODE_BAD_RESPONSE
+
+    if not _is_stable_error(error):
+        return NODE_BAD_RESPONSE
+    if error == NOT_FOUND:
+        return MOUNT_MISSING
+    if error == MOUNT_PERMISSION_DENIED:
+        return MOUNT_PERMISSION_DENIED
+    if error == MOUNT_INVALID_PATH:
+        return MOUNT_INVALID_PATH
+    if error in (NODE_UNSUPPORTED, NODE_TIMEOUT, NODE_UNAVAILABLE, NODE_BAD_RESPONSE):
+        return error
+    # Node 的路径门禁已经通过；du 失败仍是“目录存在”。
+    return MOUNT_PRESENT
+
+
+def _load_probe_group(machine_id: int, mount_path: str) -> dict:
+    """按机器记录构造单路径查询组；不写库、不采用调用方给的 host。"""
+
+    with session_scope(commit=False) as session:
+        machine = machine_repo.get_by_id(machine_id, session=session)
+
+    host, port, online = None, None, False
+    if machine is not None:
+        try:
+            host, port = node_endpoint.machine_endpoint(machine)
+            online = bool(host) and _machine_is_online(machine)
+        except Exception:
+            host, port, online = None, None, False
+
+    return {
+        "machine_id": machine_id,
+        "host": host,
+        "port": port,
+        "online": online,
+        "paths": {mount_path: []},
+    }
+
+
+def probe_mount_path(machine_id, mount_path) -> dict:
+    """动作前同步询问目标 Node：这条保留路径现在还是不是现存目录。
+
+    只发一条路径，复用与用量查询相同的严格解析和传输映射；不读取浏览器采样、
+    不使用调用方给的机器地址、不缓存结论。
+    """
+
+    normalized_machine_id = _normalize_machine_id(machine_id)
+    if normalized_machine_id is None:
+        return {
+            "machine_id": machine_id,
+            "path": mount_path,
+            "state": NODE_UNAVAILABLE,
+            "error": NODE_UNAVAILABLE,
+            "pending": False,
+            "bytes": None,
+            "measured_at": None,
+        }
+
+    if not isinstance(mount_path, str) or not mount_path:
+        return {
+            "machine_id": normalized_machine_id,
+            "path": mount_path,
+            "state": MOUNT_INVALID_PATH,
+            "error": MOUNT_INVALID_PATH,
+            "pending": False,
+            "bytes": None,
+            "measured_at": None,
+        }
+
+    group = _load_probe_group(normalized_machine_id, mount_path)
+    state = _query_machine(group).get(mount_path) or _bad(NODE_BAD_RESPONSE)
+    return {
+        "machine_id": normalized_machine_id,
+        "path": mount_path,
+        "state": classify_mount_path_state(state),
+        "error": state.get("error"),
+        "pending": bool(state.get("pending")),
+        "bytes": state.get("bytes"),
+        "measured_at": state.get("measured_at"),
+    }
 
 
 def _unique_deleted_ids(deleted_ids: list[int]) -> list[int]:

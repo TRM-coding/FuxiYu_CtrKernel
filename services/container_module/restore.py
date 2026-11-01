@@ -20,6 +20,13 @@ from .deleted_containers import (
     restore_accounts_from_snapshot,
 )
 from .exceptions import NodeServiceError, safe_reason
+from .mount_usage import (
+    MOUNT_INVALID_PATH,
+    MOUNT_MISSING,
+    MOUNT_PERMISSION_DENIED,
+    MOUNT_PRESENT,
+    probe_mount_path,
+)
 from .utils import _container_log_detail, container_dockerfile_parts
 
 ####################################################
@@ -205,6 +212,13 @@ def _load_restore_target(deleted_id: int) -> _RestoreTarget:
             if original_container_id
             else None
         )
+        if container_record is not None and bool(getattr(container_record, "is_valid", False)):
+            # 原容器行已重新有效：这是重复恢复/残留删除记录，不能再次 Create_container。
+            # 与 Web 的“已恢复”按钮门禁同口径；必须在读取账号、解析镜像和消费快照之前拒绝。
+            raise NodeServiceError(
+                "container is already valid; restore refused",
+                reason="container_exists",
+            )
         mount_path = (
             getattr(container_record, "bind_mount_path", None)
             or (getattr(cleanup, "mount_path", None) if cleanup else None)
@@ -249,6 +263,45 @@ def _load_restore_target(deleted_id: int) -> _RestoreTarget:
         int(image_id) if image_id else None,
         image_version_at,
         dockerfile_parts,
+    )
+
+
+def _ensure_restore_mount_source(target: _RestoreTarget) -> None:
+    """恢复动作前的保留路径复核：以目标 Node 的即时 os.stat 结论为准。
+
+    只把 Node 的 per-path ``not_found`` 翻译成 ``data_not_recoverable``。权限、
+    非法路径分别保留自己的原因。旧 Node 无 ``/check_mount_usage``、超时、离线或
+    坏形状都**没有得出“存在”结论**：恢复会立刻消费快照，不能把这种未知交给
+    异步的 Node 创建去兜底，因此必须在这里以可重试原因阻断，且绝不误称
+    ``not_found`` / ``data_not_recoverable``。
+    """
+
+    probe = probe_mount_path(target.machine_id, target.mount_path)
+    state = probe["state"]
+
+    if state == MOUNT_PRESENT:
+        return
+    if state == MOUNT_MISSING:
+        raise NodeServiceError(
+            "deleted container mount path no longer exists",
+            reason="data_not_recoverable",
+        )
+    if state == MOUNT_PERMISSION_DENIED:
+        raise NodeServiceError(
+            "deleted container mount path is not readable on the node",
+            reason=MOUNT_PERMISSION_DENIED,
+        )
+    if state == MOUNT_INVALID_PATH:
+        raise NodeServiceError(
+            "deleted container mount path is not a usable directory",
+            reason=MOUNT_INVALID_PATH,
+        )
+
+    # 校验未能得出结论：保留各自原因，供调用方重试/升级 Node；不能当成不存在，
+    # 也不能放行去创建（Ctrl 随后会删除快照与清理记录，失败就无法重试了）。
+    raise NodeServiceError(
+        f"cannot verify deleted container mount path ({state}); retry after node check succeeds",
+        reason=state,
     )
 
 

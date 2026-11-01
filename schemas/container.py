@@ -142,6 +142,7 @@ class ListDeletedContainersRequest(_CompatBaseModel):
 class DeletedContainerRecord(_CompatBaseModel):
     deleted_id: int | str
     original_container_id: int | None = None
+    original_container_is_valid: bool | None = None
     container_name: str | None = None
     # 镜像归属：与容器列表同一个口径——归属标识 + 模板名，不出标签（2026-09 决策）。
     image_id: int | None = None

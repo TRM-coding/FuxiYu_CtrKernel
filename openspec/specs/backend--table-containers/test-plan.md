@@ -129,6 +129,41 @@ Spec: [spec.md](spec.md)
 - Assertion scope: 原容器名被占用时恢复改名，但 `restore_mount_path` 仍以原容器名 `_data` 结尾；两种内容来源都发送构建段。 改名不改数据位置已断言；现有跨来源用例为不同容器名，无法证明同一数据位置。C06 构造两份等价快照（同一容器数据、不同 `deleted_id`），分别指定 snapshot/template，避免首恢复消费同一行；比较 `restore_mount_path` 完全相同。
 - Coverage note: 不使用同一快照重复恢复；两份等价快照共享同一容器数据/挂载路径，仅 `deleted_id` 不同，以隔离消费副作用。
 
+#### Scenario: 动作前新鲜检查通过
+
+- Test/check:
+  - [X] test/container/test_mount_path_action_guard.py::test_restore_pending_still_means_present_and_restores
+- Assertion scope: Node 单路径结果为 pending（已通过 `os.stat` 门禁）时，恢复仍执行一次 `/check_mount_usage` 和一次 `/create_container`，`container_id` 非空。
+
+#### Scenario: not_found 拒绝恢复并保留记录
+
+- Test/check:
+  - [X] test/container/test_mount_path_action_guard.py::test_restore_missing_path_rejected_before_any_create
+- Assertion scope: per-path `not_found` -> `data_not_recoverable`；仅发一次 `/check_mount_usage`，不发 `/create_container`；snapshot 与 cleanup 行保留，`cleaned_at` 为空。
+
+#### Scenario: 原容器已恢复为有效时拒绝恢复
+
+- Test/check:
+  - [X] test/container/test_mount_path_action_guard.py::test_restore_refuses_duplicate_when_original_container_is_valid
+  - [X] test/container/test_mount_path_action_guard.py::test_restore_api_duplicate_valid_container_is_409
+- Assertion scope: 原容器行 `is_valid=true` -> `container_exists`，不触达 Node；snapshot/cleanup 保留；API 返回 409 且 `error_reason=container_exists`。
+
+#### Scenario: 权限与非法路径不误称 not_found
+
+- Test/check:
+  - [X] test/container/test_mount_path_action_guard.py::test_restore_permission_denied_is_not_reported_as_missing
+- Assertion scope: per-path `permission_denied` -> 恢复 reason 为 `permission_denied`，不等于 `data_not_recoverable`，且不调用 `/create_container`。
+- Coverage note: `invalid_path` 的恢复分支未单独构造测试；当前测试只直接覆盖权限分支，主 spec 要求的 `invalid_path` 拒绝仍待实现侧补测。
+
+#### Scenario: 无法得出结论必须阻断且不冒充 not_found
+
+- Test/check:
+  - [X] test/container/test_mount_path_action_guard.py::test_restore_unknown_path_state_blocks_with_retryable_reason
+  - [X] test/container/test_mount_path_action_guard.py::test_restore_timeout_blocks_with_timeout_reason
+  - [X] test/container/test_mount_path_action_guard.py::test_restore_offline_machine_blocks_without_node_call
+  - [X] test/container/test_mount_path_action_guard.py::test_restore_api_unknown_is_5xx_not_not_found
+- Assertion scope: 旧 Node 404/405、坏形状、5xx、超时、离线分别映射 `node_unsupported`/`node_bad_response`/`node_unavailable`/`node_timeout`；均不调用 `/create_container`，API 不返回 `not_found`/`data_not_recoverable`。`test_restore_unknown_path_state_blocks_with_retryable_reason` 直接断言 snapshot/cleanup 保留；超时/离线用例只断言不创建，未重复断言 snapshot/cleanup 行。
+
 ### Requirement: 镜像换代保持容器留痕与关联有效
 
 #### Scenario: 缓存换代后读取旧容器

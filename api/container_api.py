@@ -96,6 +96,13 @@ REASON_STATUS_MAP = {
     "long_term_limit_reached": 409,
     "disk_usage_over_limit": 409,
     "data_not_recoverable": 409,
+    # 动作前挂载路径复核：Node 明确拒绝/无法校验时保留各自原因，不折叠成“记录不存在”。
+    "permission_denied": 403,
+    "invalid_path": 400,
+    "node_unsupported": 502,
+    "node_timeout": 504,
+    "node_unavailable": 503,
+    "node_bad_response": 502,
     "target_not_bound": 409,
     "invalid_target_account": 409,
     "reset_not_accepted": 500,

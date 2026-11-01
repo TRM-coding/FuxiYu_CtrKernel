@@ -25,6 +25,27 @@ Spec: [spec.md](spec.md)
   - [X] test/container/test_deleted_containers.py::test_resurrect_container_rejects_cleaned_mount
 - Assertion scope: 恢复成功：容器行重建，账号绑定/GPU/挂载路径沿用快照；snapshot 与 cleanup 行均删除；`mount_cleaned=true` 的快照拒绝恢复且不产生半恢复。
 
+#### Scenario: not_found 不消费快照
+
+- Test/check:
+  - [X] test/container/test_mount_path_action_guard.py::test_restore_missing_path_rejected_before_any_create
+- Assertion scope: per-path `not_found` -> `data_not_recoverable`；snapshot 与 cleanup 行保留，`cleaned_at` 为空；不调用 `/create_container`。
+
+#### Scenario: 权限与非法路径不消费快照
+
+- Test/check:
+  - [X] test/container/test_mount_path_action_guard.py::test_restore_permission_denied_is_not_reported_as_missing
+- Assertion scope: `permission_denied` -> 恢复 `permission_denied`，不调用 `/create_container`；snapshot/cleanup 记录保留。
+- Coverage note: `invalid_path` 的恢复分支未单独构造测试；现有直接覆盖仅权限分支。
+
+#### Scenario: 无法得出结论必须阻断并保留快照
+
+- Test/check:
+  - [X] test/container/test_mount_path_action_guard.py::test_restore_unknown_path_state_blocks_with_retryable_reason
+  - [X] test/container/test_mount_path_action_guard.py::test_restore_timeout_blocks_with_timeout_reason
+  - [X] test/container/test_mount_path_action_guard.py::test_restore_offline_machine_blocks_without_node_call
+- Assertion scope: 旧 Node 404/405、坏形状、5xx、超时、离线分别映射 `node_unsupported`/`node_bad_response`/`node_unavailable`/`node_timeout`；均不调用 `/create_container`，不误报 `not_found`。未知状态用例断言 snapshot/cleanup 保留；超时/离线用例未重复断言 snapshot 行。
+
 ### Requirement: 长期配额失败保留可重试恢复状态
 
 #### Scenario: 失败后仍可恢复
@@ -128,7 +149,7 @@ Spec: [spec.md](spec.md)
 - Test/check:
   - [X] test/container/test_deleted_mount_usage.py::test_old_node_http_status_maps_unsupported
   - [X] test/container/test_anvil_cleanup_contracts.py::test_anvil_d03_node_unsupported_does_not_change_list_or_restore_eligibility
-- Assertion scope: 404/405 -> `node_unsupported`，bytes/measured_at=null、pending=false。 D03 补 Requirement 正文的“只影响统计显示，不影响原列表、恢复或清理；不改变资格、不做全盘扫描/全局总计/清理门禁/自动冻结、不改 clean_mount”。
+- Assertion scope: 404/405 -> `node_unsupported`，bytes/measured_at=null、pending=false。 D03 只补统计展示与列表 `data_recoverable` 不变；旧 Node 现在对恢复/手动清理失败关闭，由下方“统计展示与动作 guard 分离”覆盖。
 
 #### Scenario: 超时、离线与坏响应
 
@@ -154,3 +175,47 @@ Spec: [spec.md](spec.md)
   - [X] test/container/test_deleted_mount_usage.py::test_bad_node_response_is_never_success
   - [X] test/container/test_deleted_mount_usage.py::test_one_bad_path_does_not_poison_other_paths
 - Assertion scope: 缺 path、重复 path、path 与请求不一致、entry 非 dict、mounts 非 list 均 `node_bad_response`，不借用其他机器/path 的 bytes；一个坏 path 不污染同批好 path。
+
+#### Scenario: 统计展示与动作 guard 分离
+
+- Test/check:
+  - [X] test/container/test_deleted_mount_usage.py::test_old_node_http_status_maps_unsupported
+  - [X] test/container/test_mount_path_action_guard.py::test_restore_unknown_path_state_blocks_with_retryable_reason
+  - [X] test/container/test_mount_path_action_guard.py::test_manual_cleanup_unverified_paths_keep_a_distinct_reason
+  - [X] test/container/test_mount_path_action_guard.py::test_restore_api_unknown_is_5xx_not_not_found
+- Assertion scope: 旧 Node 404/405 在统计项仍为 `node_unsupported`；恢复以 `node_unsupported` 可重试原因拒绝且不调用 `/create_container`；手动清理以 `node_unsupported` 拒绝且不调用 `/clean_mount`；API 返回 502，不返回 `not_found`/`data_not_recoverable`。
+
+#### Scenario: du 类错误不阻断动作
+
+- Test/check:
+  - [X] test/container/test_deleted_mount_usage.py::test_stable_node_error_reason_is_passed_through
+- Assertion scope: 统计展示对 `non_zero_exit`/`du_unavailable`/`du_failed` 等 du 稳定错误原样保留 `error`，不填 0、不伪造成功。
+- Coverage note: 动作 guard 对 du 类错误按 present 继续的分支未直接构造测试；现有用例只覆盖统计展示的透传，恢复/手动清理的该分支待补。
+
+### Requirement: 已删除容器列表返回原容器有效态
+
+#### Scenario: 原容器仍有效
+
+- Test/check:
+  - [X] test/container/test_deleted_validity_projection.py::test_deleted_record_projects_original_container_validity
+- Assertion scope: 参数化 `valid=True` 时序列化结果与 `DeletedContainerRecord` 的 `original_container_is_valid` 均为 true。
+
+#### Scenario: 原容器已软删
+
+- Test/check:
+  - [X] test/container/test_deleted_validity_projection.py::test_deleted_record_projects_original_container_validity
+- Assertion scope: 参数化 `valid=False` 时字段为 false，不把软删行误报为缺失。
+
+#### Scenario: 原容器行缺失
+
+- Test/check:
+  - [X] test/container/test_deleted_validity_projection.py::test_deleted_record_projects_original_container_validity
+- Assertion scope: 参数化 `valid=None`（容器上下文无原行）时字段为 None，不填 false。
+
+#### Scenario: 动态派生且只读
+
+- Test/check:
+  - [X] test/container/test_deleted_validity_projection.py::test_deleted_record_projects_original_container_validity
+  - [X] test/container/test_deleted_containers.py::test_list_deleted_containers_returns_cleanup_state
+- Assertion scope: 序列化直接取 `context["container"].is_valid`，不读取 `mount_cleaned`/`data_recoverable`；列表测试确认既有列表响应仍正常返回记录。
+- Coverage note: 列表读取不写数据库与“无新列/迁移”未由 API 级测试直接断言；由 schema diff 与序列化测试间接覆盖，未新增数据库列。

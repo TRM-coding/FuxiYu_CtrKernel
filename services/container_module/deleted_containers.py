@@ -346,6 +346,7 @@ def serialize_deleted_container_record(row, cleanup, *, context: dict | None = N
     return {
         "deleted_id": row.id,
         "original_container_id": row.original_container_id,
+        "original_container_is_valid": getattr(context.get("container"), "is_valid", None),
         "container_name": context.get("container_name") or row.container_name,
         # 镜像归属：与容器列表同一个口径——**归属标识 + 模板名**，不出标签（2026-09 决策）。
         # 曾从快照 JSON 的 "image" 键取标签，那是把派生值抄一份进 JSON 再读出来。
