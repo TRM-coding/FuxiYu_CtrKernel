@@ -35,7 +35,7 @@ SAFE_REASON_CODES = frozenset({
     "unexpected_response", "not_found", "duplicate_entry", "create_failed",
     "delete_failed", "start_failed", "stop_failed", "restart_failed",
     "container_offline", "container_busy", "container_paused", "container_failed",
-    "container_host_offline", "container_host_maintenance", "container_status_unknown",
+    "container_host_offline", "container_host_maintenance", "container_status_unknown", "container_node_vanished",
     "node_endpoint_not_found", "machine_maintenance", "machine_offline",
     "image_not_found", "image_access_denied", "image_not_ready",
     "machine_not_found", "container_not_found", "machine_permission_denied",

@@ -128,6 +128,28 @@
 
 Ctrl SHALL 将非空容器状态快照中缺少某个有效记录、或仅含容器名称的 Node `delete` 帧，视为待核实线索，不得仅凭此将该记录软删除或清理账号绑定、长期标记及恢复信息；待核实应以独立标记表达，不改变记录有效性。创建和启动过渡态 MUST 受到同等保护。
 
+Ctrl SHALL 在既有 `status_unknown_since` 有效且 `status_source` 为 `snapshot_missing` 或 `delete_frame` 时派生 `effective_status=node_vanished`，不新增数据库字段。既有硬故障、宿主机维护、宿主机离线和机器采集异常优先；其他未知原因仍派生 `status_unknown`。除既有删除外，`node_vanished` 的写操作守卫 SHALL 保持与 `status_unknown` 相同的保守范围；普通 `status_unknown` MUST NOT 因此放宽删除。删除时 Node 明确返回 `not_found` SHALL 按既有删除链路视为容器已不存在并继续本地软删。
+
+#### Scenario: 缺席线索显示容器丢失
+
+- **WHEN** 容器有待核实标记且来源为 `snapshot_missing` 或 `delete_frame`，机器在线、未维护且采集正常，容器没有更高优先级的硬故障
+- **THEN** 接口返回 `effective_status=node_vanished`，保留有效记录和关联；除既有删除外，其他写操作按状态未知的既有守卫拒绝
+
+#### Scenario: 缺席线索允许既有删除
+
+- **WHEN** 容器派生为 `node_vanished`，且用户通过既有删除权限校验
+- **THEN** Ctrl 允许既有删除入口继续，Node 明确返回 `not_found` 时完成本地软删；其他写操作仍被拒绝，权限规则不变
+
+#### Scenario: 普通状态未知仍禁止删除
+
+- **WHEN** 容器的未知标记来源不是 `snapshot_missing` 或 `delete_frame`，或容器仅派生为普通 `status_unknown`
+- **THEN** 删除仍按既有保守守卫拒绝，不得套用 `node_vanished` 的删除放行
+
+#### Scenario: 机器异常和其他未知原因
+
+- **WHEN** 机器采集异常，或容器未知标记的来源不是缺席线索
+- **THEN** 返回 `status_unknown`，不得仅因未知状态宣告容器丢失；机器维护和离线仍按既有优先级返回
+
 #### Scenario: 创建受理后快照缺席
 
 - **WHEN** Ctrl 已有 `creating` 记录，而一帧非空状态快照暂不包含该名称

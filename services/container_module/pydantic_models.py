@@ -90,6 +90,8 @@ def _derive_effective_status(container_status, machine_id: int | None, *, contai
 
     优先级：容器 FAILED > 机器维护/离线/采集异常 > 容器轴 unknown 标记
     （status_unknown_since，仿机器 collect_error，2026-09-03）> 最后已知状态。
+    缺席线索来源（snapshot_missing/delete_frame）派生 node_vanished；其余未知来源
+    仍派生 status_unknown。
     """
     status_str = container_status.value if hasattr(container_status, 'value') else str(container_status)
     if str(status_str).lower() == ContainerStatus.FAILED.value:
@@ -103,5 +105,7 @@ def _derive_effective_status(container_status, machine_id: int | None, *, contai
     if is_machine_collect_error(machine_id):
         return ContainerEffectiveStatus.STATUS_UNKNOWN.value
     if container is not None and getattr(container, "status_unknown_since", None) is not None:
+        if getattr(container, "status_source", None) in {"snapshot_missing", "delete_frame"}:
+            return ContainerEffectiveStatus.NODE_VANISHED.value
         return ContainerEffectiveStatus.STATUS_UNKNOWN.value
     return status_str

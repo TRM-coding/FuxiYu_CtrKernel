@@ -75,6 +75,7 @@ REASON_STATUS_MAP = {
     "container_host_offline": 503,
     "container_host_maintenance": 503,
     "container_status_unknown": 409,
+    "container_node_vanished": 409,
     "node_endpoint_not_found": 502,
     # 机器准入族（machine_access._ensure_machine_online_for_operation）。
     # 创建路径**没有容器**、派生不出有效状态，所以撞的是这一族，而不是 container_host_*；

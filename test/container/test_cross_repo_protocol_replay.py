@@ -398,7 +398,7 @@ process.stdout.write(JSON.stringify(inputs.map((input) => resolveContainerAction
 
 
 def test_web_container_actions_consume_existing_ctrl_fields(app, db_session):
-    # 1) 配额满的 brief；2) 硬超限的详情嵌套磁盘；3) 普通 online；4) 待核实 unknown。
+    # 1) 配额满的 brief；2) 硬超限的详情嵌套磁盘；3) 普通 online；4) node_vanished（允许删除）。
     quota_root, quota_machine, quota_target = create_container_graph()
     _r2, _m2, other = create_container_graph(root_user=quota_root, machine=quota_machine)
     long_term_container_repo.add(other.id, created_by_user_id=quota_root.id, session=db_session)
@@ -466,8 +466,8 @@ def test_web_container_actions_consume_existing_ctrl_fields(app, db_session):
     assert results[1]["actions"]["long_term_enable"]["enabled"] is False
     assert results[1]["actions"]["long_term_enable"]["reason"] == "disk_usage_over_limit"
     assert results[2]["actions"]["delete"]["enabled"] is True
-    assert results[3]["actions"]["delete"]["enabled"] is False
-    assert results[3]["actions"]["delete"]["reason"] == "container_status_unknown"
+    assert results[3]["actions"]["delete"]["enabled"] is True
+    assert results[3]["actions"]["delete"]["reason"] is None
 
     source = (WEB_ROOT / "src/utils/containerActions.js").read_text(encoding="utf-8")
     assert "fetch(" not in source

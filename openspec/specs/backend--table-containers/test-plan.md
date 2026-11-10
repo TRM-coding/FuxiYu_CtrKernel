@@ -187,6 +187,39 @@ Spec: [spec.md](spec.md)
 
 ### Requirement: 名称缺席不构成删除依据
 
+#### Scenario: 缺席线索显示容器丢失
+
+- Test/check:
+  - [X] test/container/test_container_effective_status.py::test_vanished_clues_are_distinct_and_host_conditions_take_precedence
+  - [X] test/container/test_container_operation_guard.py::test_node_vanished_rejects_every_write_operation_except_delete
+  - [X] test/container/test_vanish_guard.py::test_pending_state_is_visible_as_node_vanished
+  - [X] test/container/test_vanish_guard.py::test_node_vanished_start_api_maps_to_safe_409_without_node_call
+- Assertion scope: 两种缺席来源派生 `node_vanished`，详情返回该状态；除既有删除外的写操作全部被拒，API 为 409 + `container_node_vanished`，且不调用 Node、保留有效记录和线索。
+
+#### Scenario: 缺席线索允许既有删除
+
+- Test/check:
+  - [X] test/container/test_container_operation_guard.py::test_node_vanished_allows_existing_delete
+  - [X] test/container/test_vanish_guard.py::test_node_vanished_remove_proceeds_when_node_reports_not_found
+  - [X] test/container/test_vanish_guard.py::test_node_vanished_delete_api_succeeds_with_node_not_found
+  - [X] test/container/test_cross_repo_protocol_replay.py::test_web_container_actions_consume_existing_ctrl_fields
+- Assertion scope: `node_vanished` 放行既有 `remove`；Node 明确 `not_found` 时仍完成本地软删、写恢复快照与成功审计；API 保留原权限并返回成功；前端对合格用户启用删除按钮。
+
+#### Scenario: 普通状态未知仍禁止删除
+
+- Test/check:
+  - [X] test/container/test_container_operation_guard.py::test_status_unknown_still_rejects_delete
+  - [X] test/container/test_vanish_guard.py::test_status_unknown_still_denies_remove_without_node_call
+  - [X] test/container/test_vanish_guard.py::test_status_unknown_delete_api_maps_to_409_without_node_call
+- Assertion scope: 非缺席来源的普通 `status_unknown` 仍拒绝 `remove`，服务层与 API 均为 `container_status_unknown`，不调用 Node、保留有效记录。
+
+#### Scenario: 机器异常和其他未知原因
+
+- Test/check:
+  - [X] test/container/test_container_effective_status.py::test_vanished_clues_are_distinct_and_host_conditions_take_precedence
+  - [X] test/container/test_container_effective_status.py::test_other_unknown_source_is_not_vanished
+- Assertion scope: 硬故障和机器状态按原优先级覆盖缺席线索，其他 unknown 来源保持 `status_unknown`。
+
 #### Scenario: 创建受理后快照缺席
 
 - Test/check:

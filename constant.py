@@ -30,6 +30,7 @@ class ContainerEffectiveStatus(Enum):
     HOST_OFFLINE = "host_offline"
     HOST_MAINTENANCE = "host_maintenance"
     STATUS_UNKNOWN = "status_unknown"
+    NODE_VANISHED = "node_vanished"
 
 
 class ImageStatus(Enum):

@@ -6,10 +6,12 @@
 """
 
 import logging
+from datetime import datetime
 
 import pytest
 from sqlalchemy import select
 
+from ...api import deps
 from ...constant import ContainerStatus, OperationType
 from ...models.containers import Container
 from ...models.deleted_container_restore_snapshot import DeletedContainerRestoreSnapshot
@@ -27,7 +29,7 @@ from ..factories import (
     create_container_graph,
     create_machine,
 )
-from .conftest import NODE_REMOVE_SUCCESS
+from .conftest import NODE_REMOVE_NOT_FOUND, NODE_REMOVE_SUCCESS
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +59,17 @@ def _snapshots(db_session, container_id: int):
             DeletedContainerRestoreSnapshot.original_container_id == container_id,
         )
     ).all()
+
+
+def _authenticate(monkeypatch, *, user_id: int, machine_id: int) -> None:
+    monkeypatch.setattr(deps.authentications_repo, "is_token_valid", lambda token, **kwargs: True)
+    monkeypatch.setattr(deps.authentications_repo, "get_user_id_by_token", lambda token, **kwargs: user_id)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_entity", lambda uid, code: True)
+    monkeypatch.setattr("FuxiYu_CtrKernel.services.rbac_service.user_has_resource", lambda uid, rtype, rid: True)
+    monkeypatch.setattr(
+        "FuxiYu_CtrKernel.repositories.containers_repo.get_machine_id_by_container_id",
+        lambda cid, session: machine_id,
+    )
 
 
 @pytest.mark.parametrize("status", [ContainerStatus.CREATING, ContainerStatus.ONLINE])
@@ -183,16 +196,36 @@ def test_late_vanish_clue_after_api_delete_does_not_touch_invalid_row(
     assert len(_delete_logs(db_session, container.id)) == log_count
 
 
-def test_pending_clue_exposes_existing_remove_denial_without_mutation(
+def test_node_vanished_remove_proceeds_when_node_reports_not_found(
     app, db_session, mock_node_send,
 ):
-    """记录现有缺口：待核实派生为 status_unknown 后，既有 remove 矩阵会拒绝。
-
-    本变更不暗中放宽 unknown 删除，也不新增接口；这里只锁定“拒绝发生在动作前、
-    不改记录、不写成功审计”。若产品要求待核实容器仍可主动删除，需要单独决策。
-    """
-    _root, machine, container = create_container_graph()
+    """node_vanished 允许既有删除；Node not_found 走既有链路完成本地软删。"""
+    root, machine, container = create_container_graph()
     node_comms._handle_container_vanish(container.name, machine.id, source="snapshot_missing")
+    sent = mock_node_send(NODE_REMOVE_NOT_FOUND)
+
+    assert container_tasks.remove_container(container.id, operator_user_id=root.id) is True
+
+    assert len(sent) == 1
+    row = _row(db_session, container.id)
+    assert row.is_valid is False
+    assert row.deleted_trigger == "api"
+    assert row.deleted_by_user_id == root.id
+    assert len(_snapshots(db_session, container.id)) == 1
+    logs = _delete_logs(db_session, container.id)
+    assert len(logs) == 1
+    assert logs[0].success is True
+    assert logs[0].error_reason is None
+
+
+def test_status_unknown_still_denies_remove_without_node_call(
+    app, db_session, mock_node_send,
+):
+    """普通 status_unknown 不享受 node_vanished 的删除放行。"""
+    _root, machine, container = create_container_graph()
+    container.status_unknown_since = datetime.utcnow()
+    container.status_source = "cold_start_verify"
+    db_session.commit()
     sent = mock_node_send(NODE_REMOVE_SUCCESS)
 
     with pytest.raises(container_tasks.NodeServiceError) as excinfo:
@@ -202,11 +235,74 @@ def test_pending_clue_exposes_existing_remove_denial_without_mutation(
     assert sent == []
     row = _row(db_session, container.id)
     assert row.is_valid is True
-    assert row.status_source == "snapshot_missing"
+    assert row.status_source == "cold_start_verify"
     logs = _delete_logs(db_session, container.id)
-    assert logs
-    assert all(log.success is False for log in logs)
+    assert logs and all(log.success is False for log in logs)
     assert logs[-1].error_reason == "container_status_unknown"
+
+
+def test_node_vanished_start_api_maps_to_safe_409_without_node_call(
+    app, client, db_session, monkeypatch, mock_node_send,
+):
+    """非删除写操作仍回安全 reason + 409，且拒绝发生在任何 Node 调用之前。"""
+    root, machine, container = create_container_graph()
+    node_comms._handle_container_vanish(container.name, machine.id, source="delete_frame")
+    sent = mock_node_send({"success": 1})
+    _authenticate(monkeypatch, user_id=root.id, machine_id=machine.id)
+
+    resp = client.post("/api/containers/start_container", json={"container_id": container.id})
+
+    assert resp.status_code == 409
+    assert resp.json()["error_reason"] == "container_node_vanished"
+    assert sent == []
+    row = _row(db_session, container.id)
+    assert row.is_valid is True
+    assert row.status_source == "delete_frame"
+
+
+def test_node_vanished_delete_api_succeeds_with_node_not_found(
+    app, client, db_session, monkeypatch, mock_node_send,
+):
+    """合格用户删除 node_vanished 容器：API 放行，Node not_found 后完成软删。"""
+    root, machine, container = create_container_graph()
+    node_comms._handle_container_vanish(container.name, machine.id, source="delete_frame")
+    sent = mock_node_send(NODE_REMOVE_NOT_FOUND)
+    _authenticate(monkeypatch, user_id=root.id, machine_id=machine.id)
+
+    resp = client.post("/api/containers/delete_container", json={"container_id": container.id})
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] == 1
+    assert len(sent) == 1
+    row = _row(db_session, container.id)
+    assert row.is_valid is False
+    assert row.deleted_trigger == "api"
+    assert row.deleted_by_user_id == root.id
+    assert len(_snapshots(db_session, container.id)) == 1
+    logs = _delete_logs(db_session, container.id)
+    assert len(logs) == 1
+    assert logs[0].success is True
+    assert logs[0].error_reason is None
+
+
+def test_status_unknown_delete_api_maps_to_409_without_node_call(
+    app, client, db_session, monkeypatch, mock_node_send,
+):
+    root, machine, container = create_container_graph()
+    container.status_unknown_since = datetime.utcnow()
+    container.status_source = "cold_start_verify"
+    db_session.commit()
+    sent = mock_node_send(NODE_REMOVE_SUCCESS)
+    _authenticate(monkeypatch, user_id=root.id, machine_id=machine.id)
+
+    resp = client.post("/api/containers/delete_container", json={"container_id": container.id})
+
+    assert resp.status_code == 409
+    assert resp.json()["error_reason"] == "container_status_unknown"
+    assert sent == []
+    row = _row(db_session, container.id)
+    assert row.is_valid is True
+    assert row.status_source == "cold_start_verify"
 
 
 def test_cleanup_chain_still_deletes_unmarked_record(app, db_session, mock_node_send):
@@ -245,6 +341,8 @@ def test_positive_status_clears_absence_marker(
     assert row.container_status == expected
     assert row.status_unknown_since is None
     assert row.status_source is None
+    detail = container_tasks.get_container_detail_information(container.id)
+    assert detail["effective_status"] == expected.value
 
 
 @pytest.mark.parametrize(
@@ -340,11 +438,12 @@ def test_vanish_sources_are_distinguishable_and_throttled(app, db_session, caplo
     assert "container vanish clue: source=snapshot_missing" not in caplog.text
 
 
-def test_pending_state_is_visible_as_status_unknown(app, db_session):
+@pytest.mark.parametrize("source", ["snapshot_missing", "delete_frame"])
+def test_pending_state_is_visible_as_node_vanished(app, db_session, source):
     _root, _machine, container = create_container_graph()
-    node_comms._handle_container_vanish(container.name, container.machine_id, source="snapshot_missing")
+    node_comms._handle_container_vanish(container.name, container.machine_id, source=source)
 
     detail = container_tasks.get_container_detail_information(container.id)
 
-    assert detail["effective_status"] == "status_unknown"
+    assert detail["effective_status"] == "node_vanished"
     assert detail["is_long_term"] is False

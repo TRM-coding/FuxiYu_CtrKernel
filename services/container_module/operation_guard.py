@@ -24,6 +24,10 @@ ALL_CONTAINER_WRITE_OPS = {
     "reset_container_password",
 }
 
+# node_vanished 只放行既有删除：删除是处理“容器已从 Node 消失”的出口，
+# 其余写操作仍与 status_unknown 保持同一保守范围。
+NODE_VANISHED_DENY_OPS = ALL_CONTAINER_WRITE_OPS - {"remove"}
+
 CONTAINER_OPERATION_DENY_MATRIX = {
     "building": ALL_CONTAINER_WRITE_OPS,
     "creating": ALL_CONTAINER_WRITE_OPS,
@@ -37,6 +41,7 @@ CONTAINER_OPERATION_DENY_MATRIX = {
     ContainerEffectiveStatus.HOST_OFFLINE.value: ALL_CONTAINER_WRITE_OPS,
     ContainerEffectiveStatus.HOST_MAINTENANCE.value: ALL_CONTAINER_WRITE_OPS,
     ContainerEffectiveStatus.STATUS_UNKNOWN.value: ALL_CONTAINER_WRITE_OPS,
+    ContainerEffectiveStatus.NODE_VANISHED.value: NODE_VANISHED_DENY_OPS,
 }
 
 def _status_value(status) -> str:
