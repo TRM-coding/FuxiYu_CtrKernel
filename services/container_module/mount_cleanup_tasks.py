@@ -719,18 +719,44 @@ def describe_cleanup(cleanup_id: int, machine_id: int | None = None, mount_path:
 
 
 def wait_for_cleanup(cleanup_id: int, timeout: float = 2.0) -> str | None:
-    """Test helper: wait for terminal state and return it."""
+    """Test helper: wait for terminal state, then let the worker finish.
+
+    The terminal state is set before the final oplog write. Joining the worker
+    thread keeps the SQLite test fixture from dropping tables underneath that
+    last write; it is not a production synchronization mechanism.
+    """
 
     deadline = time.monotonic() + max(float(timeout), 0.0)
     while time.monotonic() < deadline:
         with _LOCK:
             task = _BY_CLEANUP_ID.get(int(cleanup_id))
-            if task is not None and task.terminal:
-                return task.state
+            terminal = task is not None and task.terminal
+        if terminal:
+            _join_worker(task, deadline)
+            return task.state
         time.sleep(0.01)
+
     with _LOCK:
         task = _BY_CLEANUP_ID.get(int(cleanup_id))
-        return task.state if task is not None else None
+    if task is None:
+        return None
+    if task.terminal:
+        _join_worker(task, deadline)
+    elif task.thread is not None and task.thread.is_alive():
+        raise RuntimeError(
+            f"cleanup worker for {cleanup_id} did not reach a terminal state before timeout"
+        )
+    return task.state
+
+
+def _join_worker(task: _Task, deadline: float) -> None:
+    thread = task.thread
+    if thread is None or thread is threading.current_thread() or not thread.is_alive():
+        return
+    remaining = max(deadline - time.monotonic(), 1.0)
+    thread.join(remaining)
+    if thread.is_alive():
+        raise RuntimeError(f"cleanup worker for {task.cleanup_id} did not exit after terminal state")
 
 
 def reset_registry() -> None:

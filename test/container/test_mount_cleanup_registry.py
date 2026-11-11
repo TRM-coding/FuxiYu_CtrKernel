@@ -116,16 +116,24 @@ def test_restore_reservation_blocks_cleanup_and_cleanup_blocks_restore(db_sessio
 
 
 def test_different_machine_or_real_path_keys_are_independent(db_session, monkeypatch):
-    first_machine, first, _ = _prepare_cleanup(db_session, path="/home/u/containers/a")
-    second_machine, second, _ = _prepare_cleanup(db_session, path="/home/u/containers/b")
+    _, first, _ = _prepare_cleanup(db_session, path="/home/u/containers/a")
+    _, second, _ = _prepare_cleanup(db_session, path="/home/u/containers/b")
+    first_path = first.mount_path
+    second_path = second.mount_path
+    entered = {first_path: threading.Event(), second_path: threading.Event()}
+    release = {first_path: threading.Event(), second_path: threading.Event()}
 
     def _send(url, payload, timeout=5.0, **kwargs):
         if url.endswith("/start_clean_mount"):
-            return {"success": 1, "task_id": f"task-{id(payload)}"}
+            path = payload["config"]["mount_path"]
+            entered[path].set()
+            assert release[path].wait(2.0)
+            return {"success": 1, "task_id": f"task-{path}"}
         if url.endswith("/get_clean_mount_status"):
+            task_id = payload["config"]["task_id"]
             return {
                 "success": 1,
-                "task_id": payload["config"]["task_id"],
+                "task_id": task_id,
                 "state": "succeeded",
                 "error_reason": None,
             }
@@ -134,10 +142,29 @@ def test_different_machine_or_real_path_keys_are_independent(db_session, monkeyp
     monkeypatch.setattr(node_comms, "send", _send)
     monkeypatch.setattr(mount_cleanup_tasks, "POLL_INTERVAL_SECONDS", 0)
 
-    assert container_tasks.submit_mount_cleanup(first.id, trigger="auto_mount_cleanup")["accepted"]
-    assert container_tasks.submit_mount_cleanup(second.id, trigger="auto_mount_cleanup")["accepted"]
-    assert mount_cleanup_tasks.wait_for_cleanup(first.id) == "succeeded"
-    assert mount_cleanup_tasks.wait_for_cleanup(second.id) == "succeeded"
+    try:
+        first_result = container_tasks.submit_mount_cleanup(first.id, trigger="auto_mount_cleanup")
+        assert first_result["accepted"] is True
+        assert entered[first_path].wait(2.0)
+        assert mount_cleanup_tasks.describe_cleanup(first.id)["state"] == "cleaning"
+
+        # The second key is registered while the first worker is still blocked
+        # before Node start; this is the simultaneous-occupancy assertion.
+        second_result = container_tasks.submit_mount_cleanup(second.id, trigger="auto_mount_cleanup")
+        assert second_result["accepted"] is True
+        assert entered[second_path].wait(2.0)
+        assert mount_cleanup_tasks.describe_cleanup(first.id)["state"] == "cleaning"
+        assert mount_cleanup_tasks.describe_cleanup(second.id)["state"] == "cleaning"
+
+        # Release and drain one worker at a time only to avoid the suite's
+        # single-connection SQLite StaticPool; both reservations coexisted above.
+        release[first_path].set()
+        assert mount_cleanup_tasks.wait_for_cleanup(first.id) == "succeeded"
+        release[second_path].set()
+        assert mount_cleanup_tasks.wait_for_cleanup(second.id) == "succeeded"
+    finally:
+        release[first_path].set()
+        release[second_path].set()
 
 
 def test_active_capacity_rejects_new_cleanup(db_session, monkeypatch):
