@@ -111,7 +111,23 @@ def _oplog_text(log: OperationLog) -> str:
     return f"{json.dumps(log.detail, ensure_ascii=False)}|{log.error_reason}"
 
 
-def _node_success(_url, _payload, timeout=5.0):
+def _node_success(url, payload, timeout=5.0):
+    # 当前 Node 契约：/check_mount_usage 必须按请求路径回显存在性结果。
+    if url.endswith("/check_mount_usage"):
+        paths = ((payload or {}).get("config") or {}).get("mount_paths") or []
+        return {
+            "success": 1,
+            "mounts": [
+                {
+                    "path": path,
+                    "bytes": 0,
+                    "measured_at": "2026-01-01T00:00:00Z",
+                    "pending": False,
+                    "error": None,
+                }
+                for path in paths
+            ],
+        }
     return {"success": 1}
 
 

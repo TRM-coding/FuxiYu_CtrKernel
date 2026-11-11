@@ -61,6 +61,22 @@ def node_success(monkeypatch):
 
     def _send(url, payload, timeout=5.0):
         calls.append({"url": url, "payload": payload, "timeout": timeout})
+        # 当前 Node 契约：/check_mount_usage 必须按请求路径回显存在性结果。
+        if url.endswith("/check_mount_usage"):
+            paths = ((payload or {}).get("config") or {}).get("mount_paths") or []
+            return {
+                "success": 1,
+                "mounts": [
+                    {
+                        "path": path,
+                        "bytes": 0,
+                        "measured_at": "2026-01-01T00:00:00Z",
+                        "pending": False,
+                        "error": None,
+                    }
+                    for path in paths
+                ],
+            }
         return {"success": 1}
 
     monkeypatch.setattr("FuxiYu_CtrKernel.services.container_module.node_comms.send", _send)

@@ -372,7 +372,12 @@ def test_a18_get_announcement_not_found(client, monkeypatch):
 
 
 def test_a19_resend_sent(client, monkeypatch, db_session):
-    """A-19: SENT 公告重发 → 200。"""
+    """A-19: SENT 公告重发 → 200，审计记 announcement_resend。
+
+    重发在后台线程投递（2026-09）；这里换成就地执行，既让审计在返回前落库，
+    也避免后台线程与测试会话争用 StaticPool 的单条 SQLite 连接。
+    """
+    _patch_thread_inline(monkeypatch)
     mock_operator_token(monkeypatch, __import__("FuxiYu_CtrKernel.api.announcement_api", fromlist=[""]))
     user = _make_operator()
     ann = _make_announcement(
