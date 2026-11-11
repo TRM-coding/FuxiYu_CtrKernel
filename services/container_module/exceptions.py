@@ -49,6 +49,9 @@ SAFE_REASON_CODES = frozenset({
     "root_handover_stale", "root_handover_failed",
     "permission_denied", "invalid_path",
     "node_unsupported", "node_timeout", "node_unavailable", "node_bad_response",
+    "cleanup_in_progress", "restore_in_progress", "cleanup_capacity_exhausted",
+    "cleanup_not_accepted", "cleanup_result_unknown", "cleanup_persist_failed",
+    "cleanup_failed", "cleanup_target_changed", "node_task_lost",
     "internal_error",
 })
 

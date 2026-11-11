@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from ...repositories import container_mount_cleanup_repo
 from ...schedulers import container_mount_cleanup_task
 from ...services.container_module import mount_cleanup as mount_cleanup_mod
-from ...services.container_module import node_comms
+from ...services.container_module import mount_cleanup_tasks, node_comms
 
 
 class TestMountCleanupTask:
@@ -43,10 +43,22 @@ class TestMountCleanupTask:
         db_session.commit()
 
         sent_payloads = []
-        monkeypatch.setattr(
-            node_comms, "send",
-            lambda url, payload, timeout: sent_payloads.append(url) or {"success": 1}
-        )
+        monkeypatch.setattr(mount_cleanup_tasks, "POLL_INTERVAL_SECONDS", 0)
+
+        def _send(url, payload, timeout=5.0):
+            sent_payloads.append(url)
+            if url.endswith("/start_clean_mount"):
+                return {"success": 1, "task_id": "task-old"}
+            if url.endswith("/get_clean_mount_status"):
+                return {
+                    "success": 1,
+                    "task_id": "task-old",
+                    "state": "succeeded",
+                    "error_reason": None,
+                }
+            raise AssertionError(f"unexpected node url: {url}")
+
+        monkeypatch.setattr(node_comms, "send", _send)
         # mock machine_repo to return a valid endpoint
         db_session.commit()
 
@@ -63,9 +75,10 @@ class TestMountCleanupTask:
         monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_after_days", lambda: 14)
 
         container_mount_cleanup_task.run_mount_cleanup_once()
+        assert mount_cleanup_tasks.wait_for_cleanup(row.id) == "succeeded"
 
-        assert len(sent_payloads) == 1
-        assert "/clean_mount" in sent_payloads[0]
+        assert any("/start_clean_mount" in url for url in sent_payloads)
+        assert not any(url.endswith("/clean_mount") for url in sent_payloads)
 
         db_session.expire_all()
         # verify row is marked cleaned
@@ -119,12 +132,22 @@ class TestMountCleanupTask:
         db_session.commit()
 
         call_count = [0]
+        monkeypatch.setattr(mount_cleanup_tasks, "POLL_INTERVAL_SECONDS", 0)
 
-        def _fail_first(url, payload, timeout):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                raise RuntimeError("node unreachable")
-            return {"success": 1}
+        def _fail_first(url, payload, timeout=5.0):
+            if url.endswith("/start_clean_mount"):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    raise RuntimeError("node unreachable")
+                return {"success": 1, "task_id": "task-second"}
+            if url.endswith("/get_clean_mount_status"):
+                return {
+                    "success": 1,
+                    "task_id": "task-second",
+                    "state": "succeeded",
+                    "error_reason": None,
+                }
+            raise AssertionError(f"unexpected node url: {url}")
 
         monkeypatch.setattr(
             node_comms, "send", _fail_first
@@ -142,6 +165,8 @@ class TestMountCleanupTask:
         monkeypatch.setattr(container_mount_cleanup_task.settings_tasks, "get_container_mount_cleanup_after_days", lambda: 14)
 
         container_mount_cleanup_task.run_mount_cleanup_once()
+        assert mount_cleanup_tasks.wait_for_cleanup(r1.id) in ("failed", "unknown")
+        assert mount_cleanup_tasks.wait_for_cleanup(r2.id) == "succeeded"
 
         db_session.expire_all()
         # r1 still not cleaned
@@ -271,7 +296,35 @@ class TestMountCleanupTask:
                 }
             return {"success": 1}
 
-        monkeypatch.setattr(node_comms, "send", _send)
+        def _send_async(url, payload, timeout=5.0):
+            sent_payloads.append(url)
+            if url.endswith("/check_mount_usage"):
+                checked_paths.extend(payload["config"]["mount_paths"])
+                return {
+                    "success": 1,
+                    "mounts": [
+                        {
+                            "path": payload["config"]["mount_paths"][0],
+                            "bytes": 12,
+                            "measured_at": "2026-01-01T00:00:00Z",
+                            "pending": False,
+                            "error": None,
+                        }
+                    ],
+                }
+            if url.endswith("/start_clean_mount"):
+                return {"success": 1, "task_id": "task-manual-maint"}
+            if url.endswith("/get_clean_mount_status"):
+                return {
+                    "success": 1,
+                    "task_id": "task-manual-maint",
+                    "state": "succeeded",
+                    "error_reason": None,
+                }
+            raise AssertionError(f"unexpected node url: {url}")
+
+        monkeypatch.setattr(node_comms, "send", _send_async)
+        monkeypatch.setattr(mount_cleanup_tasks, "POLL_INTERVAL_SECONDS", 0)
         monkeypatch.setattr(
             mount_cleanup_mod.machine_repo, "get_machine_endpoint_by_id",
             lambda mid, **kwargs: ("10.0.0.9", None)
@@ -281,8 +334,9 @@ class TestMountCleanupTask:
             operator_user_id=None, mount_cleanup_id=row.id,
         )
 
-        assert result.get("cleaned") is True
+        assert result["accepted"] is True
+        assert mount_cleanup_tasks.wait_for_cleanup(row.id) == "succeeded"
         assert checked_paths == ["/home/x/containers/manual_ctr/"]
-        assert len(sent_payloads) == 2
         assert sent_payloads[0].endswith("/check_mount_usage")
-        assert sent_payloads[1].endswith("/clean_mount")
+        assert any(url.endswith("/start_clean_mount") for url in sent_payloads)
+        assert not any(url.endswith("/clean_mount") for url in sent_payloads)

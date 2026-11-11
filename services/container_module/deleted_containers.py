@@ -343,6 +343,15 @@ def serialize_deleted_container_record(row, cleanup, *, context: dict | None = N
     context = context or {}
     cleaned_at = getattr(cleanup, "cleaned_at", None) if cleanup else None
     mount_cleaned = bool(getattr(row, "mount_cleaned", False))
+    # Lazy import avoids deleted_containers -> mount_cleanup_tasks -> mount_usage -> deleted_containers cycle.
+    from .mount_cleanup_tasks import describe_cleanup
+
+    cleanup_id = getattr(cleanup, "id", None) or row.mount_cleanup_id
+    cleanup_state = describe_cleanup(
+        cleanup_id,
+        context.get("machine_id") or row.machine_id,
+        context.get("mount_path"),
+    ) if cleanup_id else {"state": None, "error_reason": None}
     return {
         "deleted_id": row.id,
         "original_container_id": row.original_container_id,
@@ -368,7 +377,12 @@ def serialize_deleted_container_record(row, cleanup, *, context: dict | None = N
         "cleaned_at": _serialize_dt(cleaned_at),
         "mount_cleaned": mount_cleaned,
         "cleanup_escalation": bool(getattr(cleanup, "escalation", False)) if cleanup else False,
-        "data_recoverable": bool(context.get("mount_path") and not mount_cleaned),
+        "mount_cleanup_state": cleanup_state.get("state"),
+        "mount_cleanup_error_reason": cleanup_state.get("error_reason"),
+        "data_recoverable": (
+            bool(context.get("mount_path") and not mount_cleaned)
+            and cleanup_state.get("state") != "cleaning"
+        ),
         "snapshot": row.snapshot or {},
     }
 

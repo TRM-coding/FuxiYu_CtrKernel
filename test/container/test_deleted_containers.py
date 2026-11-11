@@ -12,6 +12,7 @@ from ...repositories import container_mount_cleanup_repo, containers_repo, delet
 from ...services import container_tasks
 from ...services.container_module import node_comms
 from ...services.container_module import mount_cleanup as mount_cleanup_mod
+from ...services.container_module import mount_cleanup_tasks
 from ..factories import create_container, create_container_graph, create_machine, create_user
 from .conftest import NODE_REMOVE_SUCCESS, _mount_check_exists_response
 
@@ -95,9 +96,9 @@ def test_each_automatic_and_manual_mount_failure_is_audited(db_session, monkeypa
     # Manual cleanup adds the action-time path probe, whose failed transport is surfaced as
     # node_unavailable before /clean_mount rather than leaking the raw RuntimeError.
     for _ in range(2):
-        with pytest.raises(container_tasks.NodeServiceError) as excinfo:
-            container_tasks.clean_deleted_container_mount(mount_cleanup_id=cleanup.id)
-        assert excinfo.value.reason == "node_unavailable"
+        result = container_tasks.clean_deleted_container_mount(mount_cleanup_id=cleanup.id)
+        assert result["accepted"] is True
+        assert mount_cleanup_tasks.wait_for_cleanup(cleanup.id) in ("failed", "unknown")
     logs = db_session.scalars(select(OperationLog)).all()
     assert len(logs) == 5
     assert len(attempts) == 5
@@ -201,17 +202,30 @@ def test_clean_deleted_container_mount_calls_node_and_marks_cleaned(db_session, 
         sent.append((url, payload, timeout))
         if url.endswith("/check_mount_usage"):
             return _mount_check_exists_response(payload)
-        return {"success": 1}
+        if url.endswith("/start_clean_mount"):
+            return {"success": 1, "task_id": "task-deleted"}
+        if url.endswith("/get_clean_mount_status"):
+            return {
+                "success": 1,
+                "task_id": "task-deleted",
+                "state": "succeeded",
+                "error_reason": None,
+            }
+        raise AssertionError(f"unexpected node url: {url}")
 
     monkeypatch.setattr(node_comms, "send", _send)
+    monkeypatch.setattr(mount_cleanup_tasks, "POLL_INTERVAL_SECONDS", 0)
 
     result = container_tasks.clean_deleted_container_mount(row.id, operator_user_id=1)
+    assert result["accepted"] is True
+    assert mount_cleanup_tasks.wait_for_cleanup(row.id) == "succeeded"
 
     db_session.expire_all()
-    assert result["cleaned"] is True
+    assert result["mount_cleanup_state"] == "cleaning"
     assert [item[0].rsplit("/api/", 1)[-1] for item in sent] == [
         "check_mount_usage",
-        "clean_mount",
+        "start_clean_mount",
+        "get_clean_mount_status",
     ]
     assert sent[0][1]["config"]["mount_paths"] == ["/home/u/containers/deleted_c"]
     assert sent[1][1]["config"]["mount_path"] == "/home/u/containers/deleted_c"
@@ -268,13 +282,36 @@ def test_clean_deleted_container_mount_api(client, monkeypatch):
     monkeypatch.setattr(
         container_api.container_service,
         "clean_deleted_container_mount",
-        lambda **kwargs: {"mount_cleanup_id": kwargs["mount_cleanup_id"], "cleaned": True},
+        lambda **kwargs: {
+            "mount_cleanup_id": kwargs["mount_cleanup_id"],
+            "deleted_id": 3,
+            "accepted": True,
+            "already_cleaned": False,
+            "mount_cleanup_state": "cleaning",
+        },
     )
 
     resp = client.post("/api/containers/clean_deleted_container_mount", json={"mount_cleanup_id": 7})
 
     assert resp.status_code == 200
-    assert resp.json()["mount_cleanup_id"] == 7
+    payload = resp.json()
+    assert payload["mount_cleanup_id"] == 7
+    assert payload["accepted"] is True
+    assert payload["mount_cleanup_state"] == "cleaning"
+    assert payload["message"] == "mount cleanup accepted"
+
+
+def test_clean_deleted_container_mount_api_conflict_is_409(client, monkeypatch):
+    _auth(monkeypatch)
+
+    def _conflict(**kwargs):
+        raise container_tasks.NodeServiceError("busy", reason="cleanup_in_progress")
+
+    monkeypatch.setattr(container_api.container_service, "clean_deleted_container_mount", _conflict)
+
+    resp = client.post("/api/containers/clean_deleted_container_mount", json={"mount_cleanup_id": 7})
+    assert resp.status_code == 409
+    assert resp.json()["error_reason"] == "cleanup_in_progress"
 
 
 def test_resurrect_container_reuses_snapshot_mount_and_restores_bindings(db_session, monkeypatch):

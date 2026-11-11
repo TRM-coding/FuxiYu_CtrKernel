@@ -459,11 +459,10 @@ def _handle_freeze_escalation(
 
 
 def _clean_mount_immediately(container) -> None:
-    """冻结升级删除后立刻清理宿主机 mount 目录（尽力而为）。
+    """冻结升级删除后提交宿主机 mount 异步清理（尽力而为）。
 
-    ensure MountCleanup 记录（escalation=True，不预置 cleaned_at——清理成功由统一
-    逻辑 mark_cleaned），随后动作委托 container_module.mount_cleanup.clean_mount_path
-    （幂等 / Node 请求 / 记录清理 / op-log 一份内聚）。
+    ensure MountCleanup 记录（escalation=True，不预置 cleaned_at——清理成功由后台
+    任务在 Node 明确 succeeded 后 mark_cleaned）；提交成功只代表已受理，不代表已清理。
     """
     bind_mount = getattr(container, 'bind_mount_path', None)
     if not bind_mount:
@@ -472,7 +471,6 @@ def _clean_mount_immediately(container) -> None:
         return
 
     from ..repositories import container_mount_cleanup_repo
-    from ..services.container_module.mount_cleanup import clean_mount_path
 
     mount_cleanup_id = None
     try:
@@ -500,12 +498,18 @@ def _clean_mount_immediately(container) -> None:
         return
 
     try:
-        clean_mount_path(mount_cleanup_id, trigger="disk_escalation", escalation=True)
-        logger.debug("[disk-check] escalation mount cleanup done for container %s path=%s",
-                     container.id, bind_mount)
+        result = container_tasks.submit_mount_cleanup(
+            mount_cleanup_id,
+            trigger="disk_escalation",
+            operator_user_id=None,
+            escalation=True,
+            verify_mount_path=False,
+        )
+        logger.info("[disk-check] escalation mount cleanup accepted for container %s path=%s accepted=%s",
+                    container.id, bind_mount, bool(result.get("accepted")))
     except Exception as e:
-        # 尽力而为：失败留 escalation 记录（不再自动重试），供管理面可见
-        logger.error("[disk-check] escalation mount cleanup failed for container %s path=%s: %s",
+        # 尽力而为：失败/冲突留 escalation 记录（不再自动重试），供管理面可见
+        logger.error("[disk-check] escalation mount cleanup submit failed for container %s path=%s: %s",
                      container.id, bind_mount, e)
 
 

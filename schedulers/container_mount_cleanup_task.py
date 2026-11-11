@@ -12,13 +12,12 @@ from datetime import datetime, timedelta
 
 from ..extensions import session_scope
 from ..repositories import container_mount_cleanup_repo, deleted_container_restore_snapshot_repo
-from ..services import settings_tasks
+from ..services import container_tasks, settings_tasks
 from ..services.machine_tasks import machine_in_scope
 from ..services.container_module.deleted_containers import (
     ensure_deleted_record_for_cleanup,
     ensure_mount_cleanup_record,
 )
-from ..services.container_module.mount_cleanup import clean_mount_path
 
 logger = logging.getLogger(__name__)
 _SCHEDULER_STATE: dict[str, object] = {}
@@ -63,16 +62,30 @@ def run_mount_cleanup_once() -> None:
             # 范畴外是职责划分而非门禁——静默跳过，不留审计也不留常规日志。
             if not machine_in_scope(machine_id):
                 continue
-            # 动作逻辑统一在 container_module.mount_cleanup（幂等 / 请求 / mark_cleaned / op-log）
-            result = clean_mount_path(cleanup_id, trigger="auto_mount_cleanup")
-            if result.get("cleaned"):
+            # 三入口统一异步提交；提交成功不代表已清理，终态由后台任务落库/写日志。
+            result = container_tasks.submit_mount_cleanup(
+                cleanup_id,
+                trigger="auto_mount_cleanup",
+                operator_user_id=None,
+                verify_mount_path=False,
+            )
+            if result.get("accepted"):
                 logger.info(
-                    "[mount-cleanup] cleaned deleted row %s: container=%s path=%s",
+                    "[mount-cleanup] accepted deleted row %s: container=%s path=%s",
                     row.id,
                     container_name,
                     mount_path,
                 )
+            elif result.get("already_cleaned"):
+                logger.info("[mount-cleanup] already cleaned deleted row %s", row.id)
         except Exception as e:
+            reason = getattr(e, "reason", None)
+            if reason in ("cleanup_in_progress", "restore_in_progress"):
+                logger.info("[mount-cleanup] skip busy deleted row %s (%s)", row.id, reason)
+                continue
+            if reason == "cleanup_capacity_exhausted":
+                logger.warning("[mount-cleanup] capacity exhausted; defer remaining rows")
+                break
             logger.error("[mount-cleanup] failed deleted row %s: %s", row.id, e)
 
 

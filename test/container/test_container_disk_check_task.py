@@ -15,14 +15,14 @@ from ...constant import ContainerStatus, MachineStatus
 from ...models.containers import Container
 from ...models.operation_log import OperationLog
 from ...models.container_disk_freeze_state import ContainerDiskFreezeState
+from ...models.container_mount_cleanup import ContainerMountCleanup
 from ...repositories import (
     container_disk_freeze_state_repo,
     container_ssh_login_repo,
     long_term_container_repo,
 )
 from ...schedulers import container_disk_check_task
-from ...services.container_module import mount_cleanup as mount_cleanup_mod
-from ...services.container_module import node_comms
+from ...services.container_module import mount_cleanup_tasks, node_comms
 from ..factories import create_container_graph
 
 
@@ -1469,11 +1469,20 @@ class TestEscalationMountCleanup:
             "get_container_root_owner_emails",
             lambda cid: []
         )
-        # mock send to avoid real HTTP
-        monkeypatch.setattr(
-            node_comms, "send",
-            lambda url, payload, timeout: {"success": 1}
-        )
+        def _send(url, payload, timeout=5.0):
+            if url.endswith("/start_clean_mount"):
+                return {"success": 1, "task_id": "task-escalation-insert"}
+            if url.endswith("/get_clean_mount_status"):
+                return {
+                    "success": 1,
+                    "task_id": "task-escalation-insert",
+                    "state": "succeeded",
+                    "error_reason": None,
+                }
+            raise AssertionError(f"unexpected node url: {url}")
+
+        monkeypatch.setattr(node_comms, "send", _send)
+        monkeypatch.setattr(mount_cleanup_tasks, "POLL_INTERVAL_SECONDS", 0)
         monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_check_enabled", lambda: True)
 
         usage = _usage_exceeding_hard_limit()
@@ -1490,7 +1499,9 @@ class TestEscalationMountCleanup:
         ).first()
         assert row is not None
         assert row.mount_path == "/home/test/containers/test_esc/"
-        assert row.cleaned_at is not None
+        assert mount_cleanup_tasks.wait_for_cleanup(row.id) == "succeeded"
+        db_session.expire_all()
+        assert db_session.get(ContainerMountCleanup, row.id).cleaned_at is not None
 
     def test_clean_mount_immediately_sends_to_node(self, app, db_session, monkeypatch):
         """升级删除 → NodeKernel /api/clean_mount 被调用。"""
@@ -1509,19 +1520,39 @@ class TestEscalationMountCleanup:
         )
 
         sent_calls = []
-        monkeypatch.setattr(
-            node_comms, "send",
-            lambda url, payload, timeout: sent_calls.append(url) or {"success": 1}
-        )
+        monkeypatch.setattr(mount_cleanup_tasks, "POLL_INTERVAL_SECONDS", 0)
+
+        def _send(url, payload, timeout=5.0):
+            sent_calls.append(url)
+            if url.endswith("/start_clean_mount"):
+                return {"success": 1, "task_id": "task-escalation"}
+            if url.endswith("/get_clean_mount_status"):
+                return {
+                    "success": 1,
+                    "task_id": "task-escalation",
+                    "state": "succeeded",
+                    "error_reason": None,
+                }
+            raise AssertionError(f"unexpected node url: {url}")
+
+        monkeypatch.setattr(node_comms, "send", _send)
         monkeypatch.setattr(container_disk_check_task.settings_tasks, "get_container_disk_check_enabled", lambda: True)
 
         usage = _usage_exceeding_hard_limit()
         container_disk_check_task._handle_freeze_escalation(
             container, usage, app, days_frozen=8
         )
-
-        assert len(sent_calls) == 1
-        assert "/clean_mount" in sent_calls[0]
+        db_session.expire_all()
+        row = db_session.scalars(
+            select(ContainerMountCleanup).where(
+                ContainerMountCleanup.container_id == container.id,
+                ContainerMountCleanup.escalation.is_(True),
+            )
+        ).first()
+        assert row is not None
+        assert mount_cleanup_tasks.wait_for_cleanup(row.id) == "succeeded"
+        assert any(url.endswith("/start_clean_mount") for url in sent_calls)
+        assert not any(url.endswith("/clean_mount") for url in sent_calls)
 
     def test_clean_mount_immediately_skips_without_path(self, app, db_session, monkeypatch):
         """容器无 bind_mount_path → 升级删除不崩溃，跳过清理。"""

@@ -90,7 +90,8 @@ from .container_module.restore import (      # 恢复族（复活软删容器）
     _audit_restore_failure,
     _audit_mount_preflight_failure,
 )
-from .container_module.mount_cleanup import clean_mount_path  # 挂载清理动作（手动/定时/升级共用）
+from .container_module.mount_cleanup import clean_mount_path  # 旧同步适配；当前入口不再调用
+from .container_module.mount_cleanup_tasks import reserve_restore, start_cleanup
 from .container_module.long_term import (    # 长期容器族
     _read_long_term_target,
     ensure_long_term_switch_allowed,
@@ -266,44 +267,50 @@ def resurrect_container(
     """
     try:
         target = _load_restore_target(deleted_id)
-        # 路径保护必须在任何恢复副作用之前：快照/清理记录读取之后、账号与镜像解析、
-        # 长期配额预检与 Create_container 之前。目录已不存在时直接拒绝。
-        _ensure_restore_mount_source(target)
-        root_account, accounts = _load_restore_accounts(target.snapshot)
-        resolved = _resolve_restore_image(target, content_source)
+    except Exception as exc:
+        _audit_restore_failure(deleted_id, operator_user_id, exc)
+        raise
 
-        # 不带内容来源 + 确实有二选一 → 交回两份内容让调用方选，**不恢复**。
-        if content_source is None and resolved.needs_choice:
-            return {"requires_choice": True, **build_restore_choice(target)}
+    try:
+        with reserve_restore(target.machine_id, target.mount_path, deleted_id):
+            # Ctrl 词法键覆盖整个恢复窗口；Node realpath 预留由 Create_container 的
+            # restore_mount_path 触发，覆盖到后台创建/账号恢复结束。两者不是别名全程等价。
+            _ensure_restore_mount_source(target)
+            root_account, accounts = _load_restore_accounts(target.snapshot)
+            resolved = _resolve_restore_image(target, content_source)
 
-        # 长期配额预检：必须在 Create_container 之前——超限时 Node 未调用、容器未复活、
-        # 快照未消费，可干净拒绝；放到恢复完成后查只会造成半恢复或静默丢标记。
-        _ensure_restore_long_term_capacity(target.snapshot, root_account)
+            # 不带内容来源 + 确实有二选一 → 交回两份内容让调用方选，**不恢复**。
+            if content_source is None and resolved.needs_choice:
+                return {"requires_choice": True, **build_restore_choice(target)}
 
-        root_password = generate_container_password()
-        container, renamed = _build_restore_container(target, resolved.image_tag)
-        Create_container(
-            owner_user_id=int(root_account["user_id"]), machine_id=target.machine_id,
-            container=container, public_key=root_account.get("public_key"),
-            operator_user_id=operator_user_id, restore_mount_path=target.mount_path,
-            restore_accounts=accounts, reuse_container_id=target.container_id,
-            image_build=resolved.image_build, image_id=resolved.image_id,
-            image_version_at=resolved.version_at,
-            dockerfile_parts=resolved.dockerfile_parts,
-            root_password=root_password,
-        )
-        container_id = _get_restored_container_id(container.NAME, target.machine_id)
-        _restore_long_term_state(container_id, target.snapshot, operator_user_id)
-        _delete_restore_artifacts(int(deleted_id), target.mount_cleanup_id)
-        _audit_restore_success(
-            int(deleted_id), target, container_id, container, renamed, len(accounts) + 1, operator_user_id,
-            restore_image={
-                "restore_image_mode": resolved.mode,
-                "image_id": resolved.image_id,
-                "image_tag": resolved.image_tag,
-            },
-        )
-        return {"container_id": container_id, "root_password": root_password}
+            # 长期配额预检：必须在 Create_container 之前——超限时 Node 未调用、容器未复活、
+            # 快照未消费，可干净拒绝；放到恢复完成后查只会造成半恢复或静默丢标记。
+            _ensure_restore_long_term_capacity(target.snapshot, root_account)
+
+            root_password = generate_container_password()
+            container, renamed = _build_restore_container(target, resolved.image_tag)
+            Create_container(
+                owner_user_id=int(root_account["user_id"]), machine_id=target.machine_id,
+                container=container, public_key=root_account.get("public_key"),
+                operator_user_id=operator_user_id, restore_mount_path=target.mount_path,
+                restore_accounts=accounts, reuse_container_id=target.container_id,
+                image_build=resolved.image_build, image_id=resolved.image_id,
+                image_version_at=resolved.version_at,
+                dockerfile_parts=resolved.dockerfile_parts,
+                root_password=root_password,
+            )
+            container_id = _get_restored_container_id(container.NAME, target.machine_id)
+            _restore_long_term_state(container_id, target.snapshot, operator_user_id)
+            _delete_restore_artifacts(int(deleted_id), target.mount_cleanup_id)
+            _audit_restore_success(
+                int(deleted_id), target, container_id, container, renamed, len(accounts) + 1, operator_user_id,
+                restore_image={
+                    "restore_image_mode": resolved.mode,
+                    "image_id": resolved.image_id,
+                    "image_tag": resolved.image_tag,
+                },
+            )
+            return {"container_id": container_id, "root_password": root_password}
     except Exception as exc:
         _audit_restore_failure(deleted_id, operator_user_id, exc)
         raise
@@ -396,6 +403,31 @@ def _find_live_container_for_manual_cleanup(
     return None
 
 
+def submit_mount_cleanup(
+    mount_cleanup_id: int,
+    *,
+    trigger: str,
+    operator_user_id: int | None = None,
+    escalation: bool | None = None,
+    verify_mount_path: bool = False,
+) -> dict:
+    """统一异步提交入口：手动/定时/升级共用，只返回受理结果，不等待 Node。"""
+
+    try:
+        return start_cleanup(
+            int(mount_cleanup_id),
+            trigger=trigger,
+            operator_user_id=operator_user_id,
+            escalation=escalation,
+            verify_mount_path=verify_mount_path,
+        )
+    except Exception as exc:
+        if operator_user_id is not None:
+            # 手动预检/登记失败沿用既有手工失败审计；调度器系统动作不重复记。
+            _audit_mount_preflight_failure(None, int(mount_cleanup_id), operator_user_id, exc)
+        raise
+
+
 def clean_deleted_container_mount(
     deleted_id: int | None = None,
     operator_user_id: int | None = None,
@@ -418,14 +450,17 @@ def clean_deleted_container_mount(
     if cleanup is None:
         return {
             "deleted_id": int(deleted_id), "mount_cleanup_id": None,
-            "cleaned": False, "already_cleaned": True,
+            "accepted": False, "already_cleaned": True,
+            "mount_cleanup_state": None,
         }
-    return clean_mount_path(
+    result = start_cleanup(
         cleanup.id,
-        operator_user_id=operator_user_id,
         trigger="manual_clean_mount",
+        operator_user_id=operator_user_id,
         verify_mount_path=True,
     )
+    result["deleted_id"] = int(deleted_id)
+    return result
 
 
 ####################################################

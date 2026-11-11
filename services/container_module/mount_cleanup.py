@@ -1,11 +1,8 @@
-"""已删容器 mount 目录的清理执行逻辑（统一入口）。
+"""旧同步挂载清理适配（legacy）。
 
-三条路径共用同一份动作逻辑——手动（管理页触发）、调度扫描（mount_cleanup_task）、
-磁盘升级即时清理（disk_check_task escalation）：
-- 幂等：已清理（cleaned_at 非空）直接返回 already_cleaned，不重复请求
-- Node 请求经 node_comms 门户（get_full_url/send），错误经 _raise_on_node_error 逐级上报
-- 成功 mark_cleaned + 写 op-log（trigger 由调用方表达：manual_clean_mount /
-  auto_mount_cleanup / disk_escalation），operator_user_id 为 None 即系统动作
+当前 Ctrl 的手动、定时与磁盘升级入口统一走 ``mount_cleanup_tasks`` 的异步任务；
+本模块只保留旧同步 ``/clean_mount`` 调用语义，供旧调用方/兼容测试使用，MUST NOT
+被当前生产入口调用。
 """
 
 from ...constant import OperationType

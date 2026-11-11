@@ -21,22 +21,22 @@ Spec: [spec.md](spec.md)
 
 - Test/check:
   - [X] test/container/test_deleted_containers.py::test_resurrect_container_reuses_snapshot_mount_and_restores_bindings
-  - [X] test/container/test_restore_long_term_capacity.py::test_restore_retry_succeeds_after_capacity_is_freed
-  - [X] test/container/test_deleted_containers.py::test_resurrect_container_rejects_cleaned_mount
-- Assertion scope: 恢复成功：容器行重建，账号绑定/GPU/挂载路径沿用快照；snapshot 与 cleanup 行均删除；`mount_cleaned=true` 的快照拒绝恢复且不产生半恢复。
+  - [ ] test/container/test_mount_cleanup_registry.py::test_restore_success_releases_restore_key
+- Assertion scope: 成功恢复重建容器、恢复绑定，删除恢复快照与对应清理记录；新增用例断言恢复占位在成功返回后释放，随后同键清理可以重新登记。
 
 #### Scenario: not_found 不消费快照
 
 - Test/check:
   - [X] test/container/test_mount_path_action_guard.py::test_restore_missing_path_rejected_before_any_create
-- Assertion scope: per-path `not_found` -> `data_not_recoverable`；snapshot 与 cleanup 行保留，`cleaned_at` 为空；不调用 `/create_container`。
+- Assertion scope: 无活动清理时，Node 路径检查 `not_found` 使恢复以 `data_not_recoverable` 拒绝；快照与清理记录保留，`cleaned_at` 为空，未创建容器、未写成功审计。
 
 #### Scenario: 权限与非法路径不消费快照
 
 - Test/check:
   - [X] test/container/test_mount_path_action_guard.py::test_restore_permission_denied_is_not_reported_as_missing
-- Assertion scope: `permission_denied` -> 恢复 `permission_denied`，不调用 `/create_container`；snapshot/cleanup 记录保留。
-- Coverage note: `invalid_path` 的恢复分支未单独构造测试；现有直接覆盖仅权限分支。
+  - [ ] test/container/test_mount_path_action_guard.py::test_restore_invalid_path_does_not_consume_snapshot
+- Assertion scope: `permission_denied` 行只证明原因、未误称缺失、未创建；`invalid_path` 计划行覆盖原因、快照/清理记录保留与未创建。`permission_denied` 的保留快照/清理记录事实未被现有用例断言。
+- Coverage note: 不新增机械 permission 用例；保留 `[X]` 仅证明原因与未创建，保留事实由待建 `invalid_path` 用例覆盖其分支，permission 分支的保留断言仍是缺口。
 
 #### Scenario: 无法得出结论必须阻断并保留快照
 
@@ -44,7 +44,133 @@ Spec: [spec.md](spec.md)
   - [X] test/container/test_mount_path_action_guard.py::test_restore_unknown_path_state_blocks_with_retryable_reason
   - [X] test/container/test_mount_path_action_guard.py::test_restore_timeout_blocks_with_timeout_reason
   - [X] test/container/test_mount_path_action_guard.py::test_restore_offline_machine_blocks_without_node_call
-- Assertion scope: 旧 Node 404/405、坏形状、5xx、超时、离线分别映射 `node_unsupported`/`node_bad_response`/`node_unavailable`/`node_timeout`；均不调用 `/create_container`，不误报 `not_found`。未知状态用例断言 snapshot/cleanup 保留；超时/离线用例未重复断言 snapshot 行。
+  - [X] test/container/test_mount_path_action_guard.py::test_restore_api_unknown_is_5xx_not_not_found
+- Assertion scope: 四行证明旧 Node/404/405、坏响应、超时、离线/API 的原因映射与未继续创建；只有 `test_restore_unknown_path_state_blocks_with_retryable_reason` 另断言快照/清理记录保留，其余三行未断言保留事实。
+- Coverage note: timeout/offline/API 的“快照与清理记录保留、cleaned_at 为空”未被现有用例断言；不新增机械用例，保留 `[X]` 仅证明原因与未创建，不宣称四行都覆盖保留事实。
+
+#### Scenario: 清理中拒绝恢复
+
+- Test/check:
+  - [ ] test/container/test_mount_cleanup_registry.py::test_restore_rejected_while_cleanup_active
+- Assertion scope: 同键清理活动时恢复返回 409 `cleanup_in_progress`；Node 路径探测与创建未调用；快照/清理记录保留、`mount_cleaned` 不变、无成功审计、无凭据。
+
+#### Scenario: 恢复占位覆盖关键阶段
+
+- Test/check:
+  - [ ] test/container/test_mount_cleanup_registry.py::test_restore_guard_blocks_cleanup_through_create_and_consume
+- Assertion scope: 用事件阻塞 `Create_container` 或快照消费阶段，期间同键清理始终 409 `restore_in_progress`；恢复成功/失败返回后占位才释放，未在路径复核后提前放开。
+
+#### Scenario: 恢复二选一或失败时释放占位
+
+- Test/check:
+  - [ ] test/container/test_mount_cleanup_registry.py::test_restore_requires_choice_and_failure_release_key
+- Assertion scope: 返回 `requires_choice=true` 且未创建容器时恢复占位释放；恢复因异常失败时占位也释放；快照与清理记录按既有失败语义保留，后续可重新恢复或清理。
+
+#### Scenario: 清理失败后恢复重新开放
+
+- Test/check:
+  - [ ] test/container/test_mount_cleanup_registry.py::test_restore_opens_after_cleanup_failed
+- Assertion scope: 清理终态 `failed` 后恢复不再返回冲突；Node 路径检查 `present` 时继续恢复，`not_found` 时仍以 `data_not_recoverable` 拒绝；不把失败清理写成成功。
+
+#### Scenario: 清理结果未知后恢复重新开放
+
+- Test/check:
+  - [ ] test/container/test_mount_cleanup_registry.py::test_restore_opens_after_cleanup_unknown
+- Assertion scope: 清理未知后恢复不再返回冲突；Ctrl 不把未知当已清理，实际恢复由 Node 路径检查决定；路径存在时允许继续，目录不存在时拒绝。
+
+#### Scenario: Ctrl 重启后恢复重新开放
+
+- Test/check:
+  - [ ] test/container/test_mount_cleanup_registry.py::test_restore_opens_after_registry_reset
+- Assertion scope: 清空进程内登记（模拟 Ctrl 重启）后，同一删除记录的恢复请求不再被 `cleanup_in_progress` 阻止；不补查旧任务，快照与清理记录按数据库现状读取。
+
+#### Scenario: 重复恢复冲突
+
+- Test/check:
+  - [ ] test/container/test_mount_cleanup_registry.py::test_duplicate_restore_conflicts
+- Assertion scope: 第一次恢复持有占位时，第二次恢复返回 409 `restore_in_progress`；第二次不调用 Node 创建、不消费快照，第一次占位不被释放。
+
+#### Scenario: 清理成功消费后不可恢复
+
+- Test/check:
+  - [X] test/container/test_deleted_containers.py::test_resurrect_container_rejects_cleaned_mount
+- Assertion scope: 只证明 `mount_cleaned=true` 后恢复返回 `data_not_recoverable`；未断言进程内成功摘要过期或 Ctrl 重启后的行为。
+- Coverage note: 摘要过期/重启后的不可恢复行为未由现有用例覆盖；不新增机械用例，`[X]` 仅证明 mount_cleaned 拒绝，不宣称已覆盖过期/重启。
+
+### Requirement: Node realpath 恢复预留与共享登记
+
+#### Scenario: 创建受理前 realpath 预留
+
+- Test/check:
+  - [ ] test/container/test_mount_cleanup_registry.py::test_node_realpath_restore_reservation_blocks_create_acceptance
+  - [ ] test/container/test_cross_repo_protocol_replay.py::test_create_container_realpath_restore_reservation_contract
+- Assertion scope: Ctrl 发起恢复时 Node 在 `/create_container` 受理前对 `restore_mount_path` 取 realpath；同 realpath 已有清理/恢复时，Node 在受理前返回 `cleanup_in_progress`/`restore_in_progress`，不启动创建；Ctrl 保留快照与清理记录、不写成功审计、不返回凭据。
+
+#### Scenario: 词法别名由 Node realpath 拒绝
+
+- Test/check:
+  - [ ] test/container/test_mount_cleanup_registry.py::test_realpath_alias_blocks_second_cleanup_or_restore
+  - [ ] test/container/test_cross_repo_protocol_replay.py::test_sync_async_cleanup_and_restore_share_realpath_registration
+- Assertion scope: 在 Node 恢复预留/清理任务仍持有期间，Ctrl 词法键不同但 Node realpath 相同的第二个清理/恢复被共享登记拒绝；Ctrl 不因词法前置未拦截而继续创建或删除，冲突按失败/未知处理且不写成功。预留释放后的尾段不在本行保证范围。
+
+#### Scenario: 预留释放与创建/账号恢复失败
+
+- Test/check:
+  - [ ] test/container/test_mount_cleanup_registry.py::test_node_restore_reservation_releases_after_create_failure
+  - [ ] test/container/test_cross_repo_protocol_replay.py::test_restore_reservation_releases_on_create_failure
+- Assertion scope: Node 恢复预留覆盖后台创建/账号恢复成功、失败并在 `finally` 释放；失败后同一 realpath 清理可重新登记，不追加 Docker Source 活挂载检查；Node 重启丢失预留按已接受边界处理，Ctrl 不补写成功。
+- Coverage note: 预留释放后到 Ctrl 快照消费完成之间的词法别名尾段不保证互斥；本计划不新增该场景的机械测试，也不宣称 Docker 活挂载门禁。Node 侧预留/共享登记是跨仓契约，本仓库用 fake Node 与协议回放验证 Ctrl 对冲突/释放的消费。
+
+### Requirement: 已删除容器列表清理状态投影
+
+#### Scenario: 清理中列表展示
+
+- Test/check:
+  - [ ] test/container/test_mount_cleanup_list_state.py::test_list_shows_cleaning_and_disables_recoverable
+- Assertion scope: 活动清理时列表记录 `mount_cleanup_state="cleaning"`、`mount_cleanup_error_reason=null`、`data_recoverable=false`，并保持 `cleaned_at=null`、`mount_cleaned=false`；不写数据库、不调用 Node。
+
+#### Scenario: 失败终态列表展示
+
+- Test/check:
+  - [ ] test/container/test_mount_cleanup_list_state.py::test_list_shows_failed_with_reason_and_recoverable
+- Assertion scope: 失败摘要在保留期内时返回 `mount_cleanup_state="failed"` 与稳定 `mount_cleanup_error_reason`；存在路径且未清理时 `data_recoverable=true`。
+
+#### Scenario: 未知终态列表展示
+
+- Test/check:
+  - [ ] test/container/test_mount_cleanup_list_state.py::test_list_shows_unknown_without_faking_success
+- Assertion scope: 未知摘要返回 `mount_cleanup_state="unknown"` 与稳定原因；`mount_cleaned=false`、`data_recoverable=true`；不把未知显示为已清理。
+
+#### Scenario: 无进程内登记
+
+- Test/check:
+  - [X] test/container/test_deleted_containers.py::test_list_deleted_containers_returns_cleanup_state
+  - [ ] test/container/test_mount_cleanup_list_state.py::test_list_without_registry_uses_existing_recoverable_rule
+- Assertion scope: 既有用例确认无登记时列表仍返回记录且 `data_recoverable=true`；新增用例补齐 `mount_cleanup_state=null`、`mount_cleanup_error_reason=null` 与不调用 Node 的断言。
+
+#### Scenario: 清理成功后的列表
+
+- Test/check:
+  - [ ] test/container/test_mount_cleanup_list_state.py::test_list_after_success_keeps_cleaned_facts
+- Assertion scope: 成功清理后列表返回 `mount_cleaned=true`、`cleaned_at` 非空、`data_recoverable=false`；进程内成功摘要过期也不回退为可恢复。
+
+#### Scenario: Ctrl 重启后的列表
+
+- Test/check:
+  - [ ] test/container/test_mount_cleanup_list_state.py::test_list_after_registry_reset_uses_database_only
+- Assertion scope: 清空登记后列表 `mount_cleanup_state=null`，按数据库显示未清理与可恢复；不补写 `cleaning`/`failed`/`unknown`，不调用 Node。
+
+#### Scenario: 目录不存在仍正常展示
+
+- Test/check:
+  - [ ] test/container/test_mount_cleanup_list_state.py::test_missing_directory_does_not_hide_or_fake_cleaned
+- Assertion scope: 目录不存在时列表仍返回记录与历史路径，`mount_cleanup_state` 按登记为 null/failed/unknown，`mount_cleaned` 保持数据库值；不报 500、不隐藏记录、不伪造 `mount_cleaned=true`。
+
+#### Scenario: 列表读取只读且不联系 Node
+
+- Test/check:
+  - [ ] test/container/test_mount_cleanup_list_state.py::test_list_cleanup_state_is_read_only_and_node_free
+- Assertion scope: 列表读取前后数据库行、快照、清理记录不变；SQL 捕获无 INSERT/UPDATE/DELETE；fake Node sender 调用次数为 0；不探测文件系统。
 
 ### Requirement: 长期配额失败保留可重试恢复状态
 

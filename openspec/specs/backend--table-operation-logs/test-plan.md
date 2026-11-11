@@ -32,6 +32,62 @@ Spec: [spec.md](spec.md)
 - Assertion scope: 每次失败各写一条 success=False 且 error_reason 稳定的记录；detail 保留触发方式/目标上下文；重复失败不被合并或抑制；目标已删除时日志仍可查询并保留历史展示名；已列 `[X]` locator 覆盖 operator/operation、success、start/end 时间过滤；`[ ]` 行用 repo `list_logs(target_type=..., target_id=...)` 写入不同 target_type/target_id 的日志，断言按目标过滤只返回匹配行。
 - Coverage note: 时间与操作者/操作/success 过滤由 `[X]` locator 覆盖；target_type/target_id 过滤由 `[ ]` 行补齐。
 
+### Requirement: 挂载清理的异步结果日志
+
+#### Scenario: 受理时不写结果日志
+
+- Test/check:
+  - [ ] test/operation_log/test_mount_cleanup_async_logs.py::test_accepted_cleanup_writes_no_result_log
+- Assertion scope: 手动 API 返回 `accepted=true` 或定时/升级提交成功后、Node 终态前，`operation_logs` 不新增该清理的成功或失败结果日志；已有日志不变。
+
+#### Scenario: 明确成功后写一条成功日志
+
+- Test/check:
+  - [ ] test/operation_log/test_mount_cleanup_async_logs.py::test_success_writes_one_cleanup_success_log
+- Assertion scope: Node `succeeded` 且事务提交后，`operation_logs` 恰新增一条成功日志；`operation=DELETE_CONTAINER`、`target_type="container_mount_cleanup"`、`target_id` 为清理记录 id，detail 含 `task_id`/`trigger`/`deleted_id`/`machine_id`/`mount_path`，手动/自动/升级 trigger 分别为 `manual_clean_mount`/`auto_mount_cleanup`/`disk_escalation`，升级同时 `escalation=true`，不含 Node 原始错误体。
+
+#### Scenario: 明确失败只写失败日志
+
+- Test/check:
+  - [ ] test/operation_log/test_mount_cleanup_async_logs.py::test_failed_cleanup_writes_only_failure_log
+- Assertion scope: 任一切入的 Node `failed` 或启动被明确拒绝时，恰新增一条 `success=false` 日志，`error_reason` 稳定；手动/自动/升级 trigger 与升级 escalation 保留；不新增成功日志；数据库记录保持未清理。
+
+#### Scenario: 结果未知写失败或未知日志
+
+- Test/check:
+  - [ ] test/operation_log/test_mount_cleanup_async_logs.py::test_unknown_cleanup_writes_failure_log_not_success
+- Assertion scope: 状态查询达到连续通信失败上限、坏响应、任务丢失或 Node 重启时新增 `success=false` 结果日志，原因为稳定未知/失败原因；瞬时单次 timeout/5xx 在达到上限前不写结果日志；手动/自动/升级 trigger 与升级 escalation 保留；不写成功日志、不标记已清理。
+
+#### Scenario: 成功落库失败不写成功日志
+
+- Test/check:
+  - [ ] test/operation_log/test_mount_cleanup_async_logs.py::test_persist_failure_writes_failure_not_success
+- Assertion scope: Node `succeeded` 后事务失败时只写失败日志，`error_reason=cleanup_persist_failed`；不写成功日志，`cleaned_at`/`mount_cleaned` 均为空/false。
+
+#### Scenario: Ctrl 重启不回填日志
+
+- Test/check:
+  - [ ] test/operation_log/test_mount_cleanup_async_logs.py::test_registry_reset_does_not_backfill_cleanup_logs
+- Assertion scope: 清空进程内任务（模拟重启）后，不新增成功日志、失败日志或成功结果；数据库记录保持未清理；不依据 Node 历史补写。
+
+#### Scenario: 重复轮询不重复记账
+
+- Test/check:
+  - [ ] test/operation_log/test_mount_cleanup_async_logs.py::test_repeated_terminal_poll_writes_one_log
+- Assertion scope: 同一终态重复轮询或并发回调时，该任务结果日志最多一条；不重复写成功或失败记录。
+
+#### Scenario: 日志写入失败不影响真实清理结果
+
+- Test/check:
+  - [ ] test/operation_log/test_mount_cleanup_async_logs.py::test_log_write_failure_does_not_undo_committed_cleanup
+- Assertion scope: Node 成功且事务已提交后让日志写入抛错；后台不抛回、不伪造成功日志、不回滚已提交的 `cleaned_at`/`mount_cleaned`。
+
+#### Scenario: 已清理幂等不重复记账
+
+- Test/check:
+  - [ ] test/operation_log/test_mount_cleanup_async_logs.py::test_already_cleaned_request_writes_no_new_log
+- Assertion scope: 对已清理记录再次请求时返回幂等结果，不新增成功/失败日志、不创建 Node 任务、不改变既有时间戳。
+
 ### Requirement: 操作日志目标回填批量读取并保持返回契约
 
 #### Scenario: 混合目标类型

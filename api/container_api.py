@@ -104,6 +104,10 @@ REASON_STATUS_MAP = {
     "node_timeout": 504,
     "node_unavailable": 503,
     "node_bad_response": 502,
+    "cleanup_in_progress": 409,
+    "restore_in_progress": 409,
+    "cleanup_capacity_exhausted": 503,
+    "cleanup_not_accepted": 500,
     "target_not_bound": 409,
     "invalid_target_account": 409,
     "reset_not_accepted": 500,
@@ -400,9 +404,16 @@ def clean_deleted_container_mount_api(
     except Exception as e:
         reason = getattr(e, "reason", None) or getattr(e, "error_reason", None)
         return _error(REASON_STATUS_MAP.get(reason, 500), f"Internal error: {e}", reason or "internal_error")
+    accepted = bool(result.get("accepted"))
+    already_cleaned = bool(result.get("already_cleaned"))
     return {
         "success": 1,
-        "message": "mount cleaned",
+        "message": "mount cleanup accepted" if accepted else (
+            "mount already cleaned" if already_cleaned else "mount cleanup not accepted"
+        ),
+        "accepted": accepted,
+        "already_cleaned": already_cleaned,
+        "mount_cleanup_state": result.get("mount_cleanup_state"),
         "deleted_id": result.get("deleted_id"),
         "mount_cleanup_id": result.get("mount_cleanup_id"),
     }
